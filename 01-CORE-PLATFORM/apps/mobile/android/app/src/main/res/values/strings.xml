@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">کیف و کمربند کلاسیک</string>
+    <string name="title_activity_main">کیف و کمربند کلاسیک</string>
+    <string name="package_name">ir.majora.classicbag</string>
+    <string name="custom_url_scheme">ir.majora.classicbag</string>
+</resources>

@@ -1,0 +1,22 @@
+{
+  "name": "majora-merchant-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "prepare:brand": "node tooling/prepare-brand.mjs",
+    "dev": "npm run prepare:brand && npm run dev -w @majora/mobile",
+    "build": "npm run prepare:brand && npm run build -w @majora/mobile",
+    "test": "vitest run",
+    "typecheck": "tsc -b"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.4.3",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5"
+  }
+}

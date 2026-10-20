@@ -1,0 +1,4 @@
+{
+  "files": [],
+  "references": [{"path":"packages/domain"},{"path":"packages/database"},{"path":"apps/mobile"}]
+}
