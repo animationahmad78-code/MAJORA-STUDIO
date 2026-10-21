@@ -36,6 +36,14 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'ساخت Gradle شکست خورد.' }
   $apk = Join-Path (Get-Location).Path 'app/build/outputs/apk/debug/app-debug.apk'
   if (-not (Test-Path -LiteralPath $apk) -or (Get-Item -LiteralPath $apk).Length -eq 0) { throw 'APK خروجی پیدا نشد یا خالی است.' }
+  $buildTools = Join-Path $SdkRoot 'build-tools'
+  $apkSigner = Get-ChildItem -LiteralPath $buildTools -Recurse -File -Filter 'apksigner.bat' | Sort-Object FullName -Descending | Select-Object -First 1
+  $aapt = Get-ChildItem -LiteralPath $buildTools -Recurse -File -Filter 'aapt.exe' | Sort-Object FullName -Descending | Select-Object -First 1
+  if (-not $apkSigner -or -not $aapt) { throw 'ابزارهای رسمی apksigner و aapt در SDK پیدا نشدند.' }
+  & $apkSigner.FullName verify --verbose --print-certs $apk
+  if ($LASTEXITCODE -ne 0) { throw 'امضای APK تأیید نشد.' }
+  $packageLine = & $aapt.FullName dump badging $apk | Where-Object { $_ -like 'package:*' } | Select-Object -First 1
+  if ($LASTEXITCODE -ne 0 -or $packageLine -notmatch "name='ir.majora.classicbag'") { throw 'شناسهٔ APK با محصول سازگار نیست.' }
   $releaseDir = Join-Path $studio '06-BUILDS-AND-RELEASES/debug'
   New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
   $name = 'classicbag-debug-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.apk'

@@ -2,9 +2,9 @@
 
 ## وضعیت واقعی
 
-پروژهٔ native iOS با همان شناسهٔ موجود `ir.majora.classicbag` و Capacitor 8.5.3 در `01-CORE-PLATFORM/apps/mobile/ios` ایجاد و `cap sync ios` روی Windows موفق شد. افزونهٔ SQLite در `Package.swift` شناسایی شد. مسیر Windows تولیدشده در SPM با اسکریپت `sync:ios` به جداکنندهٔ قابل استفاده در macOS تبدیل می‌شود. اینها **اثبات کامپایل Xcode، اجرای iPhone یا تولید IPA نیستند**.
+پروژهٔ native iOS با همان شناسهٔ موجود `ir.majora.classicbag` و Capacitor 8.5.3 در `01-CORE-PLATFORM/apps/mobile/ios` ایجاد و `cap sync ios` روی Windows موفق شد. افزونهٔ SQLite در `Package.swift` شناسایی شد. مسیر Windows تولیدشده در SPM با اسکریپت `sync:ios` به جداکنندهٔ قابل استفاده در macOS تبدیل می‌شود. اجرای GitHub Actions شمارهٔ `39592246513` کامپایل **بدون امضای شبیه‌ساز** را با موفقیت گذراند. این هنوز اجرای iPhone یا تولید IPA نیست.
 
-Capacitor 8 برای ساخت iOS به macOS و Xcode 26 یا جدیدتر نیاز دارد. فایل `.github/workflows/ios-compile.yml` یک بررسی دستی روی runner `macos-26` برای ساخت **بدون امضای شبیه‌ساز** آماده می‌کند. سورس به مخزن خصوصی GitHub متصل شده، اما workflow هنوز اجرا نشده است.
+Capacitor 8 برای ساخت iOS به macOS و Xcode 26 یا جدیدتر نیاز دارد. فایل `.github/workflows/ios-compile.yml` بررسی دستی روی runner `macos-26` را اجرا کرد و موفق شد؛ لاگ این اجرا در Actions مخزن خصوصی باقی می‌ماند.
 
 ## دارایی‌های خصوصی در CI
 
