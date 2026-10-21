@@ -8,8 +8,12 @@ $core = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $studio = (Resolve-Path -LiteralPath (Join-Path $core '..')).Path
 $javaExe = Join-Path $JavaHome 'bin/java.exe'
 $androidJar = Join-Path $SdkRoot 'platforms/android-36/android.jar'
-if (-not (Test-Path -LiteralPath $javaExe)) { throw "Java 17 پیدا نشد: $javaExe" }
+if (-not (Test-Path -LiteralPath $javaExe)) { throw "Java 21 پیدا نشد: $javaExe" }
 if (-not (Test-Path -LiteralPath $androidJar)) { throw "Android SDK Platform 36 پیدا نشد: $androidJar" }
+$javaVersion = (& $javaExe -version 2>&1 | Select-Object -First 1) -join ''
+if ($LASTEXITCODE -ne 0 -or $javaVersion -notmatch '^(openjdk|java) version "21(?:[.+"]|$)') {
+  throw "Capacitor 8 به Java 21 نیاز دارد. نسخهٔ داده‌شده: $javaVersion"
+}
 
 $oldJava = $env:JAVA_HOME
 $oldAndroidHome = $env:ANDROID_HOME
