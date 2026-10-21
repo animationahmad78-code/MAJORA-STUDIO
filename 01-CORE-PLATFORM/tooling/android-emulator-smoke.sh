@@ -47,13 +47,21 @@ for attempt in $(seq 1 60); do
   sleep 2
 done
 adb shell run-as "$PACKAGE" ls -l "databases/$DB"
-adb exec-out run-as "$PACKAGE" cat "databases/$DB" > "$RUNNER_TEMP/$DB"
-if adb shell run-as "$PACKAGE" ls "databases/$DB-wal" >/dev/null 2>&1; then
-  adb exec-out run-as "$PACKAGE" cat "databases/$DB-wal" > "$RUNNER_TEMP/$DB-wal"
-fi
-
-test "$(sqlite3 "$RUNNER_TEMP/$DB" 'PRAGMA integrity_check;')" = ok
-test "$(sqlite3 "$RUNNER_TEMP/$DB" 'SELECT count(*) FROM sqlite_master WHERE type="table" AND name="invoice";')" = 1
-test "$(sqlite3 "$RUNNER_TEMP/$DB" 'SELECT count(*) FROM store WHERE id="classic-bag-belt";')" = 1
-test "$(sqlite3 "$RUNNER_TEMP/$DB" 'SELECT count(*) FROM template_version;')" -ge 1
-echo 'Android emulator smoke: app launched, SQLite integrity/store/template verified.'
+for attempt in $(seq 1 20); do
+  sleep 3
+  rm -f "$RUNNER_TEMP/$DB-wal" "$RUNNER_TEMP/$DB-shm"
+  adb exec-out run-as "$PACKAGE" cat "databases/$DB" > "$RUNNER_TEMP/$DB"
+  if adb shell run-as "$PACKAGE" ls "databases/$DB-wal" >/dev/null 2>&1; then
+    adb exec-out run-as "$PACKAGE" cat "databases/$DB-wal" > "$RUNNER_TEMP/$DB-wal"
+  fi
+  status=$(sqlite3 "$RUNNER_TEMP/$DB" "SELECT (SELECT count(*) FROM sqlite_master WHERE type='table' AND name='invoice'),(SELECT count(*) FROM store WHERE id='classic-bag-belt'),(SELECT count(*) FROM template_version);" 2>/dev/null || true)
+  if [[ "$status" =~ ^1\|1\|[1-9][0-9]*$ ]] && [[ $(sqlite3 "$RUNNER_TEMP/$DB" 'PRAGMA integrity_check;') == ok ]]; then
+    echo "Android emulator smoke passed after attempt $attempt: schema, store, template and integrity verified."
+    exit 0
+  fi
+done
+echo "Android emulator smoke failed: last database status was '${status:-unavailable}'." >&2
+adb shell run-as "$PACKAGE" ls -l databases >&2 || true
+ls -l "$RUNNER_TEMP/$DB"* >&2 || true
+adb logcat -d -t 400 | grep -E 'Capacitor|SQLite|majora|AndroidRuntime' | tail -100 >&2 || true
+exit 1
