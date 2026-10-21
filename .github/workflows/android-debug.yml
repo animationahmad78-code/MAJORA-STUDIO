@@ -1,0 +1,52 @@
+name: Android debug compile check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug-apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: 01-CORE-PLATFORM/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Restore private brand assets
+        env:
+          ASSET_URL: ${{ secrets.MAJORA_ASSET_URL }}
+          ASSET_SHA256: ${{ secrets.MAJORA_ASSET_SHA256 }}
+        run: |
+          set -euo pipefail
+          test -n "$ASSET_URL" && test -n "$ASSET_SHA256" || { echo 'Private brand asset URL and SHA-256 must be configured.'; exit 1; }
+          curl --fail --location --silent --show-error --retry 3 --output private-assets.zip "$ASSET_URL"
+          echo "$ASSET_SHA256  private-assets.zip" | sha256sum --check
+          unzip -q private-assets.zip
+          test -f 02-CLIENT-PROJECTS/classic-bag-belt/brand-config/store.json
+          test -f 02-CLIENT-PROJECTS/classic-bag-belt/original-assets/ClassicBag-mark.png
+      - name: Test, build and sync
+        working-directory: 01-CORE-PLATFORM
+        run: |
+          npm ci
+          npm test
+          npm run build
+          cd apps/mobile
+          npx cap sync android
+      - name: Build and verify debug APK
+        working-directory: 01-CORE-PLATFORM/apps/mobile/android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon assembleDebug
+          test -s app/build/outputs/apk/debug/app-debug.apk
+          sha256sum app/build/outputs/apk/debug/app-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: majora-classicbag-debug-qa
+          path: 01-CORE-PLATFORM/apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
