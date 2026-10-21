@@ -108,4 +108,30 @@ describe('SQLite operational records', () => {
     expect(sqlite.prepare('SELECT template_version_id FROM invoice_revision WHERE invoice_id=?').get('first')).toMatchObject({ template_version_id: first.templateVersionId });
     sqlite.close();
   });
+
+  it('edits a product, records price and stock changes, and keeps archived invoice history', async () => {
+    const { sqlite, repo } = memoryShop();
+    await repo.initialize('test');
+    await repo.addProduct({ id: 'bag', name: 'کیف', category: 'کیف', priceRial: 1000, stock: 5 });
+    const issued = await repo.issueInvoice('sale', 'مریم', [{ productId: 'bag', quantity: 1 }]);
+    await repo.updateProduct({ id: 'bag', name: 'کیف چرمی', category: 'چرم', priceRial: 1200, stock: 7 });
+    expect(await repo.listProducts('كيف چرمي')).toMatchObject([{ id: 'bag', category: 'چرم', priceRial: 1200, stock: 7 }]);
+    expect(sqlite.prepare('SELECT quantity_milli FROM stock_movement WHERE reason=?').get('adjustment')).toMatchObject({ quantity_milli: 3000 });
+    expect(sqlite.prepare('SELECT old_price_rial,new_price_rial FROM price_event WHERE reason=?').get('manual')).toMatchObject({ old_price_rial: 1000, new_price_rial: 1200 });
+    await repo.archiveProduct('bag');
+    expect(await repo.listProducts()).toEqual([]);
+    expect(await repo.listInvoices()).toEqual([issued]);
+    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM audit_event WHERE action=?').get('archive')).toMatchObject({ n: 1 });
+    sqlite.close();
+  });
+
+  it('rejects invalid product edits without writing a partial revision', async () => {
+    const { sqlite, repo } = memoryShop();
+    await repo.initialize('test');
+    await repo.addProduct({ id: 'bag', name: 'کیف', category: 'کیف', priceRial: 1000, stock: 1 });
+    await expect(repo.updateProduct({ id: 'bag', name: 'کیف جدید', category: 'چرم', priceRial: 1200, stock: -1 })).rejects.toThrow();
+    expect(await repo.listProducts()).toMatchObject([{ id: 'bag', name: 'کیف', priceRial: 1000, stock: 1 }]);
+    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM stock_movement WHERE reason=?').get('adjustment')).toMatchObject({ n: 0 });
+    sqlite.close();
+  });
 });

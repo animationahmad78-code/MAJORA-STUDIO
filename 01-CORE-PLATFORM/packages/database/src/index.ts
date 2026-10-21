@@ -79,6 +79,62 @@ export class ShopRepository {
     });
   }
 
+  async updateProduct(input: Product): Promise<void> {
+    assertRial(input.priceRial);
+    const name = input.name.trim();
+    const category = input.category.trim();
+    if (!name || !Number.isSafeInteger(input.stock) || input.stock < 0 || !Number.isSafeInteger(input.stock * 1000)) {
+      throw new Error('نام یا موجودی کالا نامعتبر است.');
+    }
+    await this.db.transaction(async () => {
+      const rows = await this.db.query<{ name: string; price_rial: number; quantity_milli: number; revision: number }>(
+        `SELECT p.name,p.price_rial,s.quantity_milli,p.revision FROM product p
+         JOIN stock_balance s ON s.product_id=p.id WHERE p.id=? AND p.store_id=? AND p.archived_at IS NULL`,
+        [input.id, this.storeId]
+      );
+      if (!rows.length) throw new Error('کالا پیدا نشد.');
+      const current = rows[0];
+      let categoryId: string | null = null;
+      if (category && category !== 'بدون دسته') {
+        const matches = await this.db.query<{ id: string }>('SELECT id FROM category WHERE store_id=? AND name=? AND archived_at IS NULL LIMIT 1', [this.storeId, category]);
+        categoryId = matches[0]?.id ?? crypto.randomUUID();
+        if (!matches.length) await this.db.run('INSERT INTO category(id,store_id,name) VALUES(?,?,?)', [categoryId, this.storeId, category]);
+      }
+      const at = new Date().toISOString();
+      const updated = await this.db.run(
+        `UPDATE product SET name=?,search_name=?,category_id=?,price_rial=?,updated_at=?,revision=revision+1
+         WHERE id=? AND store_id=? AND revision=? AND archived_at IS NULL`,
+        [name, normalizeSearch(name), categoryId, input.priceRial, at, input.id, this.storeId, current.revision]
+      );
+      if (updated.changes !== 1) throw new Error('کالا هم‌زمان تغییر کرده است.');
+      if (current.price_rial !== input.priceRial) {
+        const batchId = crypto.randomUUID();
+        await this.db.run('INSERT INTO price_batch(id,store_id,percent_basis_points,scope,created_at,actor) VALUES(?,?,?,?,?,?)', [batchId, this.storeId, 0, 'selected', at, 'owner']);
+        await this.db.run('INSERT INTO price_event(id,batch_id,product_id,old_price_rial,new_price_rial,reason,created_at) VALUES(?,?,?,?,?,?,?)', [crypto.randomUUID(), batchId, input.id, current.price_rial, input.priceRial, 'manual', at]);
+      }
+      const nextQuantity = input.stock * 1000;
+      const delta = nextQuantity - current.quantity_milli;
+      if (delta) {
+        const balance = await this.db.run('UPDATE stock_balance SET quantity_milli=? WHERE product_id=? AND quantity_milli=?', [nextQuantity, input.id, current.quantity_milli]);
+        if (balance.changes !== 1) throw new Error('موجودی هم‌زمان تغییر کرده است.');
+        await this.db.run('INSERT INTO stock_movement(id,product_id,quantity_milli,reason,created_at) VALUES(?,?,?,?,?)', [crypto.randomUUID(), input.id, delta, 'adjustment', at]);
+      }
+      await this.audit('product', input.id, 'update', {
+        previous: { name: current.name, priceRial: current.price_rial, stock: current.quantity_milli / 1000 },
+        next: { name, category, priceRial: input.priceRial, stock: input.stock }
+      }, at);
+    });
+  }
+
+  async archiveProduct(productId: string): Promise<void> {
+    await this.db.transaction(async () => {
+      const at = new Date().toISOString();
+      const result = await this.db.run('UPDATE product SET archived_at=?,updated_at=?,revision=revision+1 WHERE id=? AND store_id=? AND archived_at IS NULL', [at, at, productId, this.storeId]);
+      if (result.changes !== 1) throw new Error('کالای فعال پیدا نشد.');
+      await this.audit('product', productId, 'archive', {}, at);
+    });
+  }
+
   async updatePrice(productId: string, newPriceRial: number): Promise<void> {
     assertRial(newPriceRial);
     await this.db.transaction(async () => {
