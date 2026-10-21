@@ -21,6 +21,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      - name: Check emulator host
+        run: |
+          echo "Android SDK: $ANDROID_HOME"
+          ls -l "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
+          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
+          ls -l /dev/kvm
+          test -c /dev/kvm
       - name: Restore private brand assets
         env:
           GH_TOKEN: ${{ github.token }}
