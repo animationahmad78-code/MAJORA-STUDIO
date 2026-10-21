@@ -12,7 +12,7 @@
 
 ## وضعیت واقعی
 
-سند ورودی، دارایی‌ها و فونت‌ها ثبت شده‌اند. پروژهٔ Android با شناسهٔ `ir.majora.classicbag` ایجاد و با خروجی React همگام شده است. روی Android، کالا/قیمت/فاکتور/متن قالب به SQLite متصل‌اند؛ نسخهٔ مرورگری صرفاً نمایشی است. **APK هنوز ساخته نشده و اپ روی دستگاه آزموده نشده است**، چون Android SDK/JDK در بررسی این میزبان پیدا نشد. وضعیت جزئی در `REQUIREMENTS-TRACEABILITY.md` و `05-DOCUMENTATION/implementation-status.md` است.
+سند ورودی، دارایی‌ها و فونت‌ها ثبت شده‌اند. پروژه‌های Android و iOS با شناسهٔ `ir.majora.classicbag` از همین سورس همگام می‌شوند. روی دستگاه، کالا/قیمت/صدور و ابطال فاکتور/متن قالب به SQLite متصل‌اند؛ نسخهٔ مرورگری فقط پیش‌نمایش است. ۱۳ آزمون محلی، build وب، sync دو پلتفرم و اعتبارسنجی ۱۷ جدول گذرانده شده‌اند. **APK/IPA ساخته نشده و اپ روی دستگاه آزموده نشده است.** Java 17 آماده است؛ دریافت Android SDK در این میزبان قطع شد. مسیر ساخت ابری خصوصی آماده است اما هنوز به مخزن متصل و اجرا نشده. وضعیت جزئی در `PROJECT_AUDIT.md`، `REQUIREMENTS-TRACEABILITY.md` و `05-DOCUMENTATION/production-progress.md` است.
 
 ## اجرا برای توسعه
 
@@ -24,6 +24,7 @@ npm test
 npm run build
 cd apps/mobile
 npx cap sync android
+npm run sync:ios -w @majora/mobile
 ```
 
-ساخت APK پس از نصب Android Studio/JDK/SDK و پذیرش مجوزهای خود ابزار، از پوشهٔ `apps/mobile/android` انجام می‌شود. اسکریپت آماده‌سازی برند دارایی‌های خصوصی مشتری را به `apps/mobile/public/brand` کپی می‌کند؛ این پوشه در Git نادیده گرفته می‌شود. بستهٔ تحویل ZIP شامل منابع خصوصی است و باید فقط در اختیار افراد مجاز قرار گیرد. جزئیات و محدودیت‌ها در `DECISIONS.md` و `05-DOCUMENTATION` است.
+برای ساخت محلی Android از `tooling/build-android-debug.ps1` با مسیر واقعی Java و SDK استفاده کنید. مسیر دیگر workflow خصوصی `.github/workflows/android-debug.yml` است. اسکریپت آماده‌سازی برند دارایی‌های خصوصی مشتری را به `apps/mobile/public/brand` کپی می‌کند؛ این پوشه در Git نادیده گرفته می‌شود. بستهٔ خصوصی دارایی‌ها فقط باید در اختیار افراد مجاز قرار گیرد. الزامات و محدودیت‌ها در `05-DOCUMENTATION/android-build-readiness.md` و `05-DOCUMENTATION/ios-build-readiness.md` ثبت شده‌اند.

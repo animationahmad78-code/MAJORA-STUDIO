@@ -12,6 +12,7 @@ type EventRow = { id: string; batch_id: string; product_id: string; old_price_ri
 type BatchRow = { id: string; percent_basis_points: number; created_at: string; scope: string; source_batch_id: string | null; product_ids: string | null; undone_at: string | null };
 export type InvoiceInputLine = { productId?: string; name?: string; unitPriceRial?: number; quantity: number };
 export type InvoiceReceipt = { id: string; number: number; at: string; customerName: string; lines: { productId?: string; name: string; quantity: number; unitPriceRial: number; totalRial: number }[]; totalRial: number; templateVersionId?: string; templateFields?: Record<string, string> };
+export type InvoiceHistoryEntry = { receipt: InvoiceReceipt; status: 'issued' | 'void' };
 
 export function normalizeSearch(input: string): string {
   return input.normalize('NFKC').replace(/ي/g, 'ی').replace(/ك/g, 'ک').replace(/[\u200c\s]+/g, ' ').trim().toLocaleLowerCase('fa-IR');
@@ -212,8 +213,9 @@ export class ShopRepository {
     if (!requestId || !inputLines.length) throw new Error('فاکتور باید شناسه و دست‌کم یک ردیف داشته باشد.');
     if (inputLines.some(line => !Number.isSafeInteger(line.quantity) || line.quantity <= 0 || !Number.isSafeInteger(line.quantity * 1000))) throw new Error('تعداد کالا نامعتبر است.');
     return this.db.transaction(async () => {
-      const previous = await this.db.query<{ snapshot_json: string }>(`SELECT r.snapshot_json FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id
-        WHERE i.id=? AND i.store_id=? AND i.status='issued' AND r.revision_no=1`, [requestId, this.storeId]);
+      const previous = await this.db.query<{ snapshot_json: string; status: string }>(`SELECT r.snapshot_json,i.status FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id
+        WHERE i.id=? AND i.store_id=? AND r.revision_no=1`, [requestId, this.storeId]);
+      if (previous.length && previous[0].status !== 'issued') throw new Error('این شناسه به فاکتور باطل‌شده تعلق دارد.');
       if (previous.length) return JSON.parse(previous[0].snapshot_json) as InvoiceReceipt;
       const now = new Date().toISOString();
       const counter = await this.db.query<{ next_number: number }>('SELECT next_number FROM invoice_counter WHERE store_id=?', [this.storeId]);
@@ -271,6 +273,40 @@ export class ShopRepository {
     const rows = await this.db.query<{ snapshot_json: string }>(`SELECT r.snapshot_json FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id
       WHERE i.store_id=? AND i.status='issued' AND r.revision_no=i.current_revision ORDER BY i.invoice_number DESC`, [this.storeId]);
     return rows.map(row => JSON.parse(row.snapshot_json) as InvoiceReceipt);
+  }
+
+  async listInvoiceHistory(): Promise<InvoiceHistoryEntry[]> {
+    const rows = await this.db.query<{ snapshot_json: string; status: 'issued' | 'void' }>(
+      `SELECT r.snapshot_json,i.status FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id
+       WHERE i.store_id=? AND i.status IN ('issued','void') AND r.revision_no=i.current_revision
+       ORDER BY i.invoice_number DESC`, [this.storeId]);
+    return rows.map(row => ({ receipt: JSON.parse(row.snapshot_json) as InvoiceReceipt, status: row.status }));
+  }
+
+  async voidInvoice(invoiceId: string, reason: string): Promise<void> {
+    if (!reason.trim()) throw new Error('دلیل ابطال لازم است.');
+    await this.db.transaction(async () => {
+      const rows = await this.db.query<{ revision_id: string; status: string }>(
+        `SELECT r.id AS revision_id,i.status FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id
+         WHERE i.id=? AND i.store_id=? AND r.revision_no=i.current_revision`, [invoiceId, this.storeId]);
+      if (!rows.length || rows[0].status !== 'issued') throw new Error('فاکتور صادرشدهٔ فعال پیدا نشد.');
+      const revisionId = rows[0].revision_id;
+      const lines = await this.db.query<{ product_id: string | null; quantity_milli: number }>(
+        'SELECT product_id,quantity_milli FROM invoice_line WHERE invoice_revision_id=?', [revisionId]);
+      const at = new Date().toISOString();
+      for (const line of lines) {
+        if (!line.product_id) continue;
+        const balance = await this.db.run(
+          'UPDATE stock_balance SET quantity_milli=quantity_milli+? WHERE product_id=? AND quantity_milli<=?',
+          [line.quantity_milli, line.product_id, Number.MAX_SAFE_INTEGER - line.quantity_milli]);
+        if (balance.changes !== 1) throw new Error('بازگردانی موجودی ممکن نشد؛ ابطال لغو شد.');
+        await this.db.run('INSERT INTO stock_movement(id,product_id,quantity_milli,reason,invoice_revision_id,created_at) VALUES(?,?,?,?,?,?)',
+          [crypto.randomUUID(), line.product_id, line.quantity_milli, 'void', revisionId, at]);
+      }
+      const updated = await this.db.run("UPDATE invoice SET status='void' WHERE id=? AND store_id=? AND status='issued'", [invoiceId, this.storeId]);
+      if (updated.changes !== 1) throw new Error('وضعیت فاکتور هم‌زمان تغییر کرده است.');
+      await this.audit('invoice', invoiceId, 'void', { reason: reason.trim(), revisionId }, at);
+    });
   }
 
   private async audit(type: string, id: string, action: string, payload: object, at: string): Promise<void> {

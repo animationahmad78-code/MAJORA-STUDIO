@@ -134,4 +134,23 @@ describe('SQLite operational records', () => {
     expect(sqlite.prepare('SELECT COUNT(*) AS n FROM stock_movement WHERE reason=?').get('adjustment')).toMatchObject({ n: 0 });
     sqlite.close();
   });
+
+  it('voids an invoice once, restores stock atomically, and keeps its immutable history', async () => {
+    const { sqlite, repo } = memoryShop();
+    await repo.initialize('test');
+    await repo.addProduct({ id: 'bag', name: 'کیف', category: 'کیف', priceRial: 1000, stock: 3 });
+    const receipt = await repo.issueInvoice('sale', 'مریم', [{ productId: 'bag', quantity: 2 }, { name: 'بسته‌بندی', unitPriceRial: 100, quantity: 1 }]);
+    expect((await repo.listProducts())[0].stock).toBe(1);
+    await repo.voidInvoice(receipt.id, 'اشتباه در سفارش');
+    expect((await repo.listProducts())[0].stock).toBe(3);
+    expect(await repo.listInvoices()).toEqual([]);
+    expect(await repo.listInvoiceHistory()).toEqual([{ receipt, status: 'void' }]);
+    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM stock_movement WHERE reason=?').get('void')).toMatchObject({ n: 1 });
+    await expect(repo.voidInvoice(receipt.id, 'تکرار')).rejects.toThrow();
+    await expect(repo.issueInvoice(receipt.id, 'مریم', [{ productId: 'bag', quantity: 1 }])).rejects.toThrow('باطل‌شده');
+    expect((await repo.listProducts())[0].stock).toBe(3);
+    const next = await repo.issueInvoice('next', '', [{ productId: 'bag', quantity: 1 }]);
+    expect(next.number).toBe(2);
+    sqlite.close();
+  });
 });

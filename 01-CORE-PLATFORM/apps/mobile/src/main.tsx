@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { applyPriceIncrease, formatRial, parseRial, undoPriceBatch, type PriceBatch, type PriceEvent, type Product } from '@majora/domain';
-import { normalizeSearch, type InvoiceInputLine, type InvoiceReceipt, type ShopRepository } from '@majora/database';
+import { normalizeSearch, type InvoiceHistoryEntry, type InvoiceInputLine, type InvoiceReceipt, type ShopRepository } from '@majora/database';
 import { nativeDevice, openNativeShop } from './native-db';
 import './style.css';
 const majoraLogo = '/brand/majora-logo.png';
@@ -51,7 +51,8 @@ function App() {
   const [manualName, setManualName] = useState(''); const [manualPrice, setManualPrice] = useState('');
   const [draftLines, setDraftLines] = useState<InvoiceInputLine[]>([]);
   const [receipt, setReceipt] = useState<InvoiceReceipt | null>(null);
-  const [invoices, setInvoices] = useState<InvoiceReceipt[]>([]);
+  const [invoices, setInvoices] = useState<InvoiceHistoryEntry[]>([]);
+  const [invoiceSearch, setInvoiceSearch] = useState('');
   const [issuing, setIssuing] = useState(false);
   const [templateVersion, setTemplateVersion] = useState<number | null>(null);
   const requestId = useRef(crypto.randomUUID());
@@ -59,7 +60,7 @@ function App() {
   const booted = useRef(false);
   useEffect(() => { if (!nativeDevice || booted.current) return; booted.current = true; openNativeShop().then(async repo => {
     setRepository(repo);
-    const [products, history, savedInvoices] = await Promise.all([repo.listProducts(), repo.listPriceHistory(), repo.listInvoices()]);
+    const [products, history, savedInvoices] = await Promise.all([repo.listProducts(), repo.listPriceHistory(), repo.listInvoiceHistory()]);
     let template = await repo.loadTemplate();
     if (!template) { await repo.saveTemplate(templateFields(defaults)); template = await repo.loadTemplate(); }
     setData(current => applyTemplate({ ...current, products, batches: history.batches, events: history.events }, template?.fields ?? {}));
@@ -84,6 +85,11 @@ function App() {
   const displayTotal = receipt?.totalRial ?? draftTotal;
   const displayLines = receipt?.lines ?? draftDisplayLines;
   const displayData = receipt?.templateFields ? applyTemplate(data, receipt.templateFields) : data;
+  const selectedInvoiceStatus = invoices.find(entry => entry.receipt.id === receipt?.id)?.status;
+  const invoiceQuery = normalizeSearch(latinDigits(invoiceSearch.trim()));
+  const visibleInvoices = invoiceQuery ? invoices.filter(({ receipt: saved }) =>
+    normalizeSearch(latinDigits([saved.number, saved.customerName, saved.at, new Date(saved.at).toLocaleDateString('fa-IR'), ...saved.lines.map(line => line.name)].join(' '))).includes(invoiceQuery)
+  ) : invoices;
   const resetInvoicePreview = () => { setReceipt(null); setInvoiceNo('پیش‌نمایش'); };
   function newInvoice() {
     setReceipt(null); setInvoiceNo('پیش‌نمایش'); setCustomer(''); setDraftLines([]);
@@ -118,13 +124,24 @@ function App() {
       if (!draftLines.length) throw new Error('دست‌کم یک ردیف به فاکتور اضافه کنید.');
       const issued = await repository.issueInvoice(requestId.current, customer, draftLines);
       setReceipt(issued); setInvoiceNo(String(issued.number));
-      setInvoices(await repository.listInvoices());
+      setInvoices(await repository.listInvoiceHistory());
       await refreshNative(repository);
       requestId.current = crypto.randomUUID();
       setDraftLines([]);
       alert(`فاکتور شمارهٔ ${issued.number} ثبت شد.`);
     } catch (error) { alert((error as Error).message); }
     finally { issueLock.current = false; setIssuing(false); }
+  }
+  async function voidSelectedInvoice() {
+    if (!repository || !receipt || selectedInvoiceStatus !== 'issued') return;
+    const reason = window.prompt(`دلیل ابطال فاکتور شمارهٔ ${receipt.number} را وارد کنید. موجودی کالاهای آن بازگردانده می‌شود.`);
+    if (reason === null) return;
+    try {
+      await repository.voidInvoice(receipt.id, reason);
+      setInvoices(await repository.listInvoiceHistory());
+      await refreshNative(repository);
+      alert(`فاکتور شمارهٔ ${receipt.number} باطل شد. نسخهٔ اصلی در تاریخچه باقی ماند.`);
+    } catch (error) { alert((error as Error).message); }
   }
   function clearProductForm() { setEditingId(null); setName(''); setCategory(''); setPrice(''); setStock(''); }
   function startProductEdit(product: Product) {
@@ -189,8 +206,8 @@ function App() {
         <div className="section-heading"><div><span className="eyebrow">فروش و چاپ</span><h1>{receipt ? `فاکتور شمارهٔ ${receipt.number}` : 'فاکتور تازه'}</h1></div><div className="toolbar"><label><input type="checkbox" checked={mono} onChange={e=>setMono(e.target.checked)}/> سیاه‌وسفید</label><button className="primary" onClick={()=>window.print()} disabled={nativeDevice} title={nativeDevice ? 'اتصال چاپ بومی در دست ساخت است' : undefined}>چاپ / ذخیره PDF</button></div></div>
         <div className="invoice-layout">
           <section className="card controls">
-            <h2>{receipt ? 'سند ثبت‌شده' : 'ساخت فاکتور'}</h2>
-            {receipt ? <button onClick={newInvoice}>فاکتور تازه</button> : <>
+            <h2>{receipt ? (selectedInvoiceStatus === 'void' ? 'سند باطل‌شده' : 'سند ثبت‌شده') : 'ساخت فاکتور'}</h2>
+            {receipt ? <><button onClick={newInvoice}>فاکتور تازه</button>{nativeDevice && selectedInvoiceStatus === 'issued' && <button onClick={voidSelectedInvoice}>ابطال فاکتور و بازگردانی موجودی</button>}</> : <>
               <label>نام خریدار<input value={customer} onChange={e=>setCustomer(e.target.value)}/></label>
               <label>کالا یا ردیف دستی<select value={invoiceProduct} onChange={e=>setInvoiceProduct(e.target.value)}><option value="">انتخاب کالا</option>{active.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}<option value="__manual">ردیف دستی</option></select></label>
               {invoiceProduct==='__manual' && <><label>شرح ردیف<input value={manualName} onChange={e=>setManualName(e.target.value)}/></label><label>قیمت واحد به ریال<input inputMode="numeric" value={manualPrice} onChange={e=>setManualPrice(e.target.value)}/></label></>}
@@ -199,7 +216,7 @@ function App() {
               <div className="draft-lines" aria-label="ردیف‌های فاکتور">{draftDisplayLines.map((line,index)=><div className="draft-line" key={index}><span>{line.name} × {formatRial(line.quantity)}<small>{formatRial(line.totalRial)} ریال</small></span><button onClick={()=>setDraftLines(current=>current.filter((_,i)=>i!==index))} aria-label={`حذف ردیف ${line.name}`}>حذف</button></div>)}</div>
               {nativeDevice ? <><button className="primary" onClick={issue} disabled={!draftLines.length || issuing}>{issuing ? 'در حال ثبت…' : 'ثبت قطعی و کسر موجودی'}</button><p className="muted">شمارهٔ قطعی هنگام ثبت اختصاص می‌یابد. چاپ PDF بومی هنوز فعال نیست.</p></> : <p className="muted">این صفحه در مرورگر فقط پیش‌نمایش است؛ سند، شمارهٔ قطعی یا تغییر موجودی ثبت نمی‌کند.</p>}
             </>}
-            {nativeDevice && <><h3>فاکتورهای ثبت‌شده</h3><div className="saved-invoices">{invoices.map(saved=><button key={saved.id} onClick={()=>{setReceipt(saved);setInvoiceNo(String(saved.number));}}>{`شمارهٔ ${saved.number} · ${saved.customerName || 'خریدار حضوری'} · ${formatRial(saved.totalRial)} ریال`}</button>)}</div></>}
+            {nativeDevice && <><h3>تاریخچهٔ فاکتورها</h3><label>جست‌وجوی شماره، خریدار، کالا یا تاریخ<input value={invoiceSearch} onChange={event => setInvoiceSearch(event.target.value)} placeholder="شماره یا نام یا تاریخ"/></label><div className="saved-invoices">{visibleInvoices.map(entry=><button key={entry.receipt.id} onClick={()=>{setReceipt(entry.receipt);setInvoiceNo(String(entry.receipt.number));}}>{`شمارهٔ ${entry.receipt.number} · ${entry.status === 'void' ? 'باطل‌شده' : 'صادرشده'} · ${entry.receipt.customerName || 'خریدار حضوری'} · ${formatRial(entry.receipt.totalRial)} ریال`}</button>)}{!visibleInvoices.length && <p className="empty">فاکتوری پیدا نشد.</p>}</div></>}
           </section>
           <section className={`invoice ${mono?'mono':''}`} aria-label="پیش‌نمایش فاکتور"><div className="invoice-top"><img src={storeLogo} alt="نشان فروشگاه"/><div><h2>{displayData.storeName}</h2><strong>{displayData.slogan}</strong><p>{displayData.phone}<br/>{displayData.address}</p></div></div><div className="invoice-cardline">شماره کارت <b dir="ltr">{displayData.card}</b> · {displayData.cardHolder}</div><div className="invoice-note">{displayData.note}</div><div className="invoice-meta"><span>شماره فاکتور: <b>{invoiceNo}</b></span><span>تاریخ: <b>{new Date(receipt?.at ?? Date.now()).toLocaleDateString('fa-IR')}</b></span><span>خریدار: <b>{receipt?.customerName || customer || '—'}</b></span></div><table><thead><tr><th>ردیف</th><th>شرح کالا</th><th>تعداد</th><th>فی (ریال)</th><th>مبلغ کل (ریال)</th></tr></thead><tbody>{displayLines.length ? displayLines.map((line,index)=><tr key={index}><td>{formatRial(index+1)}</td><td>{line.name}</td><td>{formatRial(line.quantity)}</td><td>{formatRial(line.unitPriceRial)}</td><td>{formatRial(line.totalRial)}</td></tr>) : <tr><td colSpan={5}>کالا انتخاب نشده است</td></tr>}</tbody></table><div className="invoice-bottom"><div className="invoice-terms"><h3>شرایط فروش و تحویل کالا</h3><ol>{displayData.conditions.map((c,i)=><li key={i}>{c}</li>)}</ol></div><div className="invoice-totals"><div>جمع کل <b>{formatRial(displayTotal)}</b></div><div>مبلغ نهایی <b>{formatRial(displayTotal)} ریال</b></div><div className="signatures"><span>امضای خریدار</span><span>امضای فروشنده</span></div></div></div></section>
         </div>
