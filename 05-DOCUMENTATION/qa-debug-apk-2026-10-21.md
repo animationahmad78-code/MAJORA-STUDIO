@@ -2,12 +2,13 @@
 
 ## فایل واقعی
 
-- نوع: Debug APK مخصوص آزمون، ساخته‌شده از commit `ca6839e`.
-- مسیر: `06-BUILDS-AND-RELEASES/debug/classicbag-debug-verified-run-39599628878.apk`.
+- نوع: Debug APK مخصوص آزمون، ساخته‌شده از commit `5e86a42` مخزن عمومی یکپارچه.
+- مسیر: `06-BUILDS-AND-RELEASES/debug/classicbag-debug-public-run-39604932820.apk`.
 - اندازه: ۱۵٬۹۶۶٬۹۰۹ بایت.
-- SHA-256: `BC28082AE5BDFCE3E92E6DA6C458B24073800EA2FD4D19ED86810070781ECD55`.
-- اجرای GitHub Actions: `https://github.com/animationahmad78-code/MAJORA-STUDIO/actions/runs/39599628878`؛ artifact شمارهٔ `12345138199`.
-- ZIP اصلی artifact با digest گزارش‌شدهٔ GitHub `8F555DBA8073F962817B82D2BC13D5346EAB20A34A2D49FC37C396CA86B1E330` تطبیق داده شد. پس از استخراج، هش APK با SHA چاپ‌شده در لاگ Gradle برابر بود.
+- SHA-256: `DDA832A6F8549D45F58A8C808B3D652BE57A8B9A7CB65F2D9610EB4BAF75C91B`.
+- دریافت عمومی: `https://github.com/animationahmad78-code/MAJORA-STUDIO/releases/download/qa-debug-2026-10-21/classicbag-debug-qa-2026-10-21.apk`؛ برچسب GitHub «Pre-release / QA only» است.
+- اجرای GitHub Actions: `https://github.com/animationahmad78-code/MAJORA-STUDIO/actions/runs/39604932820`؛ artifact شمارهٔ `12348351528`.
+- ZIP اصلی artifact با digest گزارش‌شدهٔ GitHub `495F998847AC607F04B65C5603076F9A1D200BA3D69C4F98B10FC43CD32B4669` تطبیق داده شد. پس از استخراج، هش APK با SHA چاپ‌شده در لاگ Gradle و digest فایل Release برابر بود.
 
 ## شواهد ساخت
 
@@ -15,6 +16,7 @@
 - `apksigner verify --verbose` امضای APK Signature Scheme v2 را تأیید کرد. امضای JAR v1 موجود نیست؛ حداقل نسخهٔ Android برنامه API 24 است.
 - `aapt dump badging`: شناسهٔ `ir.majora.classicbag`، `versionCode=1`، `versionName=1.0` و `compileSdkVersion=36`.
 - ساختار فایل شامل `AndroidManifest.xml`، `classes.dex`، فایل HTML برنامه، دو لوگو و فونت Estedad است.
+- اجرای شبیه‌ساز Android شمارهٔ `39605734735` نصب و بازشدن برنامه، سلامت SQLite، وجود جدول فاکتور، رکورد فروشگاه و نسخهٔ قالب را تأیید کرد. این آزمون ثبت کالا یا فاکتور روی گوشی واقعی را پوشش نمی‌دهد.
 - اجرای iOS شمارهٔ `39592246513` آزمون‌ها، build مشترک، sync و کامپایل بدون امضای شبیه‌ساز را با موفقیت گذراند. IPA امضاشده تولید نشده است.
 
 ## نصب و آزمون روی گوشی
