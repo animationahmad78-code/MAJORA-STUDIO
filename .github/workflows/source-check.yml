@@ -1,0 +1,29 @@
+name: Public source checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: 01-CORE-PLATFORM/package-lock.json
+      - name: Test source and database schema
+        working-directory: 01-CORE-PLATFORM
+        run: |
+          npm ci
+          npm test
+          npm run typecheck
+          python tooling/validate_schema.py

@@ -7,6 +7,7 @@
 - اندازه: ۱۵٬۹۶۶٬۹۰۹ بایت.
 - SHA-256: `BC28082AE5BDFCE3E92E6DA6C458B24073800EA2FD4D19ED86810070781ECD55`.
 - اجرای GitHub Actions: `https://github.com/animationahmad78-code/MAJORA-STUDIO/actions/runs/39599628878`؛ artifact شمارهٔ `12345138199`.
+- پس از جداسازی دارایی‌ها برای عمومی‌شدن کد، همین APK با همان SHA-256 به prerelease خصوصی `https://github.com/animationahmad78-code/MAJORA-PRIVATE-BUILDS/releases/tag/qa-debug-v1` منتقل شد. دریافت از این صفحه نیازمند دسترسی مخزن خصوصی است.
 - ZIP اصلی artifact با digest گزارش‌شدهٔ GitHub `8F555DBA8073F962817B82D2BC13D5346EAB20A34A2D49FC37C396CA86B1E330` تطبیق داده شد. پس از استخراج، هش APK با SHA چاپ‌شده در لاگ Gradle برابر بود.
 
 ## شواهد ساخت

@@ -6,6 +6,7 @@ PACKAGE=ir.majora.classicbag
 DB=majora_shopSQLite.db
 SDK_MANAGER="${ANDROID_HOME:?ANDROID_HOME is missing}/cmdline-tools/latest/bin/sdkmanager"
 AVD_MANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
+export PATH="$ANDROID_HOME/platform-tools:$PATH"
 IMAGE='system-images;android-35;default;x86_64'
 
 test -s "$APK_PATH"
