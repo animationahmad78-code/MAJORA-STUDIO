@@ -4,15 +4,11 @@
 
 پروژهٔ native iOS با همان شناسهٔ موجود `ir.majora.classicbag` و Capacitor 8.5.3 در `01-CORE-PLATFORM/apps/mobile/ios` ایجاد و `cap sync ios` روی Windows موفق شد. افزونهٔ SQLite در `Package.swift` شناسایی شد. مسیر Windows تولیدشده در SPM با اسکریپت `sync:ios` به جداکنندهٔ قابل استفاده در macOS تبدیل می‌شود. اجرای GitHub Actions شمارهٔ `39592246513` کامپایل **بدون امضای شبیه‌ساز** را با موفقیت گذراند. این هنوز اجرای iPhone یا تولید IPA نیست.
 
-Capacitor 8 برای ساخت iOS به macOS و Xcode 26 یا جدیدتر نیاز دارد. workflow اولیهٔ `ios-compile.yml` بررسی دستی روی runner `macos-26` را اجرا کرد و موفق شد. ادامهٔ build برنددار در مخزن خصوصی `MAJORA-PRIVATE-BUILDS` انجام می‌شود.
+Capacitor 8 برای ساخت iOS به macOS و Xcode 26 یا جدیدتر نیاز دارد. workflow `.github/workflows/ios-compile.yml` بررسی دستی روی runner `macos-26` را اجرا کرد و موفق شد. ساخت بعدی از همین مخزن عمومی انجام می‌شود.
 
-## دارایی‌های خصوصی در CI
+## دارایی‌های برند در CI
 
-دارایی‌های اصلی و فونت‌ها عمداً در تاریخچهٔ مخزن کد نیستند. ZIP خصوصی با همان هش در prerelease داخلی `private-assets-v1` مخزن جداگانهٔ خصوصی `MAJORA-PRIVATE-BUILDS` قرار دارد. workflowهای همان مخزن با `GITHUB_TOKEN` دارای دسترسی خواندن، آن را دریافت و هش ثابت را پیش از استخراج بررسی می‌کنند. مخزن کد عمومی فاقد این بسته است.
-
-ZIP شامل `00-COMPANY/brand-assets/IMG_1137.PNG`، `02-CLIENT-PROJECTS/classic-bag-belt/original-assets/ClassicBag-mark.png`، `02-CLIENT-PROJECTS/classic-bag-belt/design-system/fonts/Estedad-*.woff2` و `02-CLIENT-PROJECTS/classic-bag-belt/brand-config/store.json` با همین مسیرهاست. فایل ZIP و اطلاعات فروشگاه در commit قرار نگرفته‌اند.
-
-بستهٔ خصوصی فعلی در `07-BACKUPS/ios-private-assets-2026-10-21.zip` با ۷ فایل و ۲٬۱۵۵٬۳۷۵ بایت ساخته و فهرست آن بررسی شد. SHA-256 آن `1FEBB3ED436FFAA7C3BFD0545313A57B86999F8634E40FB77D3E96CD6F59DB3D` است. GitHub پس از بارگذاری در مخزن خصوصی ساخت، همین اندازه و digest را گزارش کرد.
+طبق تصمیم صریح مالک، لوگوها، مرجع فاکتور، چهار وزن Estedad و تنظیمات عمومی فروشگاه در همین مخزن نسخه‌بندی می‌شوند. `prepare-brand.mjs` فایل‌های اصلی را دست‌نخورده به خروجی build کپی می‌کند. سابقهٔ پشتیبان ZIP در `07-BACKUPS/ios-private-assets-2026-10-21.zip` باقی می‌ماند ولی build به آن وابسته نیست. منشأ دقیق چهار باینری فونت برای انتشار تجاری هنوز در `open-questions.md` باز است.
 
 ## گیت‌های بعدی
 
@@ -23,7 +19,7 @@ ZIP شامل `00-COMPANY/brand-assets/IMG_1137.PNG`، `02-CLIENT-PROJECTS/classi
 
 ## روش محلی روی macOS
 
-با پوشهٔ کامل پروژه و دارایی‌های خصوصی در مسیرهای بالا، در ریشهٔ `01-CORE-PLATFORM` اجرا شود:
+از checkout کامل همین مخزن، در ریشهٔ `01-CORE-PLATFORM` اجرا شود:
 
 ```sh
 npm ci

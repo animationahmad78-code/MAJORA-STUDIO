@@ -1,0 +1,15 @@
+{
+  "slug": "classic-bag-belt",
+  "appId": "ir.majora.classicbag",
+  "name": "کیف و کمربند کلاسیک",
+  "slogan": "استایل کامل از کیف و کمربند",
+  "phones": ["051-33662794", "051-33662795", "0910-500-3669"],
+  "address": "مشهد، بلوار مصلی، بازار مولوی، فاز یک، طبقه فوقانی، پلاک ۱۴۰ و ۱۴۱",
+  "cardNumber": "6219861034642404",
+  "cardHolder": "رضا ابراهیم زاده",
+  "receiptNoteOriginal": "حتما فیش واریزی را به شماره همراه فوق در پیامک ویا فضای مجازی ارسال بفرمایید.",
+  "logoSource": "../original-assets/ClassicBag-mark.png",
+  "style": { "primary": "#0B2B53", "accent": "#C89439", "background": "#F8FAFC" },
+  "support": { "phone1": "0910-579-6971", "phone2": "0901-999-0440", "instagram": "majora_app", "telegramEnabled": false },
+  "approval": { "logos": "user confirmed for prototype", "saleTerms": "user confirmed for prototype", "telegram": "omit by user request" }
+}

@@ -1,0 +1,51 @@
+name: Android debug compile check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  debug-apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: 01-CORE-PLATFORM/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Test, build and sync
+        working-directory: 01-CORE-PLATFORM
+        run: |
+          npm ci
+          npm test
+          npm run build
+          cd apps/mobile
+          npx cap sync android
+      - name: Build and verify debug APK
+        working-directory: 01-CORE-PLATFORM/apps/mobile/android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon assembleDebug
+          test -s app/build/outputs/apk/debug/app-debug.apk
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -name apksigner | sort -V | tail -n 1)
+          AAPT=$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -name aapt | sort -V | tail -n 1)
+          test -n "$APKSIGNER" && test -n "$AAPT"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          PACKAGE_INFO=$("$AAPT" dump badging "$APK" | grep '^package:')
+          echo "$PACKAGE_INFO"
+          echo "$PACKAGE_INFO" | grep -F "name='ir.majora.classicbag'"
+          sha256sum app/build/outputs/apk/debug/app-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: majora-classicbag-debug-qa
+          path: 01-CORE-PLATFORM/apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

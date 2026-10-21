@@ -1,0 +1,33 @@
+name: iOS compile check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  simulator-build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: 01-CORE-PLATFORM/package-lock.json
+      - name: Test and build shared source
+        working-directory: 01-CORE-PLATFORM
+        run: |
+          npm ci
+          npm test
+          npm run build
+          npm run sync:ios -w @majora/mobile
+      - name: Compile iOS simulator without signing
+        working-directory: 01-CORE-PLATFORM/apps/mobile
+        run: |
+          xcodebuild -project ios/App/App.xcodeproj \
+            -scheme App -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build

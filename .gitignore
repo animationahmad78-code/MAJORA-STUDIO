@@ -15,12 +15,8 @@
 01-CORE-PLATFORM/apps/mobile/public/brand/
 01-CORE-PLATFORM/apps/mobile/android/app/src/main/assets/public/
 01-CORE-PLATFORM/apps/mobile/android/app/src/main/res/drawable-nodpi/classicbag_mark.png
-02-CLIENT-PROJECTS/*/original-assets/
 02-CLIENT-PROJECTS/*/client-brief/
-02-CLIENT-PROJECTS/*/brand-config/store.json
-02-CLIENT-PROJECTS/*/design-system/fonts/
 02-CLIENT-PROJECTS/*/test-data/
 02-CLIENT-PROJECTS/*/releases/
-00-COMPANY/brand-assets/
 06-BUILDS-AND-RELEASES/
 07-BACKUPS/

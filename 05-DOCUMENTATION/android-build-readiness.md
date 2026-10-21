@@ -4,6 +4,6 @@
 
 `01-CORE-PLATFORM/tooling/build-android-debug.ps1` مسیرهای واقعی Java و SDK را به عنوان ورودی می‌گیرد؛ قبل از ساخت، نسخهٔ Java 21 و وجود Platform 36 را بررسی می‌کند. پس از موفقیت تست، build وب، sync و Gradle، APK را فقط در `06-BUILDS-AND-RELEASES/debug/` کپی می‌کند و SHA-256 چاپ می‌کند. اگر هر مرحله شکست بخورد، خروجی موفق ادعا نمی‌کند.
 
-workflow اولیهٔ `android-debug.yml` روی runner `ubuntu-24.04` با Java 21، Android SDK Platform 36 و Build Tools اجرا شد. اجرای شمارهٔ `39599628878`، آزمون‌ها، build، sync، Gradle، اعتبارسنجی امضای v2 با `apksigner` و شناسهٔ بسته با `aapt` را گذراند. APK استخراج‌شده با هش ثبت‌شده در CI برابر است. برای عمومی‌شدن کد، بستهٔ خصوصی دارایی‌ها و workflow ساخت برنددار به مخزن خصوصی `MAJORA-PRIVATE-BUILDS` منتقل شدند؛ نسخهٔ کد عمومی فقط آزمون سورس را اجرا می‌کند. این فایل **Debug APK برای QA** است.
+`.github/workflows/android-debug.yml` روی runner `ubuntu-24.04` با Java 21، Android SDK Platform 36 و Build Tools اجرا می‌شود. اجرای شمارهٔ `39599628878`، آزمون‌ها، build، sync، Gradle، اعتبارسنجی امضای v2 با `apksigner` و شناسهٔ بسته با `aapt` را گذراند. APK استخراج‌شده با هش ثبت‌شده در CI برابر است. بنا به تصمیم مالک، فایل‌های برند و workflow ساخت در همین مخزن عمومی‌اند و ساخت بعدی به مخزن دوم وابسته نیست. این فایل **Debug APK برای QA** است.
 
 گیت‌های باقی‌مانده: نصب روی گوشی، آزمون SQLite آفلاین و ارتقا، چاپ/بازگردانی، رفع قابلیت‌های ناقص، سپس امضای Release با keystore اختصاصی خارج از سورس. تا گذر از این گیت‌ها، نسخهٔ قابل فروش تأیید نشده است.
