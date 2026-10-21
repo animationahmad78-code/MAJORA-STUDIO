@@ -2,6 +2,7 @@ import { Capacitor } from '@capacitor/core';
 import { CapacitorSQLite, SQLiteConnection, type SQLiteDBConnection } from '@capacitor-community/sqlite';
 import { ShopRepository, type SqlPort, type SqlValue } from '@majora/database';
 import schema from '../../../packages/database/migrations/001_init.sql?raw';
+import productDetailMigration from '../../../packages/database/migrations/002_product_detail.sql?raw';
 
 export const nativeDevice = Capacitor.isNativePlatform();
 let pending: Promise<ShopRepository> | undefined;
@@ -31,6 +32,8 @@ export function openNativeShop(): Promise<ShopRepository> {
     await connection.open();
     const port = new NativePort(connection);
     await port.execute(schema);
+    const applied = await port.query<{ version: number }>('SELECT version FROM schema_migrations WHERE version=2');
+    if (!applied.length) await port.transaction(async () => { await port.execute(productDetailMigration); });
     const repo = new ShopRepository(port);
     await repo.initialize('کیف و کمربند کلاسیک');
     return repo;

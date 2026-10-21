@@ -1,4 +1,4 @@
-export type Product = { id: string; name: string; category: string; priceRial: number; stock: number; archived?: boolean };
+export type Product = { id: string; name: string; category: string; model?: string; color?: string; imagePath?: string; priceRial: number; stock: number; archived?: boolean };
 export type PriceEvent = { id: string; batchId: string; productId: string; oldPriceRial: number; newPriceRial: number; at: string; kind: 'raise' | 'undo' };
 export type PriceBatch = { id: string; percentBasisPoints: number; at: string; productIds: string[]; sourceBatchId?: string; undoneAt?: string };
 

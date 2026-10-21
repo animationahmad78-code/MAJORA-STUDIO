@@ -1,13 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
-import { ShopRepository, type SqlPort, type SqlValue } from '../packages/database/src/index';
+import { isValidJalaliDate, ShopRepository, type SqlPort, type SqlValue } from '../packages/database/src/index';
 
 function memoryShop() {
   const sqlite = new DatabaseSync(':memory:');
   const migration = readFileSync(new URL('../packages/database/migrations/001_init.sql', import.meta.url), 'utf8');
+  const detailMigration = readFileSync(new URL('../packages/database/migrations/002_product_detail.sql', import.meta.url), 'utf8');
   sqlite.exec(migration);
   sqlite.exec(migration); // Starting the app again must not destroy or reject an existing database.
+  sqlite.exec(detailMigration);
   const port: SqlPort = {
     async execute(sql) { sqlite.exec(sql); },
     async run(sql, values: SqlValue[] = []) {
@@ -27,6 +29,36 @@ function memoryShop() {
 }
 
 describe('SQLite operational records', () => {
+  it('rejects impossible manual Jalali dates before issuing an invoice', () => {
+    expect(isValidJalaliDate('۱۴۰۵/۰۷/۲۹')).toBe(true);
+    expect(isValidJalaliDate('۱۴۰۵/۱۲/۳۱')).toBe(false);
+    expect(isValidJalaliDate('۱۴۰۵/۱۳/۰۱')).toBe(false);
+  });
+  it('upgrades a populated v1 database to v2 without changing existing rows', () => {
+    const sqlite = new DatabaseSync(':memory:');
+    const v1 = readFileSync(new URL('../packages/database/migrations/001_init.sql', import.meta.url), 'utf8');
+    const v2 = readFileSync(new URL('../packages/database/migrations/002_product_detail.sql', import.meta.url), 'utf8');
+    sqlite.exec(v1);
+    sqlite.prepare('INSERT INTO store(id,name,created_at) VALUES(?,?,?)').run('classic-bag-belt', 'کلاسیک', '2026-01-01');
+    sqlite.prepare('INSERT INTO product(id,store_id,name,search_name,price_rial,created_at,updated_at) VALUES(?,?,?,?,?,?,?)').run('old-bag', 'classic-bag-belt', 'کیف قدیمی', 'کیف قدیمی', 1000, '2026-01-01', '2026-01-01');
+    sqlite.exec(v2);
+    sqlite.exec(v1);
+    expect(sqlite.prepare('SELECT name,price_rial,model,color FROM product WHERE id=?').get('old-bag')).toMatchObject({ name: 'کیف قدیمی', price_rial: 1000, model: null, color: null });
+    expect(sqlite.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([{ version: 1 }, { version: 2 }]);
+    sqlite.close();
+  });
+  it('migrates an existing catalog and stores model, color, image reference and customer contact', async () => {
+    const { sqlite, repo } = memoryShop();
+    await repo.initialize('test');
+    await repo.addProduct({ id: 'bag', name: 'کیف چرمی', category: 'کیف/دستی', model: 'M12', color: 'قهوه‌ای', imagePath: 'product-images/bag.jpg', priceRial: 900000, stock: 2 });
+    expect(await repo.listProducts('M12')).toMatchObject([{ model: 'M12', color: 'قهوه‌ای', imagePath: 'product-images/bag.jpg' }]);
+    const first = await repo.issueInvoice('customer-1', 'سارا رضایی', [{ productId: 'bag', quantity: 1 }], '09123456789', '۱۴۰۵/۰۷/۲۹', 'سارا', 'رضایی', false);
+    expect(first).toMatchObject({ customerPhone: '09123456789', dateJalali: '۱۴۰۵/۰۷/۲۹', showCardNumber: false });
+    expect(sqlite.prepare('SELECT phone FROM customer WHERE id=(SELECT customer_id FROM invoice WHERE id=?)').get('customer-1')).toMatchObject({ phone: '09123456789' });
+    expect(await repo.listCustomers('رضایی')).toMatchObject([{ firstName: 'سارا', lastName: 'رضایی', invoiceCount: 1 }]);
+    expect((await repo.listCustomerInvoices((await repo.listCustomers())[0].id)).map(entry => entry.receipt.number)).toEqual([1]);
+    sqlite.close();
+  });
   it('persists products, the stock opening and exact bulk price history', async () => {
     const { sqlite, repo } = memoryShop();
     await repo.initialize('کیف و کمربند کلاسیک');

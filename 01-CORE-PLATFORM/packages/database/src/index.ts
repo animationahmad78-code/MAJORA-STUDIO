@@ -7,15 +7,32 @@ export interface SqlPort {
   query<T>(sql: string, values?: SqlValue[]): Promise<T[]>;
   transaction<T>(work: () => Promise<T>): Promise<T>;
 }
-type ProductRow = { id: string; name: string; category: string | null; price_rial: number; quantity_milli: number; archived_at: string | null };
+type ProductRow = { id: string; name: string; category: string | null; model: string | null; color: string | null; image_path: string | null; price_rial: number; quantity_milli: number; archived_at: string | null };
 type EventRow = { id: string; batch_id: string; product_id: string; old_price_rial: number; new_price_rial: number; created_at: string; reason: string };
 type BatchRow = { id: string; percent_basis_points: number; created_at: string; scope: string; source_batch_id: string | null; product_ids: string | null; undone_at: string | null };
 export type InvoiceInputLine = { productId?: string; name?: string; unitPriceRial?: number; quantity: number };
-export type InvoiceReceipt = { id: string; number: number; at: string; customerName: string; lines: { productId?: string; name: string; quantity: number; unitPriceRial: number; totalRial: number }[]; totalRial: number; templateVersionId?: string; templateFields?: Record<string, string> };
+export type InvoiceReceipt = { id: string; number: number; at: string; dateJalali?: string; customerName: string; customerPhone?: string; showCardNumber?: boolean; lines: { productId?: string; name: string; model?: string; color?: string; quantity: number; unitPriceRial: number; totalRial: number }[]; totalRial: number; templateVersionId?: string; templateFields?: Record<string, string> };
 export type InvoiceHistoryEntry = { receipt: InvoiceReceipt; status: 'issued' | 'void' };
+export type CustomerSummary = { id: string; name: string; firstName: string; lastName: string; phone: string; invoiceCount: number; lastPurchaseAt: string | null };
 
 export function normalizeSearch(input: string): string {
   return input.normalize('NFKC').replace(/ي/g, 'ی').replace(/ك/g, 'ک').replace(/[\u200c\s]+/g, ' ').trim().toLocaleLowerCase('fa-IR');
+}
+
+export function isValidJalaliDate(input: string): boolean {
+  const normalized = input.replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 1776)).replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 1632));
+  const match = /^(\d{4})\/(\d{1,2})\/(\d{1,2})$/.exec(normalized);
+  if (!match) return false;
+  const [year, month, day] = match.slice(1).map(Number);
+  if (year < 1200 || year > 1600 || month < 1 || month > 12 || day < 1 || day > 31) return false;
+  const formatter = new Intl.DateTimeFormat('en-US-u-ca-persian', { timeZone: 'UTC', year: 'numeric', month: 'numeric', day: 'numeric' });
+  const start = Date.UTC(year + 621, 2, 15);
+  for (let offset = 0; offset < 375; offset++) {
+    const parts = formatter.formatToParts(new Date(start + offset * 86_400_000));
+    const value = Object.fromEntries(parts.map(part => [part.type, part.value]));
+    if (Number(value.year) === year && Number(value.month) === month && Number(value.day) === day) return true;
+  }
+  return false;
 }
 
 export class ShopRepository {
@@ -54,11 +71,11 @@ export class ShopRepository {
 
   async listProducts(search = ''): Promise<Product[]> {
     const normalized = normalizeSearch(search);
-    const rows = await this.db.query<ProductRow>(`SELECT p.id,p.name,COALESCE(c.name,'بدون دسته') AS category,p.price_rial,
+    const rows = await this.db.query<ProductRow>(`SELECT p.id,p.name,COALESCE(c.name,'بدون دسته') AS category,p.model,p.color,p.image_path,p.price_rial,
       COALESCE(s.quantity_milli,0) AS quantity_milli,p.archived_at FROM product p
       LEFT JOIN category c ON c.id=p.category_id LEFT JOIN stock_balance s ON s.product_id=p.id
       WHERE p.store_id=? AND p.archived_at IS NULL AND p.search_name LIKE ? ORDER BY p.updated_at DESC`, [this.storeId, `%${normalized}%`]);
-    return rows.map(r => ({ id: r.id, name: r.name, category: r.category ?? 'بدون دسته', priceRial: r.price_rial, stock: r.quantity_milli / 1000 }));
+    return rows.map(r => ({ id: r.id, name: r.name, category: r.category ?? 'بدون دسته', model: r.model ?? '', color: r.color ?? '', imagePath: r.image_path ?? undefined, priceRial: r.price_rial, stock: r.quantity_milli / 1000 }));
   }
 
   async addProduct(input: Product): Promise<void> {
@@ -72,8 +89,8 @@ export class ShopRepository {
         categoryId = existing[0]?.id ?? crypto.randomUUID();
         if (!existing.length) await this.db.run('INSERT INTO category(id,store_id,name) VALUES(?,?,?)', [categoryId, this.storeId, input.category.trim()]);
       }
-      await this.db.run(`INSERT INTO product(id,store_id,category_id,name,search_name,price_rial,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?)`, [input.id, this.storeId, categoryId, input.name.trim(), normalizeSearch(input.name), input.priceRial, now, now]);
+      await this.db.run(`INSERT INTO product(id,store_id,category_id,name,search_name,model,color,image_path,price_rial,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)`, [input.id, this.storeId, categoryId, input.name.trim(), normalizeSearch(`${input.name} ${input.model ?? ''} ${input.color ?? ''}`), input.model?.trim() ?? '', input.color?.trim() ?? '', input.imagePath ?? null, input.priceRial, now, now]);
       await this.db.run('INSERT INTO stock_balance(product_id,quantity_milli) VALUES(?,?)', [input.id, input.stock * 1000]);
       if (input.stock > 0) await this.db.run('INSERT INTO stock_movement(id,product_id,quantity_milli,reason,created_at) VALUES(?,?,?,?,?)', [crypto.randomUUID(), input.id, input.stock * 1000, 'opening', now]);
       await this.audit('product', input.id, 'create', { name: input.name, priceRial: input.priceRial, stock: input.stock }, now);
@@ -103,9 +120,9 @@ export class ShopRepository {
       }
       const at = new Date().toISOString();
       const updated = await this.db.run(
-        `UPDATE product SET name=?,search_name=?,category_id=?,price_rial=?,updated_at=?,revision=revision+1
+        `UPDATE product SET name=?,search_name=?,category_id=?,model=?,color=?,image_path=?,price_rial=?,updated_at=?,revision=revision+1
          WHERE id=? AND store_id=? AND revision=? AND archived_at IS NULL`,
-        [name, normalizeSearch(name), categoryId, input.priceRial, at, input.id, this.storeId, current.revision]
+        [name, normalizeSearch(`${name} ${input.model ?? ''} ${input.color ?? ''}`), categoryId, input.model?.trim() ?? '', input.color?.trim() ?? '', input.imagePath ?? null, input.priceRial, at, input.id, this.storeId, current.revision]
       );
       if (updated.changes !== 1) throw new Error('کالا هم‌زمان تغییر کرده است.');
       if (current.price_rial !== input.priceRial) {
@@ -209,9 +226,11 @@ export class ShopRepository {
   }
 
   /** requestId is retained by the caller until a response, making retries safe after interruption. */
-  async issueInvoice(requestId: string, customerName: string, inputLines: InvoiceInputLine[]): Promise<InvoiceReceipt> {
+  async issueInvoice(requestId: string, customerName: string, inputLines: InvoiceInputLine[], customerPhone = '', dateJalali = '', customerFirstName = '', customerLastName = '', showCardNumber = true): Promise<InvoiceReceipt> {
     if (!requestId || !inputLines.length) throw new Error('فاکتور باید شناسه و دست‌کم یک ردیف داشته باشد.');
     if (inputLines.some(line => !Number.isSafeInteger(line.quantity) || line.quantity <= 0 || !Number.isSafeInteger(line.quantity * 1000))) throw new Error('تعداد کالا نامعتبر است.');
+    if (customerPhone && !/^\+?[0-9۰-۹٠-٩\s-]{7,20}$/.test(customerPhone)) throw new Error('شمارهٔ تماس مشتری نامعتبر است.');
+    if (dateJalali && !isValidJalaliDate(dateJalali)) throw new Error('تاریخ شمسی نامعتبر است؛ سال/ماه/روز را بررسی کنید.');
     return this.db.transaction(async () => {
       const previous = await this.db.query<{ snapshot_json: string; status: string }>(`SELECT r.snapshot_json,i.status FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id
         WHERE i.id=? AND i.store_id=? AND r.revision_no=1`, [requestId, this.storeId]);
@@ -227,26 +246,32 @@ export class ShopRepository {
       for (const input of inputLines) {
         let name = input.name?.trim() ?? '';
         let price = input.unitPriceRial;
+        let model = '';
+        let color = '';
         if (input.productId) {
-          const products = await this.db.query<{ name: string; price_rial: number }>('SELECT name,price_rial FROM product WHERE id=? AND store_id=? AND archived_at IS NULL', [input.productId, this.storeId]);
+          const products = await this.db.query<{ name: string; model: string | null; color: string | null; price_rial: number }>('SELECT name,model,color,price_rial FROM product WHERE id=? AND store_id=? AND archived_at IS NULL', [input.productId, this.storeId]);
           if (!products.length) throw new Error('کالای انتخابی پیدا نشد.');
           name = products[0].name;
+          model = products[0].model ?? '';
+          color = products[0].color ?? '';
           price = input.unitPriceRial ?? products[0].price_rial;
         }
         if (!name || price === undefined) throw new Error('شرح و قیمت ردیف دستی لازم است.');
         assertRial(price);
         const total = BigInt(price) * BigInt(input.quantity);
         if (total > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('مبلغ فاکتور بیش از حد مجاز است.');
-        lines.push({ productId: input.productId, name, quantity: input.quantity, unitPriceRial: price, totalRial: Number(total) });
+        lines.push({ productId: input.productId, name: [name, model, color].filter(Boolean).join(' · '), model, color, quantity: input.quantity, unitPriceRial: price, totalRial: Number(total) });
       }
       const total = lines.reduce((sum, line) => sum + BigInt(line.totalRial), 0n);
       if (total > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('مجموع فاکتور بیش از حد مجاز است.');
       const template = await this.loadTemplate();
-      const receipt: InvoiceReceipt = { id: requestId, number, at: now, customerName: customerName.trim(), lines, totalRial: Number(total), templateVersionId: template?.id, templateFields: template?.fields };
+      const receipt: InvoiceReceipt = { id: requestId, number, at: now, dateJalali: dateJalali || new Intl.DateTimeFormat('fa-IR-u-ca-persian', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now)), customerName: customerName.trim(), customerPhone: customerPhone.trim(), showCardNumber, lines, totalRial: Number(total), templateVersionId: template?.id, templateFields: template?.fields };
       let customerId: string | null = null;
       if (receipt.customerName) {
-        customerId = crypto.randomUUID();
-        await this.db.run('INSERT INTO customer(id,store_id,name,created_at) VALUES(?,?,?,?)', [customerId, this.storeId, receipt.customerName, now]);
+        const existing = receipt.customerPhone ? await this.db.query<{ id: string }>('SELECT id FROM customer WHERE store_id=? AND phone=? AND archived_at IS NULL ORDER BY created_at LIMIT 1', [this.storeId, receipt.customerPhone]) : [];
+        customerId = existing[0]?.id ?? crypto.randomUUID();
+        if (!existing.length) await this.db.run('INSERT INTO customer(id,store_id,name,first_name,last_name,phone,created_at) VALUES(?,?,?,?,?,?,?)', [customerId, this.storeId, receipt.customerName, customerFirstName.trim() || null, customerLastName.trim() || null, receipt.customerPhone || null, now]);
+        else if (customerFirstName.trim() && customerLastName.trim()) await this.db.run('UPDATE customer SET name=?,first_name=?,last_name=? WHERE id=? AND store_id=?', [receipt.customerName, customerFirstName.trim(), customerLastName.trim(), customerId, this.storeId]);
       }
       const revisionId = crypto.randomUUID();
       await this.db.run(`INSERT INTO invoice(id,store_id,customer_id,invoice_number,status,current_revision,created_at,issued_at)
@@ -254,8 +279,8 @@ export class ShopRepository {
       await this.db.run(`INSERT INTO invoice_revision(id,invoice_id,revision_no,template_version_id,snapshot_json,subtotal_rial,discount_rial,shipping_rial,grand_total_rial,paid_rial,balance_rial,reason,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, [revisionId, requestId, 1, template?.id ?? null, JSON.stringify(receipt), receipt.totalRial, 0, 0, receipt.totalRial, 0, receipt.totalRial, 'issue', now]);
       for (const line of lines) {
-        await this.db.run(`INSERT INTO invoice_line(id,invoice_revision_id,product_id,name_snapshot,unit_snapshot,quantity_milli,unit_price_rial,discount_rial,line_total_rial)
-          VALUES(?,?,?,?,?,?,?,?,?)`, [crypto.randomUUID(), revisionId, line.productId ?? null, line.name, 'عدد', line.quantity * 1000, line.unitPriceRial, 0, line.totalRial]);
+        await this.db.run(`INSERT INTO invoice_line(id,invoice_revision_id,product_id,name_snapshot,color_snapshot,unit_snapshot,quantity_milli,unit_price_rial,discount_rial,line_total_rial)
+          VALUES(?,?,?,?,?,?,?,?,?,?)`, [crypto.randomUUID(), revisionId, line.productId ?? null, line.name, line.color ?? null, 'عدد', line.quantity * 1000, line.unitPriceRial, 0, line.totalRial]);
         if (line.productId) {
           const quantityMilli = line.quantity * 1000;
           if (!Number.isSafeInteger(quantityMilli)) throw new Error('تعداد کالا بیش از حد مجاز است.');
@@ -280,6 +305,23 @@ export class ShopRepository {
       `SELECT r.snapshot_json,i.status FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id
        WHERE i.store_id=? AND i.status IN ('issued','void') AND r.revision_no=i.current_revision
        ORDER BY i.invoice_number DESC`, [this.storeId]);
+    return rows.map(row => ({ receipt: JSON.parse(row.snapshot_json) as InvoiceReceipt, status: row.status }));
+  }
+
+  async listCustomers(search = ''): Promise<CustomerSummary[]> {
+    const needle = normalizeSearch(search);
+    const rows = await this.db.query<{ id: string; name: string; first_name: string | null; last_name: string | null; phone: string | null; invoice_count: number; last_purchase_at: string | null }>(
+      `SELECT c.id,c.name,c.first_name,c.last_name,c.phone,COUNT(i.id) AS invoice_count,MAX(i.issued_at) AS last_purchase_at
+       FROM customer c LEFT JOIN invoice i ON i.customer_id=c.id AND i.status='issued'
+       WHERE c.store_id=? AND c.archived_at IS NULL
+       GROUP BY c.id ORDER BY last_purchase_at DESC,c.created_at DESC`, [this.storeId]);
+    return rows.filter(row => normalizeSearch(`${row.name} ${row.phone ?? ''}`).includes(needle)).map(row => ({ id: row.id, name: row.name, firstName: row.first_name ?? '', lastName: row.last_name ?? '', phone: row.phone ?? '', invoiceCount: row.invoice_count, lastPurchaseAt: row.last_purchase_at }));
+  }
+
+  async listCustomerInvoices(customerId: string): Promise<InvoiceHistoryEntry[]> {
+    const rows = await this.db.query<{ snapshot_json: string; status: 'issued' | 'void' }>(
+      `SELECT r.snapshot_json,i.status FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id AND r.revision_no=i.current_revision
+       WHERE i.store_id=? AND i.customer_id=? AND i.status IN ('issued','void') ORDER BY i.invoice_number DESC`, [this.storeId, customerId]);
     return rows.map(row => ({ receipt: JSON.parse(row.snapshot_json) as InvoiceReceipt, status: row.status }));
   }
 
