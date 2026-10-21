@@ -1,0 +1,42 @@
+name: iOS compile check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  simulator-build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: 01-CORE-PLATFORM/package-lock.json
+      - name: Restore private brand assets
+        env:
+          ASSET_URL: ${{ secrets.MAJORA_ASSET_URL }}
+          ASSET_SHA256: ${{ secrets.MAJORA_ASSET_SHA256 }}
+        run: |
+          set -euo pipefail
+          test -n "$ASSET_URL" && test -n "$ASSET_SHA256" || { echo 'Private brand asset URL and SHA-256 must be configured.'; exit 1; }
+          curl --fail --location --silent --show-error --retry 3 --output private-assets.zip "$ASSET_URL"
+          echo "$ASSET_SHA256  private-assets.zip" | shasum -a 256 --check
+          unzip -q private-assets.zip
+          test -f 02-CLIENT-PROJECTS/classic-bag-belt/brand-config/store.json
+          test -f 02-CLIENT-PROJECTS/classic-bag-belt/original-assets/ClassicBag-mark.png
+      - name: Test and build shared source
+        working-directory: 01-CORE-PLATFORM
+        run: |
+          npm ci
+          npm test
+          npm run build
+          npm run sync:ios -w @majora/mobile
+      - name: Compile iOS simulator without signing
+        working-directory: 01-CORE-PLATFORM/apps/mobile
+        run: |
+          xcodebuild -project ios/App/App.xcodeproj \
+            -scheme App -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build

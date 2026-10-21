@@ -25,7 +25,7 @@ class NativePort implements SqlPort {
 }
 
 export function openNativeShop(): Promise<ShopRepository> {
-  if (!nativeDevice) throw new Error('SQLite بومی فقط در Android فعال است.');
+  if (!nativeDevice) throw new Error('SQLite بومی فقط در برنامهٔ نصب‌شده فعال است.');
   pending ??= (async () => {
     const connection = await new SQLiteConnection(CapacitorSQLite).createConnection('majora_shop', false, 'no-encryption', 1, false);
     await connection.open();
