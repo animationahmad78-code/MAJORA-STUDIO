@@ -4,6 +4,7 @@
 
 - سورس: commit `a636c0feced4db2d5d0d5a122b00ab3ed2652bcd` در مخزن عمومی MAJORA-STUDIO.
 - مسیر فایل واقعی: `06-BUILDS-AND-RELEASES/debug/classicbag-debug-ux-run-39647615888.apk`.
+- [دریافت مستقیم APK آزمایشی](https://github.com/animationahmad78-code/MAJORA-STUDIO/releases/download/qa-ux-debug-2026-10-21/classicbag-debug-ux-2026-10-21.apk)؛ GitHub دارایی را با وضعیت `uploaded`، اندازهٔ یکسان و digest SHA-256 برابر نشان می‌دهد.
 - اندازه: ۱۶٬۲۲۲٬۸۳۲ بایت.
 - SHA-256: `94B43C6D575CB4CEAF347520B62F458E718F80CA83CAA45AFEEC2711E06CCDB3`؛ با خروجی CI برابر است.
 - شناسهٔ Android: `ir.majora.classicbag`، `versionCode=1`، `versionName=1.0`، compile SDK 36.
@@ -14,6 +15,7 @@
 - [ساخت APK و تأیید امضا/شناسه/هش](https://github.com/animationahmad78-code/MAJORA-STUDIO/actions/runs/39647615888): موفق.
 - [اجرای شبیه‌ساز Android و SQLite](https://github.com/animationahmad78-code/MAJORA-STUDIO/actions/runs/39647621935): موفق؛ فایل پایگاه داده، schema، فروشگاه، قالب و integrity بررسی شد.
 - ۱۶ آزمون خودکار دامنه و دیتابیس، build React/TypeScript و همگام‌سازی Capacitor Android/iOS در ویندوز موفق شدند.
+- اجرای [iOS simulator compile برای همین commit](https://github.com/animationahmad78-code/MAJORA-STUDIO/actions/runs/39647627504) پس از ۱۵ دقیقه انتظار برای runner، پیش از آغاز هر مرحله `cancelled` شد؛ این اجرا شاهد موفقیت یا شکست کامپایل نیست. اجرای موفق قبلی متعلق به سورس پیش از بازطراحی است.
 - جریان مرورگری با ۱۵ کالای آزمایشی روی نمای ۳۹۰×۸۴۴ بررسی شد؛ چهار ردیف در حالت فشرده بالای نوار سبد قرار گرفتند. افزودن کالا، تغییر تایپی تعداد و انتقال به پیش‌نمایش فاکتور در مرورگر انجام شد.
 
 ## نصب ایمن
