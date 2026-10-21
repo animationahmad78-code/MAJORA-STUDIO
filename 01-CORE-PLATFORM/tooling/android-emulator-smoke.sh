@@ -56,6 +56,9 @@ for attempt in $(seq 1 20); do
   fi
   status=$(sqlite3 "$RUNNER_TEMP/$DB" "SELECT (SELECT count(*) FROM sqlite_master WHERE type='table' AND name='invoice'),(SELECT count(*) FROM store WHERE id='classic-bag-belt'),(SELECT count(*) FROM template_version);" 2>/dev/null || true)
   if [[ "$status" =~ ^1\|1\|[1-9][0-9]*$ ]] && [[ $(sqlite3 "$RUNNER_TEMP/$DB" 'PRAGMA integrity_check;') == ok ]]; then
+    sleep 2
+    adb exec-out screencap -p > "$RUNNER_TEMP/majora-emulator-home.png"
+    test -s "$RUNNER_TEMP/majora-emulator-home.png"
     echo "Android emulator smoke passed after attempt $attempt: schema, store, template and integrity verified."
     exit 0
   fi
