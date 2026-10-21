@@ -4,6 +4,6 @@
 
 `01-CORE-PLATFORM/tooling/build-android-debug.ps1` مسیرهای واقعی Java و SDK را به عنوان ورودی می‌گیرد؛ قبل از ساخت، وجود `java.exe` و Platform 36 را بررسی می‌کند. پس از موفقیت تست، build وب، sync و Gradle، APK را فقط در `06-BUILDS-AND-RELEASES/debug/` کپی می‌کند و SHA-256 چاپ می‌کند. اگر هر مرحله شکست بخورد، خروجی موفق ادعا نمی‌کند.
 
-`.github/workflows/android-debug.yml` برای اجرای دستی روی runner رسمی `ubuntu-24.04` آماده است. این runner طبق فهرست رسمی GitHub دارای Android SDK Platform 36 و Build Tools است. workflow به دو secret دارایی خصوصی توضیح‌داده‌شده در `ios-build-readiness.md` نیاز دارد؛ این مخزن فعلاً remote ندارد و workflow اجرا نشده است. خروجی احتمالی آن **Debug APK برای QA** است، نه نسخهٔ Release تجاری.
+`.github/workflows/android-debug.yml` برای اجرای دستی روی runner رسمی `ubuntu-24.04` آماده است. این runner طبق فهرست رسمی GitHub دارای Android SDK Platform 36 و Build Tools است. مخزن خصوصی `animationahmad78-code/MAJORA-STUDIO` ایجاد و سورس به شاخهٔ `main` فرستاده شد. بستهٔ خصوصی دارایی‌ها در prerelease داخلی `private-assets-v1` با SHA-256 ثابت قرار گرفت؛ workflow آن را با `GITHUB_TOKEN` همان مخزن دریافت و هش را بررسی می‌کند. workflow هنوز اجرا نشده است. خروجی احتمالی آن **Debug APK برای QA** است، نه نسخهٔ Release تجاری.
 
 گیت‌های باقی‌مانده: اجرای واقعی Gradle و بررسی APK، نصب روی گوشی، آزمون SQLite آفلاین و ارتقا، چاپ/بازگردانی، رفع قابلیت‌های ناقص، سپس امضای Release با keystore اختصاصی خارج از سورس. تا گذر از این گیت‌ها، نسخهٔ قابل فروش تأیید نشده است.
