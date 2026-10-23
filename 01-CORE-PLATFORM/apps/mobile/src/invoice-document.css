@@ -1,7 +1,8 @@
 .invoice-document { display:grid;gap:18px;justify-content:center;overflow:visible; }
 .invoice-paper { box-sizing:border-box;position:relative;width:794px;height:1123px;background:#fff;color:#082a55;border:2px solid #1268d4;border-radius:10px;padding:18px 18px 24px;overflow:hidden;font:12px/1.48 Estedad, sans-serif;box-shadow:0 8px 24px #102e4b1a; }
 .inv-header { display:grid;grid-template-columns:185px 1fr;align-items:center;gap:12px;min-height:145px; }
-.inv-header img { width:160px;height:145px;object-fit:contain; }
+.inv-logo { width:145px;height:145px;display:grid;place-items:center;border:3px solid #ba8735;border-radius:50%;background:#062850;box-shadow:0 0 0 2px #062850; }
+.inv-logo img { width:128px;height:128px;object-fit:contain;filter:invert(75%) sepia(42%) saturate(854%) hue-rotate(351deg) brightness(99%) contrast(91%); }
 .inv-identity { text-align:center;min-width:0; }
 .inv-identity h2 { font-size:36px;line-height:1.3;margin:0;color:#052757; }
 .inv-identity>strong { color:#092f7d;font-size:17px; }
@@ -46,7 +47,8 @@
 .invoice-document.mono .inv-note,.invoice-document.mono .inv-table th,.invoice-document.mono .inv-conditions h3 { background:#111;color:#fff; }
 .invoice-document.a5 .invoice-paper { width:560px;height:794px;padding:11px 12px 20px;font-size:9px; }
 .invoice-document.a5 .inv-header { grid-template-columns:105px 1fr;min-height:95px;gap:5px; }
-.invoice-document.a5 .inv-header img { width:100px;height:90px; }
+.invoice-document.a5 .inv-logo { width:90px;height:90px;border-width:2px; }
+.invoice-document.a5 .inv-logo img { width:80px;height:80px; }
 .invoice-document.a5 .inv-identity h2 { font-size:24px; }
 .invoice-document.a5 .inv-identity>strong { font-size:12px; }
 .invoice-document.a5 .inv-phones { font-size:9px;margin:2px; }

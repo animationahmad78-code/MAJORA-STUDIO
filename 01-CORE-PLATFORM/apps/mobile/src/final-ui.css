@@ -60,7 +60,11 @@
 .support img { width:min(100%,310px);height:165px; }
 .support a[href^="tel:"] { direction:ltr;unicode-bidi:embed; }
 .support-tagline { display:block;color:#0a376b;font-size:1.2rem;line-height:1.5;margin:14px 0;font-weight:900; }
+.invoice-editor { grid-column:1;grid-row:1; }
+.invoice-preview-scroll { grid-column:2;grid-row:1; }
 @media(max-width:700px) {
+  .invoice-layout { display:flex;flex-direction:column; }
+  .invoice-preview-scroll,.invoice-editor { width:100%; }
   .topbar-logo { width:34px;height:34px; }
   .topbar-search { width:44px;height:44px; }
   .catalog-grid,.catalog-grid.compact,.catalog-grid.compact.browse { grid-template-columns:repeat(2,minmax(0,1fr));gap:8px; }

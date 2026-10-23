@@ -73,6 +73,15 @@ jobs:
           path: 01-CORE-PLATFORM/apps/mobile/android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 30
+      - name: Install and launch signed APK on Android emulator
+        run: bash 01-CORE-PLATFORM/tooling/android-release-smoke.sh 01-CORE-PLATFORM/apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+      - name: Save release emulator screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: majora-signed-release-emulator
+          path: ${{ runner.temp }}/majora-release-home.png
+          if-no-files-found: ignore
       - name: Remove signing material
         if: always()
         run: rm -f "$RUNNER_TEMP/majora-release.p12"

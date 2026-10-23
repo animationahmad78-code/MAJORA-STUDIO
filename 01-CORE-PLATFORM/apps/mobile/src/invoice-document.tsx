@@ -9,15 +9,28 @@ export type InvoiceBrand = {
 };
 type Props = { brand: InvoiceBrand; receipt: InvoiceReceipt; mono: boolean; paper: PaperSize; logo: string };
 
-function pageLines<T>(lines: T[], paper: PaperSize): T[][] {
-  const lastCapacity = paper === 'a4' ? 10 : 5;
-  const earlierCapacity = paper === 'a4' ? 21 : 12;
-  if (lines.length <= lastCapacity) return [lines];
+export function pageLines<T extends { name: string }>(lines: T[], paper: PaperSize): T[][] {
+  // Reserve the bottom of the last sheet for terms, totals and signatures.
+  // Long names consume extra row height; a fixed row count would overlap that area.
+  const finalBudget = paper === 'a4' ? 300 : 165;
+  const continuationBudget = paper === 'a4' ? 690 : 465;
+  const rowHeight = (line: T) => {
+    const charactersPerLine = paper === 'a4' ? 38 : 30;
+    const linesOfText = Math.max(1, Math.ceil([...line.name].length / charactersPerLine));
+    return paper === 'a4' ? Math.max(30, 11 + linesOfText * 18) : Math.max(23, 8 + linesOfText * 13);
+  };
+  const height = (items: T[]) => items.reduce((sum, line) => sum + rowHeight(line), 0);
+  if (height(lines) <= finalBudget) return [lines];
   const pages: T[][] = [];
   let offset = 0;
-  while (lines.length - offset > lastCapacity) {
-    const remaining = lines.length - offset;
-    const count = Math.min(earlierCapacity, Math.max(lastCapacity, remaining - lastCapacity));
+  while (height(lines.slice(offset)) > finalBudget && offset < lines.length - 1) {
+    let count = 0;
+    let used = 0;
+    while (offset + count < lines.length - 1 && used + rowHeight(lines[offset + count]) <= continuationBudget) {
+      used += rowHeight(lines[offset + count]);
+      count += 1;
+    }
+    if (!count) count = 1;
     pages.push(lines.slice(offset, offset + count));
     offset += count;
   }
@@ -35,7 +48,7 @@ export function InvoiceDocument({ brand, receipt, mono, paper, logo }: Props) {
       const before = chunks.slice(0, pageIndex).reduce((sum, chunk) => sum + chunk.length, 0);
       return <section className="invoice-paper" data-invoice-page key={pageIndex} aria-label={`فاکتور ${receipt.number}، صفحه ${pageIndex + 1}`}>
         <header className="inv-header">
-          <img src={logo} alt="نشان فروشگاه"/>
+          <div className="inv-logo"><img src={logo} alt="نشان فروشگاه"/></div>
           <div className="inv-identity"><h2>{brand.storeName}</h2><strong>{brand.slogan}</strong>
             <div className="inv-phones" dir="ltr">{brand.phone.split('|').map((phone, i) => <span key={i}>☎ {phone.trim()}</span>)}</div>
             <p>◆ {brand.address}</p></div>
