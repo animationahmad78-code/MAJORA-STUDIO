@@ -1,0 +1,48 @@
+.dashboard { display:grid;gap:12px; }
+.dashboard-hero { background:linear-gradient(120deg,#062b57,#104a78);color:#fff;border-radius:17px;padding:22px;display:flex;justify-content:space-between;align-items:center;gap:15px; }
+.dashboard-hero span { color:#ebc176;font-size:.8rem;font-weight:800; }
+.dashboard-hero h1 { margin:3px 0;font-size:1.55rem; }
+.dashboard-hero p { margin:0;color:#dce9f1;font-size:.82rem; }
+.dashboard-hero button { background:#f5ca7c;color:#082d60;border:0;border-radius:10px;min-height:48px;padding:8px 14px;font-weight:900;white-space:nowrap; }
+.dashboard-filter { display:flex;gap:6px; }
+.dashboard-filter button { border:1px solid #c9dce4;background:#fff;color:#0a3863;border-radius:99px;min-height:44px;padding:6px 16px;font-weight:700; }
+.dashboard-filter button.selected { background:#0b3567;border-color:#0b3567;color:#fff; }
+.dashboard-kpis { display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px; }
+.dashboard-kpis article,.dashboard-panel,.dashboard-insight,.dashboard-options { background:#fff;border:1px solid #d8e5eb;border-radius:13px;box-shadow:0 2px 10px #0b2b5308; }
+.dashboard-kpis article { display:grid;padding:13px; }
+.dashboard-kpis span { color:#4e6575;font-size:.76rem; }
+.dashboard-kpis strong { color:#07396c;font-size:1.35rem;overflow-wrap:anywhere; }
+.dashboard-kpis small { color:#658093;font-size:.68rem; }
+.dashboard-insight { display:flex;gap:16px;padding:10px 15px; }
+.dashboard-insight>div { display:flex;align-items:center;gap:8px;flex:1; }
+.dashboard-insight strong { color:#496576;font-size:.78rem; }
+.dashboard-insight span { color:#0b466b;font-size:.85rem;font-weight:800; }
+.dashboard-options { display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:7px 12px; }
+.dashboard-options>span { font-weight:800;color:#0a3563;font-size:.78rem;margin-inline-end:8px; }
+.dashboard-options label { display:flex;gap:4px;align-items:center;font-size:.75rem;min-height:38px; }
+.dashboard-panel { padding:14px;min-width:0; }
+.dashboard-panel h2 { margin:0;font-size:1rem;color:#0a376a; }
+.dashboard-panel-head { display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px; }
+.dashboard-panel-head p { margin:2px 0;color:#71899a;font-size:.7rem; }
+.dashboard-panel-head button { border:0;background:#e8f4f3;border-radius:8px;min-height:40px;padding:4px 8px;color:#086b69;font-weight:700;font-size:.75rem; }
+.sales-chart { display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:7px;height:185px;align-items:end; }
+.sales-column { height:100%;display:grid;grid-template-rows:24px 1fr 23px;justify-items:center;min-width:0; }
+.sales-column strong { color:#315975;font-size:.7rem;white-space:nowrap; }
+.sales-column small { color:#577485;font-size:.68rem;white-space:nowrap; }
+.sales-bar-track { width:min(100%,38px);height:100%;display:flex;align-items:end;background:#eff6f8;border-radius:8px;overflow:hidden; }
+.sales-bar-track div { width:100%;background:linear-gradient(#1f9e9a,#0b4f77);border-radius:8px 8px 0 0; }
+.dashboard-grid { display:grid;grid-template-columns:1fr 1fr;gap:12px; }
+.dashboard-list-row { display:grid;grid-template-columns:26px 1fr auto;gap:6px;align-items:center;border-top:1px solid #e8eff2;padding:9px 0; }
+.dashboard-list-row b { width:24px;height:24px;border-radius:50%;background:#e8f3f3;color:#0c656a;text-align:center; }
+.dashboard-list-row span { color:#163e63;font-weight:700;font-size:.8rem; }
+.dashboard-list-row small { color:#5a7484;font-size:.7rem; }
+.inventory-row { display:grid;gap:4px;border-top:1px solid #e8eff2;padding:8px 0; }
+.inventory-row>div:first-child { display:flex;justify-content:space-between;gap:8px; }
+.inventory-row strong { color:#173f62;font-size:.8rem; }
+.inventory-row small { color:#5b7786;font-size:.7rem; }
+.inventory-track { height:8px;border-radius:99px;background:#f0d9b9;overflow:hidden; }
+.inventory-track span { display:block;height:100%;background:#168d7c; }
+.low-stock-list { display:flex;gap:7px;flex-wrap:wrap;margin-top:9px; }
+.low-stock-list span { padding:5px 8px;border-radius:99px;background:#fff1e5;color:#8d4d15;font-size:.73rem;font-weight:700; }
+.dashboard-empty { color:#66808d;font-size:.8rem; }
+@media(max-width:700px) { .dashboard-hero { padding:14px; } .dashboard-hero h1 { font-size:1.15rem; } .dashboard-hero p { font-size:.7rem; } .dashboard-hero button { padding:5px 8px;font-size:.75rem; } .dashboard-kpis { grid-template-columns:repeat(2,minmax(0,1fr)); } .dashboard-kpis article { padding:9px; } .dashboard-kpis strong { font-size:1.1rem; } .dashboard-grid { grid-template-columns:1fr; } .dashboard-insight { display:grid;gap:4px; } .dashboard-list-row { grid-template-columns:24px 1fr; } .dashboard-list-row small { grid-column:2; } .sales-chart { gap:3px;height:150px; } .sales-column strong { font-size:.54rem; } }

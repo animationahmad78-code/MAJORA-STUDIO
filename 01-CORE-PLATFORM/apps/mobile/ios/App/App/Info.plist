@@ -24,6 +24,16 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>برای عکاسی و ثبت تصویر کالا به دوربین نیاز است.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>برای انتخاب تصویر کالا به گالری نیاز است.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>برای ذخیرهٔ تصویر انتخاب‌شده در گالری، در صورت درخواست شما، اجازه لازم است.</string>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
