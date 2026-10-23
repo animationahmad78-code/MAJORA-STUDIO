@@ -26,8 +26,14 @@ await new Promise((resolve, reject) => {
 });
 let nextId = 0;
 const pending = new Map();
+const dialogs = [];
 socket.addEventListener('message', event => {
   const response = JSON.parse(event.data);
+  if (response.method === 'Page.javascriptDialogOpening') {
+    dialogs.push(response.params?.message ?? 'dialog without message');
+    socket.send(JSON.stringify({ id: ++nextId, method: 'Page.handleJavaScriptDialog', params: { accept: true } }));
+    return;
+  }
   if (!response.id) return;
   const item = pending.get(response.id);
   if (!item) return;
@@ -45,6 +51,7 @@ function evaluate(expression) {
 }
 
 try {
+  socket.send(JSON.stringify({ id: ++nextId, method: 'Page.enable' }));
   const home = await evaluate('document.body.innerText.includes("مدیریت روز فروشگاه")');
   if (!home) throw new Error('Home screen did not render');
   await evaluate('document.querySelector(".menu-trigger").click()');
@@ -67,7 +74,8 @@ try {
   }
   if (!files.includes('majora-backup-')) {
     const feedback = await evaluate('document.body.innerText.slice(-500)');
-    throw new Error(`Encrypted backup was not saved in Documents. UI: ${feedback}`);
+    const nearby = adb('shell', 'find', '/sdcard', '-maxdepth', '7', '-iname', '*backup*');
+    throw new Error(`Encrypted backup was not saved in Documents. Dialogs: ${JSON.stringify(dialogs)}. Nearby files: ${nearby}. UI: ${feedback}`);
   }
   const file = files.split(/\r?\n/).find(item => item.includes('majora-backup-'));
   const size = Number(adb('shell', 'stat', '-c', '%s', file));

@@ -8,6 +8,16 @@ import { activateRestoredDatabase, exportNativeDatabase, importVerifiedDatabaseS
 const iterations = 310_000;
 const encoder = new TextEncoder();
 const allowedTables = new Set(['schema_migrations','store','category','product','customer','price_batch','price_event','stock_balance','stock_movement','template_version','template_field','invoice','invoice_counter','invoice_revision','invoice_line','payment','audit_event']);
+const preferenceKeys = ['compactCards', 'showStock', 'showCardNumber', 'confirmIssue', 'welcomeSound'] as const;
+
+function storedPreferences(): Record<string, boolean> {
+  const raw = localStorage.getItem('majora-ui-preferences-v1');
+  if (!raw) return {};
+  const parsed: unknown = JSON.parse(raw);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('تنظیمات ظاهری ذخیره‌شده نامعتبر است.');
+  const object = parsed as Record<string, unknown>;
+  return Object.fromEntries(preferenceKeys.filter(key => typeof object[key] === 'boolean').map(key => [key, object[key] as boolean]));
+}
 
 function base64(bytes: Uint8Array): string {
   let binary = '';
@@ -39,6 +49,7 @@ export async function createEncryptedBackup(repo: ShopRepository, password: stri
   const databaseHash = await sha256(databaseJson);
   const inner = new JSZip();
   inner.file('database/full-sqlite.json', databaseJson);
+  inner.file('ui/preferences.json', JSON.stringify(storedPreferences()));
   const [products, archivedProducts, customers, archivedCustomers, invoices, archivedInvoices, photos] = await Promise.all([
     repo.listProducts(), repo.listArchivedProducts(), repo.listCustomers(), repo.listArchivedCustomers(),
     repo.listInvoiceHistory(), repo.listArchivedInvoices(), repo.listProductPhotoPaths()
@@ -118,6 +129,16 @@ export async function restoreEncryptedBackup(file: File, password: string): Prom
   if (manifest.format !== 'majora-backup-v1' || manifest.databaseHash !== await sha256(databaseJson)) throw new Error('یکپارچگی پشتیبان تأیید نشد.');
   const snapshot = JSON.parse(databaseJson) as Awaited<ReturnType<typeof exportNativeDatabase>>;
   if (snapshot.mode !== 'full' || !snapshot.tables?.length || snapshot.tables.some(table => !allowedTables.has(table.name))) throw new Error('پشتیبان با ساختار برنامه سازگار نیست.');
+  const preferencesText = await inner.file('ui/preferences.json')?.async('string');
+  let preferences: Record<string, boolean> | undefined;
+  if (preferencesText) {
+    const parsed: unknown = JSON.parse(preferencesText);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('تنظیمات پشتیبان نامعتبر است.');
+    const object = parsed as Record<string, unknown>;
+    if (Object.entries(object).some(([key, value]) => !preferenceKeys.includes(key as typeof preferenceKeys[number]) || typeof value !== 'boolean'))
+      throw new Error('تنظیمات پشتیبان نامعتبر است.');
+    preferences = object as Record<string, boolean>;
+  }
   for (const path of manifest.photos) {
     if (!/^product-images\/[a-f0-9-]+\.jpg$/.test(path) || !inner.file(`photos/${path}`)) throw new Error('فایل عکس در پشتیبان ناقص است.');
   }
@@ -130,6 +151,7 @@ export async function restoreEncryptedBackup(file: File, password: string): Prom
     const data = await inner.file(path)!.async('base64');
     await Filesystem.writeFile({ path: `MAJORA/Invoices/${path.slice('invoices/'.length)}`, directory: Directory.Documents, data, recursive: true });
   }
+  if (preferences) localStorage.setItem('majora-ui-preferences-v1', JSON.stringify(preferences));
   activateRestoredDatabase(stage);
   location.reload();
 }
