@@ -51,6 +51,12 @@ jobs:
           name: android-emulator-home
           path: ${{ runner.temp }}/majora-emulator-home.png
           if-no-files-found: error
+      - name: Save UI hierarchy for native test design
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-emulator-ui-hierarchy
+          path: ${{ runner.temp }}/majora-home.xml
+          if-no-files-found: ignore
       - name: Save emulator diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4

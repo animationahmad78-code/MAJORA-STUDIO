@@ -59,6 +59,8 @@ for attempt in $(seq 1 20); do
     sleep 2
     adb exec-out screencap -p > "$RUNNER_TEMP/majora-emulator-home.png"
     test -s "$RUNNER_TEMP/majora-emulator-home.png"
+    adb shell uiautomator dump /sdcard/majora-home.xml >/dev/null 2>&1 || true
+    adb pull /sdcard/majora-home.xml "$RUNNER_TEMP/majora-home.xml" >/dev/null 2>&1 || true
     echo "Android emulator smoke passed after attempt $attempt: schema, store, template and integrity verified."
     exit 0
   fi
