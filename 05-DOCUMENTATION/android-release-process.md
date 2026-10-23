@@ -3,7 +3,7 @@
 ## هویت و امضا
 
 - شناسهٔ ثابت برنامه: `ir.majora.classicbag`.
-- نسخهٔ نامزد فعلی: `versionName=1.0.0` و `versionCode=2`. برای هر نسخهٔ قابل ارتقا، `versionCode` باید بزرگ‌تر شود.
+- نسخهٔ در حال ساخت برای انتقال پشتیبان ZIP: `versionName=1.0.1` و `versionCode=3`. برای هر نسخهٔ قابل ارتقا، `versionCode` باید بزرگ‌تر شود.
 - کلید پایدار PKCS#12 در `07-BACKUPS/android-signing/classicbag-release.p12` و گذرواژه در فایل خصوصی همان پوشه نگهداری می‌شود. کلید، گذرواژه و فایل‌های پشتیبان در `.gitignore` هستند و نباید در Git یا گزارش عمومی قرار گیرند.
 - GitHub Actions چهار Secret با نام‌های `MAJORA_KEYSTORE_BASE64`، `MAJORA_KEYSTORE_PASSWORD`، `MAJORA_KEY_PASSWORD` و `MAJORA_KEY_ALIAS` دارد. محتوا در خروجی CI چاپ نمی‌شود. فایل محلی کلید را برای بازیابی در محل امن مستقل نگهداری کنید؛ Secretهای GitHub قابل خواندنِ مجدد نیستند.
 

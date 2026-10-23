@@ -65,7 +65,7 @@ jobs:
           PACKAGE_INFO=$("$AAPT" dump badging "$APK" | grep '^package:')
           echo "$PACKAGE_INFO"
           echo "$PACKAGE_INFO" | grep -F "name='ir.majora.classicbag'"
-          echo "$PACKAGE_INFO" | grep -F "versionCode='2'"
+          echo "$PACKAGE_INFO" | grep -F "versionCode='3'"
           sha256sum "$APK"
       - uses: actions/upload-artifact@v4
         with:
