@@ -1,0 +1,78 @@
+name: Android signed release candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  signed-apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: 01-CORE-PLATFORM/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Restore private signing key
+        shell: bash
+        env:
+          MAJORA_KEYSTORE_BASE64: ${{ secrets.MAJORA_KEYSTORE_BASE64 }}
+          MAJORA_KEYSTORE_PASSWORD: ${{ secrets.MAJORA_KEYSTORE_PASSWORD }}
+          MAJORA_KEY_PASSWORD: ${{ secrets.MAJORA_KEY_PASSWORD }}
+          MAJORA_KEY_ALIAS: ${{ secrets.MAJORA_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          test -n "$MAJORA_KEYSTORE_BASE64"
+          test -n "$MAJORA_KEYSTORE_PASSWORD"
+          test -n "$MAJORA_KEY_PASSWORD"
+          test -n "$MAJORA_KEY_ALIAS"
+          printf '%s' "$MAJORA_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/majora-release.p12"
+          chmod 600 "$RUNNER_TEMP/majora-release.p12"
+          test -s "$RUNNER_TEMP/majora-release.p12"
+      - name: Test, build and sync source
+        working-directory: 01-CORE-PLATFORM
+        run: |
+          npm ci
+          npm test
+          npm run build
+          cd apps/mobile
+          npx cap sync android
+      - name: Sign and verify release APK
+        working-directory: 01-CORE-PLATFORM/apps/mobile/android
+        env:
+          MAJORA_KEYSTORE_PATH: ${{ runner.temp }}/majora-release.p12
+          MAJORA_KEYSTORE_PASSWORD: ${{ secrets.MAJORA_KEYSTORE_PASSWORD }}
+          MAJORA_KEY_PASSWORD: ${{ secrets.MAJORA_KEY_PASSWORD }}
+          MAJORA_KEY_ALIAS: ${{ secrets.MAJORA_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon assembleRelease
+          APK=app/build/outputs/apk/release/app-release.apk
+          test -s "$APK"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -name apksigner | sort -V | tail -n 1)
+          AAPT=$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -name aapt | sort -V | tail -n 1)
+          test -n "$APKSIGNER" && test -n "$AAPT"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          PACKAGE_INFO=$("$AAPT" dump badging "$APK" | grep '^package:')
+          echo "$PACKAGE_INFO"
+          echo "$PACKAGE_INFO" | grep -F "name='ir.majora.classicbag'"
+          echo "$PACKAGE_INFO" | grep -F "versionCode='2'"
+          sha256sum "$APK"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: majora-classicbag-signed-release-candidate
+          path: 01-CORE-PLATFORM/apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/majora-release.p12"
