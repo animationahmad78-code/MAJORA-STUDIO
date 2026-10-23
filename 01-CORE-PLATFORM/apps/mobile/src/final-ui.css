@@ -57,6 +57,10 @@
 .backup-card label { display:grid;gap:4px;font-size:.82rem;font-weight:700; }
 .backup-card button { min-height:48px;border-radius:9px;border:1px solid #abc7d6;background:#eaf4f6;color:#0b3567;font-weight:800;padding:6px 10px; }
 .backup-card .primary { background:#0b3567;color:#fff; }
+.backup-ready { display:grid;gap:7px;border:1px solid #8bc7b3;background:#effaf5;border-radius:11px;padding:11px;overflow-wrap:anywhere; }
+.backup-ready small { color:#385e56; }
+.backup-actions { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px; }
+@media(max-width:420px) { .backup-actions { grid-template-columns:1fr; } }
 .support img { width:min(100%,310px);height:165px; }
 .support a[href^="tel:"] { direction:ltr;unicode-bidi:embed; }
 .support-tagline { display:block;color:#0a376b;font-size:1.2rem;line-height:1.5;margin:14px 0;font-weight:900; }

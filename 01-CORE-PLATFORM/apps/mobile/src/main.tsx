@@ -10,6 +10,7 @@ import { nativeDevice, openNativeShop } from './native-db';
 import { prepareProductPhoto, productPhotoUrl, removeProductPhoto, storeProductPhoto } from './product-photo';
 import { InvoiceDocument, type PaperSize } from './invoice-document';
 import type { InvoiceExportFormat } from './invoice-export';
+import type { BackupArtifact } from './backup';
 import { buildDashboard, type SalesPeriod } from './dashboard';
 import { DashboardView } from './dashboard-view';
 import './style.css';
@@ -141,6 +142,7 @@ function App() {
   const [previewWidth, setPreviewWidth] = useState(0); const [fitPreview, setFitPreview] = useState(true);
   const [backupPassword, setBackupPassword] = useState(''); const [restorePassword, setRestorePassword] = useState('');
   const [restoreFile, setRestoreFile] = useState<File | null>(null); const [backupBusy, setBackupBusy] = useState(false);
+  const [backupArtifact, setBackupArtifact] = useState<BackupArtifact | null>(null);
   const [backupProgress, setBackupProgress] = useState('');
   const [salesPeriod, setSalesPeriod] = useState<SalesPeriod>('day');
   const invoicePreviewRef = useRef<HTMLDivElement>(null);
@@ -361,9 +363,25 @@ function App() {
     setBackupBusy(true);
     try { const { createEncryptedBackup } = await import('./backup'); const result = await createEncryptedBackup(repository, backupPassword, data, storeLogo,
       (current, total) => setBackupProgress(`ساخت PDF فاکتور ${formatRial(current)} از ${formatRial(total)}`));
-      setBackupPassword(''); setBackupProgress(''); alert(`پشتیبان رمزدار در Documents/${result.path} ذخیره شد.`);
+      setBackupArtifact(result); setBackupPassword(''); setBackupProgress('');
+      alert('فایل ZIP رمزدار آماده شد. اکنون «ذخیره فایل» یا «اشتراک‌گذاری» را انتخاب کنید.');
     } catch (error) { alert(`پشتیبان ساخته نشد: ${(error as Error).message}`); }
     finally { setBackupBusy(false); setBackupProgress(''); }
+  }
+  async function savePreparedBackup() {
+    if (!backupArtifact || backupBusy) return;
+    setBackupBusy(true);
+    try { const { saveBackupToChosenFile } = await import('./backup'); const saved = await saveBackupToChosenFile(backupArtifact);
+      if (saved) alert('فایل ZIP در محل انتخاب‌شده ذخیره شد. برای اطمینان، نگهداری یک نسخه در جای دیگر هم مناسب است.'); }
+    catch (error) { alert(`ذخیرهٔ فایل انجام نشد: ${(error as Error).message}`); }
+    finally { setBackupBusy(false); }
+  }
+  async function sharePreparedBackup() {
+    if (!backupArtifact || backupBusy) return;
+    setBackupBusy(true);
+    try { const { shareBackup } = await import('./backup'); await shareBackup(backupArtifact); }
+    catch (error) { if (!/cancel|لغو/i.test((error as Error).message)) alert(`اشتراک‌گذاری انجام نشد: ${(error as Error).message}`); }
+    finally { setBackupBusy(false); }
   }
   async function restoreBackup() {
     if (!restoreFile || backupBusy || !window.confirm('بازیابی در پایگاه دادهٔ جدا بررسی می‌شود و سپس برنامه از دادهٔ بازیابی‌شده باز می‌شود. ادامه می‌دهید؟')) return;
@@ -621,7 +639,19 @@ function App() {
       </>}
        {page==='settings' && <><div className="section-heading"><div><span className="eyebrow">شخصی‌سازی</span><h1>تنظیمات</h1></div></div><section className="card preference-card"><h2>نحوهٔ کار برنامه</h2>{([['compactCards','نمایش فشردهٔ کالاها'],['showStock','نمایش موجودی روی کارت کالا'],['showCardNumber','نمایش شماره کارت در فاکتور'],['confirmIssue','تأیید دوباره پیش از ثبت فاکتور']] as const).map(([key,label]) => <label className="toggle-row" key={key}><span>{label}</span><input type="checkbox" checked={preferences[key]} onChange={event => setPreference(key, event.target.checked)}/></label>)}</section><section className="card"><h2>اطلاعات فروشگاه و متن فاکتور</h2><p className="muted">هر تغییر در پیش‌نمایش دیده می‌شود. {nativeDevice ? 'برای حفظ آن، نسخهٔ جدید قالب را ذخیره کنید.' : 'قالب نسخه‌دار در برنامهٔ نصب‌شده ذخیره می‌شود.'}</p><div className="settings-grid">{([['storeName','نام فروشگاه'],['slogan','شعار'],['phone','تلفن‌ها'],['address','نشانی'],['card','شماره کارت'],['cardHolder','نام صاحب کارت'],['note','یادآوری پرداخت']] as const).map(([key,label]) => <label key={key}>{label}<input value={data[key]} onChange={e => changeField(key,e.target.value)}/></label>)}</div><details><summary>ویرایش شش بند شرایط فروش</summary>{data.conditions.map((c,i) => <label className="condition-field" key={i}>بند {i+1}<textarea value={c} rows={3} onChange={e => save({ ...data, conditions: data.conditions.map((x,j) => j === i ? e.target.value : x) })}/></label>)}</details>{nativeDevice && <button className="primary" onClick={persistTemplate}>ذخیرهٔ نسخهٔ جدید قالب {templateVersion ? `(فعلی: ${templateVersion})` : ''}</button>}</section></>}
        {page==='settings' && <section className="card"><h2>شناسه‌های پایین فاکتور</h2><div className="settings-grid"><label>تلگرام نخست<input value={data.socialTelegram} onChange={event => changeField('socialTelegram', event.target.value)}/></label><label>اینستاگرام<input value={data.socialInstagram} onChange={event => changeField('socialInstagram', event.target.value)}/></label><label>شناسهٔ تماس<input value={data.socialContact} onChange={event => changeField('socialContact', event.target.value)}/></label></div><p className="muted">پس از تغییر، دکمهٔ «ذخیرهٔ نسخهٔ جدید قالب» را بزنید.</p><label className="toggle-row"><span>صدای کوتاه خوشامد هنگام ورود</span><input type="checkbox" checked={preferences.welcomeSound} onChange={event => setPreference('welcomeSound', event.target.checked)}/></label></section>}
-       {page==='settings' && <section className="card backup-card"><h2>پشتیبان‌گیری و بازیابی رمزدار</h2><p className="muted">پشتیبان شامل SQLite، سوابق، بایگانی، PDF فاکتورها و عکس‌های کالا است. گذرواژه را در جایی امن نگه دارید؛ بدون آن بازیابی ممکن نیست.</p><label>گذرواژهٔ پشتیبان تازه<input type="password" autoComplete="new-password" value={backupPassword} onChange={event => setBackupPassword(event.target.value)} placeholder="دست‌کم ۱۲ نویسه"/></label><button className="primary" onClick={makeBackup} disabled={!repository || backupBusy || backupPassword.length < 12}>{backupBusy ? 'در حال آماده‌سازی…' : 'ساخت ZIP رمزدار و ذخیره در Documents'}</button>{backupProgress && <p role="status">{backupProgress}</p>}<hr/><label>فایل ZIP پشتیبان<input type="file" accept=".zip,application/zip" onChange={event => setRestoreFile(event.target.files?.[0] ?? null)}/></label><label>گذرواژهٔ فایل<input type="password" autoComplete="off" value={restorePassword} onChange={event => setRestorePassword(event.target.value)}/></label><button onClick={restoreBackup} disabled={!repository || !restoreFile || !restorePassword || backupBusy}>بررسی و بازیابی پشتیبان</button></section>}
+       {page==='settings' && <section className="card backup-card">
+         <h2>پشتیبان‌گیری و بازیابی رمزدار</h2>
+         <p className="muted">ZIP شامل داده‌ها، سوابق، بایگانی، تنظیمات، عکس‌های کالا و PDF فاکتورها است. فایل را با «ذخیره فایل» در محل دلخواه نگه دارید یا با «اشتراک‌گذاری» به گوشی دیگر بفرستید. بدون گذرواژه بازیابی ممکن نیست.</p>
+         <label>گذرواژهٔ پشتیبان تازه<input type="password" autoComplete="new-password" value={backupPassword} onChange={event => setBackupPassword(event.target.value)} placeholder="دست‌کم ۱۲ نویسه"/></label>
+         <button className="primary" onClick={makeBackup} disabled={!repository || backupBusy || backupPassword.length < 12}>{backupBusy ? 'در حال آماده‌سازی…' : 'ساخت فایل ZIP رمزدار'}</button>
+         {backupProgress && <p role="status">{backupProgress}</p>}
+         {backupArtifact && <div className="backup-ready" role="status"><strong>فایل آماده: <bdi dir="ltr">{backupArtifact.filename}</bdi></strong><small>{formatRial(backupArtifact.bytes)} بایت · تا قبل از پاک‌شدن حافظهٔ موقت، آن را ذخیره یا ارسال کنید.</small><div className="backup-actions"><button onClick={savePreparedBackup} disabled={backupBusy}>ذخیره فایل در محل دلخواه</button><button onClick={sharePreparedBackup} disabled={backupBusy}>اشتراک‌گذاری ZIP</button></div></div>}
+         <hr/>
+         <h3>بازیابی از فایل گوشی دیگر</h3>
+         <label>انتخاب فایل ZIP پشتیبان<input type="file" accept=".zip,application/zip" onChange={event => setRestoreFile(event.target.files?.[0] ?? null)}/></label>
+         <label>گذرواژهٔ همان فایل<input type="password" autoComplete="off" value={restorePassword} onChange={event => setRestorePassword(event.target.value)}/></label>
+         <button onClick={restoreBackup} disabled={!repository || !restoreFile || !restorePassword || backupBusy}>بررسی و بازیابی فایل انتخاب‌شده</button>
+       </section>}
        {page==='support' && <div className="support card"><img src={majoraLogo} alt="لوگوی MAJORA"/><span className="eyebrow">توسعه و پشتیبانی</span><h1>ماژورا</h1><p>شرکت نرم‌افزاری و توسعهٔ کسب‌وکار ماژورا</p><strong>نرم‌افزار به سبک کار شما</strong><strong className="support-tagline">با ماژورا کسب‌وکارت هوشمنده، کافیه مشکلتو بگی!!!</strong><p>برای راهنمایی برنامه یا درخواست توسعهٔ اختصاصی:</p><div className="support-links"><a href="tel:09105796971"><span>تماس: </span><bdi dir="ltr">0910-579-6971</bdi></a><a href="tel:09019990440"><span>تماس: </span><bdi dir="ltr">0901-999-0440</bdi></a><a href="https://www.instagram.com/majora_app/" target="_blank" rel="noreferrer">اینستاگرام: ‎@majora_app</a></div></div>}
        {inspectedProduct && <div className="sheet-backdrop" onClick={() => setInspectedProductId(null)}><section className="product-detail-sheet" onClick={event => event.stopPropagation()} aria-label={`جزئیات ${inspectedProduct.name}`}><div className="sheet-header"><h2>جزئیات کالا</h2><button aria-label="بستن جزئیات" onClick={() => setInspectedProductId(null)}>×</button></div><div className="detail-photo"><ProductImage product={inspectedProduct}/></div><h2>{inspectedProduct.name}</h2><p>{[inspectedProduct.model, inspectedProduct.color, inspectedProduct.category.replaceAll('/', ' › ')].filter(Boolean).join(' · ')}</p><p><strong>{formatRial(inspectedProduct.priceRial)} ریال</strong> · موجودی {formatRial(inspectedProduct.stock)}</p>{page === 'sale' ? <button className="primary" onClick={() => { addProductToCart(inspectedProduct); setInspectedProductId(null); }}>+ افزودن به فاکتور</button> : <button className="primary" onClick={() => { startProductEdit(inspectedProduct); setInspectedProductId(null); }}>ویرایش کالا</button>}</section></div>}
      </main><footer className="mobile-nav">{nav.slice(0, 4).map(n => <button key={n.key} className={page===n.key?'active':''} onClick={() => changePage(n.key)}><span aria-hidden="true">{n.icon}</span>{n.label}</button>)}<button onClick={() => setMenuOpen(true)}><span aria-hidden="true">☰</span>بیشتر</button></footer></div>

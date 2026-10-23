@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes, webcrypto } from 'node:crypto';
+import JSZip from 'jszip';
 
 const adb = (...args) => execFileSync('adb', args, { encoding: 'utf8' }).trim();
 const packageName = 'ir.majora.classicbag';
@@ -83,20 +84,37 @@ try {
   console.log(`Backup control after native tap: ${afterTap}`);
   let files = '';
   for (let attempt = 0; attempt < 50; attempt++) {
-    try { files = adb('shell', 'find', '/sdcard/Documents/MAJORA/Backups', '-type', 'f', '-name', '*.zip'); }
-    catch { /* The backup directory is created on demand. */ }
+    try { files = adb('shell', 'run-as', packageName, 'ls', 'cache/exports'); }
+    catch { /* The private cache directory is created on demand. */ }
     if (files.includes('majora-backup-')) break;
     await delay(1000);
   }
   if (!files.includes('majora-backup-')) {
     const feedback = await evaluate('JSON.stringify({ alerts: window.__majoraTestAlerts, button: document.querySelector(".backup-card button.primary")?.textContent, filesystemPlugin: !!window.Capacitor?.Plugins?.Filesystem })');
-    const nearby = adb('shell', 'find', '/sdcard', '-maxdepth', '7', '-iname', '*backup*');
-    throw new Error(`Encrypted backup was not saved in Documents. Dialogs: ${JSON.stringify(dialogs)}. Nearby files: ${nearby}. UI: ${feedback}`);
+    throw new Error(`Encrypted backup was not created in app cache. Dialogs: ${JSON.stringify(dialogs)}. UI: ${feedback}`);
   }
-  const file = files.split(/\r?\n/).find(item => item.includes('majora-backup-'));
-  const size = Number(adb('shell', 'stat', '-c', '%s', file));
+  const filename = files.split(/\r?\n/).find(item => item.startsWith('majora-backup-') && item.endsWith('.zip'));
+  const path = `cache/exports/${filename}`;
+  const size = Number(adb('shell', 'run-as', packageName, 'stat', '-c', '%s', path));
   if (!(size > 100)) throw new Error('Encrypted backup is empty');
-  console.log(`Native backup smoke passed: ${file} (${size} bytes)`);
+  const bytes = execFileSync('adb', ['exec-out', 'run-as', packageName, 'cat', path], { maxBuffer: 64 * 1024 * 1024 });
+  if (bytes.length !== size) throw new Error('Backup cache file was truncated');
+  const outer = await JSZip.loadAsync(bytes);
+  const envelope = JSON.parse(await outer.file('manifest.json').async('string'));
+  if (envelope.format !== 'majora-encrypted-zip-v1') throw new Error('Backup envelope format is wrong');
+  const keyMaterial = await webcrypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+  const key = await webcrypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt: Buffer.from(envelope.salt, 'base64'), iterations: envelope.iterations }, keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  const encrypted = await outer.file('payload.enc').async('uint8array');
+  const plaintext = await webcrypto.subtle.decrypt({ name: 'AES-GCM', iv: Buffer.from(envelope.iv, 'base64') }, key, encrypted);
+  const inner = await JSZip.loadAsync(plaintext);
+  const manifest = JSON.parse(await inner.file('manifest.json').async('string'));
+  const database = await inner.file('database/full-sqlite.json').async('string');
+  if (manifest.databaseHash !== createHash('sha256').update(database).digest('hex')) throw new Error('Backup database checksum mismatch');
+  if (!JSON.parse(database).tables.some(table => table.name === 'store')) throw new Error('Backup database has no store table');
+  if (!inner.file('ui/preferences.json')) throw new Error('Backup omitted UI preferences');
+  const readyUi = await evaluate('document.querySelector(".backup-ready")?.innerText ?? ""');
+  if (!readyUi.includes(filename)) throw new Error('Backup save/share controls did not appear');
+  console.log(`Native encrypted backup verified in private cache: ${filename} (${size} bytes)`);
 } finally {
   socket.close();
   adb('forward', '--remove', 'tcp:9222');

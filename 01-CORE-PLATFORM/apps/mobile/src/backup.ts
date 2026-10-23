@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
 import { Directory, Filesystem } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
+import { Capacitor, registerPlugin } from '@capacitor/core';
 import type { ShopRepository } from '@majora/database';
 import type { InvoiceBrand } from './invoice-document';
 import { activateRestoredDatabase, exportNativeDatabase, importVerifiedDatabaseStage } from './native-db';
@@ -9,6 +10,8 @@ const iterations = 310_000;
 const encoder = new TextEncoder();
 const allowedTables = new Set(['schema_migrations','store','category','product','customer','price_batch','price_event','stock_balance','stock_movement','template_version','template_field','invoice','invoice_counter','invoice_revision','invoice_line','payment','audit_event']);
 const preferenceKeys = ['compactCards', 'showStock', 'showCardNumber', 'confirmIssue', 'welcomeSound'] as const;
+const backupTransfer = registerPlugin<{ save(options: { uri: string; filename: string }): Promise<{ saved: boolean }> }>('BackupTransfer');
+export type BackupArtifact = { path: string; filename: string; bytes: number; databaseHash: string };
 
 function storedPreferences(): Record<string, boolean> {
   const raw = localStorage.getItem('majora-ui-preferences-v1');
@@ -44,7 +47,7 @@ function monthFolder(at: string): string {
 }
 
 export async function createEncryptedBackup(repo: ShopRepository, password: string, brand: InvoiceBrand, logo: string,
-  onProgress?: (current: number, total: number) => void): Promise<{ path: string; bytes: number; databaseHash: string }> {
+  onProgress?: (current: number, total: number) => void): Promise<BackupArtifact> {
   if (password.length < 12) throw new Error('گذرواژهٔ پشتیبان باید دست‌کم ۱۲ نویسه باشد.');
   const snapshot = await exportNativeDatabase();
   const databaseJson = JSON.stringify(snapshot);
@@ -78,9 +81,6 @@ export async function createEncryptedBackup(repo: ShopRepository, password: stri
       await Promise.all(Array.from(host.querySelectorAll('img')).map(image => image.decode().catch(() => undefined)));
       const pdf = await createInvoicePdf(host, 'a4', 1.5);
       inner.file(`invoices/${folder}/${entry.receipt.number}.pdf`, pdf);
-      const pdfBytes = new Uint8Array(await pdf.arrayBuffer());
-      await Filesystem.writeFile({ path: `MAJORA/Invoices/${folder}/${entry.receipt.number}.pdf`, directory: Directory.Documents,
-        data: base64(pdfBytes), recursive: true });
     } finally { root.unmount(); host.remove(); }
     onProgress?.(index + 1, allInvoices.length);
   }
@@ -102,13 +102,21 @@ export async function createEncryptedBackup(repo: ShopRepository, password: stri
   const file = await outer.generateAsync({ type: 'uint8array', compression: 'STORE' });
   const date = new Date();
   const filename = `majora-backup-${date.toISOString().replace(/[:.]/g, '-')}.zip`;
-  const path = `MAJORA/Backups/${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${filename}`;
-  await Filesystem.writeFile({ path, directory: Directory.Documents, data: base64(file), recursive: true });
-  const sharePath = `exports/${filename}`;
-  await Filesystem.writeFile({ path: sharePath, directory: Directory.Cache, data: base64(file), recursive: true });
-  const shareFile = await Filesystem.getUri({ path: sharePath, directory: Directory.Cache });
-  await Share.share({ title: 'پشتیبان رمزدار ماژورا', files: [shareFile.uri], dialogTitle: 'اشتراک یا ذخیرهٔ پشتیبان' }).catch(() => undefined);
-  return { path, bytes: file.byteLength, databaseHash };
+  const path = `exports/${filename}`;
+  await Filesystem.writeFile({ path, directory: Directory.Cache, data: base64(file), recursive: true });
+  return { path, filename, bytes: file.byteLength, databaseHash };
+}
+
+export async function saveBackupToChosenFile(artifact: BackupArtifact): Promise<boolean> {
+  const file = await Filesystem.getUri({ path: artifact.path, directory: Directory.Cache });
+  if (Capacitor.getPlatform() === 'android') return (await backupTransfer.save({ uri: file.uri, filename: artifact.filename })).saved;
+  await Share.share({ title: 'ذخیرهٔ پشتیبان رمزدار ماژورا', files: [file.uri], dialogTitle: 'ذخیرهٔ فایل ZIP' });
+  return true;
+}
+
+export async function shareBackup(artifact: BackupArtifact): Promise<void> {
+  const file = await Filesystem.getUri({ path: artifact.path, directory: Directory.Cache });
+  await Share.share({ title: 'پشتیبان رمزدار ماژورا', files: [file.uri], dialogTitle: 'اشتراک‌گذاری فایل ZIP' });
 }
 
 export async function restoreEncryptedBackup(file: File, password: string): Promise<void> {
@@ -148,10 +156,6 @@ export async function restoreEncryptedBackup(file: File, password: string): Prom
   for (const path of manifest.photos) {
     const data = await inner.file(`photos/${path}`)!.async('base64');
     await Filesystem.writeFile({ path, directory: Directory.Data, data, recursive: true });
-  }
-  for (const path of Object.keys(inner.files).filter(path => /^invoices\/[0-9]{4}\/[0-9]{2}\/[0-9]+\.pdf$/.test(path))) {
-    const data = await inner.file(path)!.async('base64');
-    await Filesystem.writeFile({ path: `MAJORA/Invoices/${path.slice('invoices/'.length)}`, directory: Directory.Documents, data, recursive: true });
   }
   if (preferences) localStorage.setItem('majora-ui-preferences-v1', JSON.stringify(preferences));
   activateRestoredDatabase(stage);
