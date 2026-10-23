@@ -77,8 +77,16 @@ try {
   await delay(300);
   const point = await evaluate('(() => { const rect = document.querySelector(".backup-card button.primary").getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, visible: rect.top >= 0 && rect.bottom <= innerHeight }; })()');
   if (!point.visible) throw new Error(`Backup button did not scroll into view: ${JSON.stringify(point)}`);
-  await command('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
-  await command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+  const hit = await evaluate(`document.elementFromPoint(${point.x}, ${point.y})?.closest('button')?.textContent ?? ''`);
+  if (!hit.includes('ساخت فایل ZIP')) throw new Error(`Backup tap target is obstructed: ${hit}`);
+  adb('shell', 'uiautomator', 'dump', '/sdcard/majora-qa.xml');
+  const hierarchy = adb('exec-out', 'cat', '/sdcard/majora-qa.xml');
+  const bounds = hierarchy.match(/resource-id="ir\.majora\.classicbag:id\/webview"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/);
+  if (!bounds) throw new Error('Cannot locate Android WebView bounds');
+  const viewport = await evaluate('({ width: innerWidth, height: innerHeight })');
+  const touchX = Math.round(Number(bounds[1]) + point.x * (Number(bounds[3]) - Number(bounds[1])) / viewport.width);
+  const touchY = Math.round(Number(bounds[2]) + point.y * (Number(bounds[4]) - Number(bounds[2])) / viewport.height);
+  adb('shell', 'input', 'tap', String(touchX), String(touchY));
   await delay(300);
   const afterTap = await evaluate('JSON.stringify({ button: document.querySelector(".backup-card button.primary")?.textContent, alerts: window.__majoraTestAlerts })');
   console.log(`Backup control after native tap: ${afterTap}`);
