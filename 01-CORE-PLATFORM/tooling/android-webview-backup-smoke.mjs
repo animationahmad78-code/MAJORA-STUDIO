@@ -71,9 +71,11 @@ try {
   if (!entered) throw new Error('Backup password input unavailable');
   await delay(300);
   await evaluate('window.__majoraTestAlerts = []; window.alert = message => window.__majoraTestAlerts.push(String(message));');
-  const point = await evaluate('(() => { const button = document.querySelector(".backup-card button.primary"); if (!button || button.disabled) return null; button.scrollIntoView({ block: "center" }); const rect = button.getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }; })()');
-  if (!point) throw new Error('Backup button remained disabled');
-  await delay(150);
+  const canTap = await evaluate('(() => { const button = document.querySelector(".backup-card button.primary"); if (!button || button.disabled) return false; document.documentElement.style.scrollBehavior = "auto"; button.scrollIntoView({ behavior: "instant", block: "center" }); return true; })()');
+  if (!canTap) throw new Error('Backup button remained disabled');
+  await delay(300);
+  const point = await evaluate('(() => { const rect = document.querySelector(".backup-card button.primary").getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, visible: rect.top >= 0 && rect.bottom <= innerHeight }; })()');
+  if (!point.visible) throw new Error(`Backup button did not scroll into view: ${JSON.stringify(point)}`);
   await command('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
   await command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
   await delay(300);
