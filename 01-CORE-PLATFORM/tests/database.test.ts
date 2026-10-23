@@ -1,15 +1,17 @@
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
-import { isValidJalaliDate, ShopRepository, type SqlPort, type SqlValue } from '../packages/database/src/index';
+import { invoiceLineAmounts, isValidJalaliDate, ShopRepository, type SqlPort, type SqlValue } from '../packages/database/src/index';
 
 function memoryShop() {
   const sqlite = new DatabaseSync(':memory:');
   const migration = readFileSync(new URL('../packages/database/migrations/001_init.sql', import.meta.url), 'utf8');
   const detailMigration = readFileSync(new URL('../packages/database/migrations/002_product_detail.sql', import.meta.url), 'utf8');
+  const archiveMigration = readFileSync(new URL('../packages/database/migrations/003_archive.sql', import.meta.url), 'utf8');
   sqlite.exec(migration);
   sqlite.exec(migration); // Starting the app again must not destroy or reject an existing database.
   sqlite.exec(detailMigration);
+  sqlite.exec(archiveMigration);
   const port: SqlPort = {
     async execute(sql) { sqlite.exec(sql); },
     async run(sql, values: SqlValue[] = []) {
@@ -183,6 +185,70 @@ describe('SQLite operational records', () => {
     expect((await repo.listProducts())[0].stock).toBe(3);
     const next = await repo.issueInvoice('next', '', [{ productId: 'bag', quantity: 1 }]);
     expect(next.number).toBe(2);
+    sqlite.close();
+  });
+
+  it('rounds line discounts in whole rial and persists exact totals', async () => {
+    const { sqlite, repo } = memoryShop();
+    await repo.initialize('test');
+    expect(invoiceLineAmounts(1001, 1, 1000)).toEqual({ subtotalRial: 1001, discountRial: 100, totalRial: 901 });
+    const receipt = await repo.issueInvoice('discount', '', [{ name: 'کیف', unitPriceRial: 1001, quantity: 2, discountBasisPoints: 1000 }]);
+    expect(receipt).toMatchObject({ subtotalRial: 2002, discountRial: 200, totalRial: 1802 });
+    expect(sqlite.prepare('SELECT subtotal_rial,discount_rial,grand_total_rial FROM invoice_revision WHERE invoice_id=?').get('discount'))
+      .toMatchObject({ subtotal_rial: 2002, discount_rial: 200, grand_total_rial: 1802 });
+    await expect(repo.issueInvoice('invalid', '', [{ name: 'کیف', unitPriceRial: 100, quantity: 1, discountBasisPoints: 10001 }])).rejects.toThrow();
+    sqlite.close();
+  });
+
+  it('keeps shipping, payment and balance consistent in the invoice snapshot', async () => {
+    const { sqlite, repo } = memoryShop();
+    await repo.initialize('test');
+    const receipt = await repo.issueInvoice('paid', 'مریم', [{ name: 'کیف', quantity: 1, unitPriceRial: 1000, discountBasisPoints: 1000 }],
+      '09123456789', '', '', '', true, { customerAddress: 'مشهد', paymentMethod: 'کارت', shippingRial: 50, paidRial: 300 });
+    expect(receipt).toMatchObject({ subtotalRial: 1000, discountRial: 100, shippingRial: 50, totalRial: 950, paidRial: 300, balanceRial: 650, customerAddress: 'مشهد' });
+    expect(sqlite.prepare('SELECT subtotal_rial,discount_rial,shipping_rial,grand_total_rial,paid_rial,balance_rial FROM invoice_revision WHERE invoice_id=?').get('paid'))
+      .toMatchObject({ subtotal_rial: 1000, discount_rial: 100, shipping_rial: 50, grand_total_rial: 950, paid_rial: 300, balance_rial: 650 });
+    await expect(repo.issueInvoice('too-much', '', [{ name: 'کیف', quantity: 1, unitPriceRial: 100 }], '', '', '', '', true, { paidRial: 101 })).rejects.toThrow('پرداختی');
+    sqlite.close();
+  });
+
+  it('revises an issued invoice while preserving its number, date, old snapshot and stock audit', async () => {
+    const { sqlite, repo } = memoryShop();
+    await repo.initialize('test');
+    await repo.addProduct({ id: 'bag', name: 'کیف', category: 'کیف', priceRial: 1000, stock: 4 });
+    const first = await repo.issueInvoice('sale', 'مریم', [{ productId: 'bag', quantity: 1 }], '09123456789', '۱۴۰۵/۰۷/۲۹');
+    const revised = await repo.reviseInvoice('sale', [{ productId: 'bag', quantity: 2, unitPriceRial: 1000, discountBasisPoints: 1000 }], 'مریم', '09123456789', '', 'اصلاح تعداد');
+    expect(revised).toMatchObject({ id: first.id, number: first.number, at: first.at, dateJalali: first.dateJalali, revision: 2, totalRial: 1800 });
+    expect((await repo.listProducts())[0].stock).toBe(2);
+    expect((await repo.listInvoiceRevisions('sale')).map(x => x.receipt.revision)).toEqual([2, 1]);
+    expect((await repo.listInvoiceRevisions('sale'))[1].receipt).toEqual(first);
+    await expect(repo.reviseInvoice('sale', [{ productId: 'bag', quantity: 5 }], 'مریم', '', '', 'زیاد')).rejects.toThrow('موجودی');
+    expect((await repo.listInvoiceRevisions('sale')).length).toBe(2);
+    expect((await repo.listProducts())[0].stock).toBe(2);
+    sqlite.close();
+  });
+
+  it('archives and restores products, customers and invoices without deleting records', async () => {
+    const { sqlite, repo } = memoryShop();
+    await repo.initialize('test');
+    await repo.addProduct({ id: 'bag', name: 'کیف', category: 'کیف', priceRial: 1000, stock: 2 });
+    const issued = await repo.issueInvoice('sale', 'مریم', [{ productId: 'bag', quantity: 1 }], '09123456789');
+    const customerId = (await repo.listCustomers())[0].id;
+    await repo.archiveProduct('bag');
+    await repo.setCustomerArchived(customerId, true);
+    await repo.setInvoiceArchived(issued.id, true);
+    expect(await repo.listProducts()).toEqual([]);
+    expect(await repo.listCustomers()).toEqual([]);
+    expect(await repo.listInvoiceHistory()).toEqual([]);
+    expect((await repo.listArchivedProducts()).map(x => x.id)).toEqual(['bag']);
+    expect((await repo.listArchivedCustomers()).map(x => x.id)).toEqual([customerId]);
+    expect((await repo.listArchivedInvoices()).map(x => x.receipt.id)).toEqual(['sale']);
+    await repo.restoreProduct('bag');
+    await repo.setCustomerArchived(customerId, false);
+    await repo.setInvoiceArchived(issued.id, false);
+    expect((await repo.listProducts()).map(x => x.id)).toEqual(['bag']);
+    expect((await repo.listCustomers()).map(x => x.id)).toEqual([customerId]);
+    expect((await repo.listInvoiceHistory()).map(x => x.receipt.id)).toEqual(['sale']);
     sqlite.close();
   });
 });

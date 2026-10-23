@@ -10,13 +10,23 @@ export interface SqlPort {
 type ProductRow = { id: string; name: string; category: string | null; model: string | null; color: string | null; image_path: string | null; price_rial: number; quantity_milli: number; archived_at: string | null };
 type EventRow = { id: string; batch_id: string; product_id: string; old_price_rial: number; new_price_rial: number; created_at: string; reason: string };
 type BatchRow = { id: string; percent_basis_points: number; created_at: string; scope: string; source_batch_id: string | null; product_ids: string | null; undone_at: string | null };
-export type InvoiceInputLine = { productId?: string; name?: string; unitPriceRial?: number; quantity: number };
-export type InvoiceReceipt = { id: string; number: number; at: string; dateJalali?: string; customerName: string; customerPhone?: string; showCardNumber?: boolean; lines: { productId?: string; name: string; model?: string; color?: string; quantity: number; unitPriceRial: number; totalRial: number }[]; totalRial: number; templateVersionId?: string; templateFields?: Record<string, string> };
+export type InvoiceInputLine = { productId?: string; name?: string; unitPriceRial?: number; quantity: number; discountBasisPoints?: number };
+export type InvoiceDetails = { customerAddress?: string; paymentMethod?: string; dueDateJalali?: string; shippingRial?: number; paidRial?: number; showCardNumber?: boolean };
+export type InvoiceReceipt = { id: string; number: number; at: string; dateJalali?: string; customerName: string; customerPhone?: string; customerAddress?: string; paymentMethod?: string; dueDateJalali?: string; showCardNumber?: boolean; lines: { productId?: string; name: string; model?: string; color?: string; quantity: number; unitPriceRial: number; discountBasisPoints?: number; discountRial?: number; totalRial: number }[]; subtotalRial?: number; discountRial?: number; shippingRial?: number; paidRial?: number; balanceRial?: number; totalRial: number; revision?: number; templateVersionId?: string; templateFields?: Record<string, string> };
 export type InvoiceHistoryEntry = { receipt: InvoiceReceipt; status: 'issued' | 'void' };
-export type CustomerSummary = { id: string; name: string; firstName: string; lastName: string; phone: string; invoiceCount: number; lastPurchaseAt: string | null };
+export type CustomerSummary = { id: string; name: string; firstName: string; lastName: string; phone: string; invoiceCount: number; lastPurchaseAt: string | null; createdAt?: string };
 
 export function normalizeSearch(input: string): string {
   return input.normalize('NFKC').replace(/ي/g, 'ی').replace(/ك/g, 'ک').replace(/[\u200c\s]+/g, ' ').trim().toLocaleLowerCase('fa-IR');
+}
+
+export function invoiceLineAmounts(unitPriceRial: number, quantity: number, discountBasisPoints = 0): { subtotalRial: number; discountRial: number; totalRial: number } {
+  assertRial(unitPriceRial);
+  if (!Number.isSafeInteger(quantity) || quantity <= 0 || !Number.isSafeInteger(discountBasisPoints) || discountBasisPoints < 0 || discountBasisPoints > 10000) throw new Error('تعداد یا درصد تخفیف نامعتبر است.');
+  const subtotal = BigInt(unitPriceRial) * BigInt(quantity);
+  if (subtotal > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('مبلغ ردیف بیش از حد مجاز است.');
+  const discount = (subtotal * BigInt(discountBasisPoints) + 5000n) / 10000n;
+  return { subtotalRial: Number(subtotal), discountRial: Number(discount), totalRial: Number(subtotal - discount) };
 }
 
 export function isValidJalaliDate(input: string): boolean {
@@ -153,6 +163,28 @@ export class ShopRepository {
     });
   }
 
+  async listArchivedProducts(): Promise<Product[]> {
+    const rows = await this.db.query<ProductRow>(`SELECT p.id,p.name,COALESCE(c.name,'بدون دسته') AS category,p.model,p.color,p.image_path,p.price_rial,
+      COALESCE(s.quantity_milli,0) AS quantity_milli,p.archived_at FROM product p
+      LEFT JOIN category c ON c.id=p.category_id LEFT JOIN stock_balance s ON s.product_id=p.id
+      WHERE p.store_id=? AND p.archived_at IS NOT NULL ORDER BY p.archived_at DESC`, [this.storeId]);
+    return rows.map(r => ({ id: r.id, name: r.name, category: r.category ?? 'بدون دسته', model: r.model ?? '', color: r.color ?? '', imagePath: r.image_path ?? undefined, priceRial: r.price_rial, stock: r.quantity_milli / 1000, archived: true }));
+  }
+
+  async listProductPhotoPaths(): Promise<string[]> {
+    const rows = await this.db.query<{ image_path: string }>('SELECT DISTINCT image_path FROM product WHERE store_id=? AND image_path IS NOT NULL', [this.storeId]);
+    return rows.map(row => row.image_path).filter(path => /^product-images\/[a-f0-9-]+\.jpg$/.test(path));
+  }
+
+  async restoreProduct(productId: string): Promise<void> {
+    await this.db.transaction(async () => {
+      const at = new Date().toISOString();
+      const result = await this.db.run('UPDATE product SET archived_at=NULL,updated_at=?,revision=revision+1 WHERE id=? AND store_id=? AND archived_at IS NOT NULL', [at, productId, this.storeId]);
+      if (result.changes !== 1) throw new Error('کالای بایگانی‌شده پیدا نشد.');
+      await this.audit('product', productId, 'restore', {}, at);
+    });
+  }
+
   async updatePrice(productId: string, newPriceRial: number): Promise<void> {
     assertRial(newPriceRial);
     await this.db.transaction(async () => {
@@ -226,11 +258,13 @@ export class ShopRepository {
   }
 
   /** requestId is retained by the caller until a response, making retries safe after interruption. */
-  async issueInvoice(requestId: string, customerName: string, inputLines: InvoiceInputLine[], customerPhone = '', dateJalali = '', customerFirstName = '', customerLastName = '', showCardNumber = true): Promise<InvoiceReceipt> {
+  async issueInvoice(requestId: string, customerName: string, inputLines: InvoiceInputLine[], customerPhone = '', dateJalali = '', customerFirstName = '', customerLastName = '', showCardNumber = true, details: InvoiceDetails = {}): Promise<InvoiceReceipt> {
     if (!requestId || !inputLines.length) throw new Error('فاکتور باید شناسه و دست‌کم یک ردیف داشته باشد.');
     if (inputLines.some(line => !Number.isSafeInteger(line.quantity) || line.quantity <= 0 || !Number.isSafeInteger(line.quantity * 1000))) throw new Error('تعداد کالا نامعتبر است.');
     if (customerPhone && !/^\+?[0-9۰-۹٠-٩\s-]{7,20}$/.test(customerPhone)) throw new Error('شمارهٔ تماس مشتری نامعتبر است.');
     if (dateJalali && !isValidJalaliDate(dateJalali)) throw new Error('تاریخ شمسی نامعتبر است؛ سال/ماه/روز را بررسی کنید.');
+    if (details.dueDateJalali && !isValidJalaliDate(details.dueDateJalali)) throw new Error('تاریخ سررسید نامعتبر است.');
+    assertRial(details.shippingRial ?? 0); assertRial(details.paidRial ?? 0);
     return this.db.transaction(async () => {
       const previous = await this.db.query<{ snapshot_json: string; status: string }>(`SELECT r.snapshot_json,i.status FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id
         WHERE i.id=? AND i.store_id=? AND r.revision_no=1`, [requestId, this.storeId]);
@@ -258,29 +292,35 @@ export class ShopRepository {
         }
         if (!name || price === undefined) throw new Error('شرح و قیمت ردیف دستی لازم است.');
         assertRial(price);
-        const total = BigInt(price) * BigInt(input.quantity);
-        if (total > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('مبلغ فاکتور بیش از حد مجاز است.');
-        lines.push({ productId: input.productId, name: [name, model, color].filter(Boolean).join(' · '), model, color, quantity: input.quantity, unitPriceRial: price, totalRial: Number(total) });
+        const amounts = invoiceLineAmounts(price, input.quantity, input.discountBasisPoints);
+        lines.push({ productId: input.productId, name: [name, model, color].filter(Boolean).join(' · '), model, color, quantity: input.quantity, unitPriceRial: price, discountBasisPoints: input.discountBasisPoints ?? 0, discountRial: amounts.discountRial, totalRial: amounts.totalRial });
       }
-      const total = lines.reduce((sum, line) => sum + BigInt(line.totalRial), 0n);
-      if (total > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('مجموع فاکتور بیش از حد مجاز است.');
+      const subtotal = lines.reduce((sum, line) => sum + BigInt(line.unitPriceRial) * BigInt(line.quantity), 0n);
+      const discount = lines.reduce((sum, line) => sum + BigInt(line.discountRial ?? 0), 0n);
+      const total = subtotal - discount + BigInt(details.shippingRial ?? 0);
+      if (subtotal > BigInt(Number.MAX_SAFE_INTEGER) || total > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('مجموع فاکتور بیش از حد مجاز است.');
+      if (BigInt(details.paidRial ?? 0) > total) throw new Error('مبلغ پرداختی از مبلغ نهایی بیشتر است.');
       const template = await this.loadTemplate();
-      const receipt: InvoiceReceipt = { id: requestId, number, at: now, dateJalali: dateJalali || new Intl.DateTimeFormat('fa-IR-u-ca-persian', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now)), customerName: customerName.trim(), customerPhone: customerPhone.trim(), showCardNumber, lines, totalRial: Number(total), templateVersionId: template?.id, templateFields: template?.fields };
+      const receipt: InvoiceReceipt = { id: requestId, number, at: now, dateJalali: dateJalali || new Intl.DateTimeFormat('fa-IR-u-ca-persian', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now)), customerName: customerName.trim(), customerPhone: customerPhone.trim(),
+        customerAddress: details.customerAddress?.trim() ?? '', paymentMethod: details.paymentMethod?.trim() ?? '', dueDateJalali: details.dueDateJalali ?? '',
+        showCardNumber: details.showCardNumber ?? showCardNumber, lines, subtotalRial: Number(subtotal), discountRial: Number(discount), shippingRial: details.shippingRial ?? 0,
+        paidRial: details.paidRial ?? 0, balanceRial: Number(total) - (details.paidRial ?? 0), totalRial: Number(total), revision: 1, templateVersionId: template?.id, templateFields: template?.fields };
       let customerId: string | null = null;
       if (receipt.customerName) {
         const existing = receipt.customerPhone ? await this.db.query<{ id: string }>('SELECT id FROM customer WHERE store_id=? AND phone=? AND archived_at IS NULL ORDER BY created_at LIMIT 1', [this.storeId, receipt.customerPhone]) : [];
         customerId = existing[0]?.id ?? crypto.randomUUID();
-        if (!existing.length) await this.db.run('INSERT INTO customer(id,store_id,name,first_name,last_name,phone,created_at) VALUES(?,?,?,?,?,?,?)', [customerId, this.storeId, receipt.customerName, customerFirstName.trim() || null, customerLastName.trim() || null, receipt.customerPhone || null, now]);
+        if (!existing.length) await this.db.run('INSERT INTO customer(id,store_id,name,first_name,last_name,phone,address,created_at) VALUES(?,?,?,?,?,?,?,?)', [customerId, this.storeId, receipt.customerName, customerFirstName.trim() || null, customerLastName.trim() || null, receipt.customerPhone || null, receipt.customerAddress || null, now]);
         else if (customerFirstName.trim() && customerLastName.trim()) await this.db.run('UPDATE customer SET name=?,first_name=?,last_name=? WHERE id=? AND store_id=?', [receipt.customerName, customerFirstName.trim(), customerLastName.trim(), customerId, this.storeId]);
       }
       const revisionId = crypto.randomUUID();
       await this.db.run(`INSERT INTO invoice(id,store_id,customer_id,invoice_number,status,current_revision,created_at,issued_at)
         VALUES(?,?,?,?,?,?,?,?)`, [requestId, this.storeId, customerId, number, 'issued', 1, now, now]);
       await this.db.run(`INSERT INTO invoice_revision(id,invoice_id,revision_no,template_version_id,snapshot_json,subtotal_rial,discount_rial,shipping_rial,grand_total_rial,paid_rial,balance_rial,reason,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, [revisionId, requestId, 1, template?.id ?? null, JSON.stringify(receipt), receipt.totalRial, 0, 0, receipt.totalRial, 0, receipt.totalRial, 'issue', now]);
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, [revisionId, requestId, 1, template?.id ?? null, JSON.stringify(receipt), receipt.subtotalRial!, receipt.discountRial!, receipt.shippingRial!, receipt.totalRial, receipt.paidRial!, receipt.balanceRial!, 'issue', now]);
+      if (receipt.paidRial) await this.db.run('INSERT INTO payment(id,invoice_revision_id,amount_rial,method,paid_at) VALUES(?,?,?,?,?)', [crypto.randomUUID(), revisionId, receipt.paidRial, receipt.paymentMethod || 'other', now]);
       for (const line of lines) {
         await this.db.run(`INSERT INTO invoice_line(id,invoice_revision_id,product_id,name_snapshot,color_snapshot,unit_snapshot,quantity_milli,unit_price_rial,discount_rial,line_total_rial)
-          VALUES(?,?,?,?,?,?,?,?,?,?)`, [crypto.randomUUID(), revisionId, line.productId ?? null, line.name, line.color ?? null, 'عدد', line.quantity * 1000, line.unitPriceRial, 0, line.totalRial]);
+          VALUES(?,?,?,?,?,?,?,?,?,?)`, [crypto.randomUUID(), revisionId, line.productId ?? null, line.name, line.color ?? null, 'عدد', line.quantity * 1000, line.unitPriceRial, line.discountRial ?? 0, line.totalRial]);
         if (line.productId) {
           const quantityMilli = line.quantity * 1000;
           if (!Number.isSafeInteger(quantityMilli)) throw new Error('تعداد کالا بیش از حد مجاز است.');
@@ -296,26 +336,68 @@ export class ShopRepository {
 
   async listInvoices(): Promise<InvoiceReceipt[]> {
     const rows = await this.db.query<{ snapshot_json: string }>(`SELECT r.snapshot_json FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id
-      WHERE i.store_id=? AND i.status='issued' AND r.revision_no=i.current_revision ORDER BY i.invoice_number DESC`, [this.storeId]);
+      WHERE i.store_id=? AND i.status='issued' AND i.archived_at IS NULL AND r.revision_no=i.current_revision ORDER BY i.invoice_number DESC`, [this.storeId]);
     return rows.map(row => JSON.parse(row.snapshot_json) as InvoiceReceipt);
   }
 
   async listInvoiceHistory(): Promise<InvoiceHistoryEntry[]> {
     const rows = await this.db.query<{ snapshot_json: string; status: 'issued' | 'void' }>(
       `SELECT r.snapshot_json,i.status FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id
-       WHERE i.store_id=? AND i.status IN ('issued','void') AND r.revision_no=i.current_revision
+       WHERE i.store_id=? AND i.status IN ('issued','void') AND i.archived_at IS NULL AND r.revision_no=i.current_revision
        ORDER BY i.invoice_number DESC`, [this.storeId]);
     return rows.map(row => ({ receipt: JSON.parse(row.snapshot_json) as InvoiceReceipt, status: row.status }));
   }
 
+  async listArchivedInvoices(): Promise<InvoiceHistoryEntry[]> {
+    const rows = await this.db.query<{ snapshot_json: string; status: 'issued' | 'void' }>(
+      `SELECT r.snapshot_json,i.status FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id AND r.revision_no=i.current_revision
+       WHERE i.store_id=? AND i.archived_at IS NOT NULL ORDER BY i.archived_at DESC`, [this.storeId]);
+    return rows.map(row => ({ receipt: JSON.parse(row.snapshot_json) as InvoiceReceipt, status: row.status }));
+  }
+
+  async listInvoiceRevisions(invoiceId: string): Promise<{ receipt: InvoiceReceipt; reason: string; revisedAt: string }[]> {
+    const rows = await this.db.query<{ snapshot_json: string; reason: string; created_at: string }>(
+      `SELECT r.snapshot_json,r.reason,r.created_at FROM invoice_revision r JOIN invoice i ON i.id=r.invoice_id
+       WHERE i.id=? AND i.store_id=? ORDER BY r.revision_no DESC`, [invoiceId, this.storeId]);
+    return rows.map(row => ({ receipt: JSON.parse(row.snapshot_json) as InvoiceReceipt, reason: row.reason, revisedAt: row.created_at }));
+  }
+
+  async setInvoiceArchived(invoiceId: string, archived: boolean): Promise<void> {
+    await this.db.transaction(async () => {
+      const at = new Date().toISOString();
+      const result = await this.db.run(`UPDATE invoice SET archived_at=? WHERE id=? AND store_id=? AND ${archived ? 'archived_at IS NULL' : 'archived_at IS NOT NULL'}`,
+        [archived ? at : null, invoiceId, this.storeId]);
+      if (result.changes !== 1) throw new Error('فاکتور در وضعیت مورد انتظار پیدا نشد.');
+      await this.audit('invoice', invoiceId, archived ? 'archive' : 'restore', {}, at);
+    });
+  }
+
   async listCustomers(search = ''): Promise<CustomerSummary[]> {
     const needle = normalizeSearch(search);
-    const rows = await this.db.query<{ id: string; name: string; first_name: string | null; last_name: string | null; phone: string | null; invoice_count: number; last_purchase_at: string | null }>(
-      `SELECT c.id,c.name,c.first_name,c.last_name,c.phone,COUNT(i.id) AS invoice_count,MAX(i.issued_at) AS last_purchase_at
+    const rows = await this.db.query<{ id: string; name: string; first_name: string | null; last_name: string | null; phone: string | null; invoice_count: number; last_purchase_at: string | null; created_at: string }>(
+      `SELECT c.id,c.name,c.first_name,c.last_name,c.phone,c.created_at,COUNT(i.id) AS invoice_count,MAX(i.issued_at) AS last_purchase_at
        FROM customer c LEFT JOIN invoice i ON i.customer_id=c.id AND i.status='issued'
        WHERE c.store_id=? AND c.archived_at IS NULL
        GROUP BY c.id ORDER BY last_purchase_at DESC,c.created_at DESC`, [this.storeId]);
-    return rows.filter(row => normalizeSearch(`${row.name} ${row.phone ?? ''}`).includes(needle)).map(row => ({ id: row.id, name: row.name, firstName: row.first_name ?? '', lastName: row.last_name ?? '', phone: row.phone ?? '', invoiceCount: row.invoice_count, lastPurchaseAt: row.last_purchase_at }));
+    return rows.filter(row => normalizeSearch(`${row.name} ${row.phone ?? ''}`).includes(needle)).map(row => ({ id: row.id, name: row.name, firstName: row.first_name ?? '', lastName: row.last_name ?? '', phone: row.phone ?? '', invoiceCount: row.invoice_count, lastPurchaseAt: row.last_purchase_at, createdAt: row.created_at }));
+  }
+
+  async listArchivedCustomers(): Promise<CustomerSummary[]> {
+    const rows = await this.db.query<{ id: string; name: string; first_name: string | null; last_name: string | null; phone: string | null; invoice_count: number; last_purchase_at: string | null }>(
+      `SELECT c.id,c.name,c.first_name,c.last_name,c.phone,COUNT(i.id) AS invoice_count,MAX(i.issued_at) AS last_purchase_at
+       FROM customer c LEFT JOIN invoice i ON i.customer_id=c.id AND i.status='issued'
+       WHERE c.store_id=? AND c.archived_at IS NOT NULL GROUP BY c.id ORDER BY c.archived_at DESC`, [this.storeId]);
+    return rows.map(row => ({ id: row.id, name: row.name, firstName: row.first_name ?? '', lastName: row.last_name ?? '', phone: row.phone ?? '', invoiceCount: row.invoice_count, lastPurchaseAt: row.last_purchase_at }));
+  }
+
+  async setCustomerArchived(customerId: string, archived: boolean): Promise<void> {
+    await this.db.transaction(async () => {
+      const at = new Date().toISOString();
+      const result = await this.db.run(`UPDATE customer SET archived_at=? WHERE id=? AND store_id=? AND ${archived ? 'archived_at IS NULL' : 'archived_at IS NOT NULL'}`,
+        [archived ? at : null, customerId, this.storeId]);
+      if (result.changes !== 1) throw new Error('مشتری در وضعیت مورد انتظار پیدا نشد.');
+      await this.audit('customer', customerId, archived ? 'archive' : 'restore', {}, at);
+    });
   }
 
   async listCustomerInvoices(customerId: string): Promise<InvoiceHistoryEntry[]> {
@@ -323,6 +405,83 @@ export class ShopRepository {
       `SELECT r.snapshot_json,i.status FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id AND r.revision_no=i.current_revision
        WHERE i.store_id=? AND i.customer_id=? AND i.status IN ('issued','void') ORDER BY i.invoice_number DESC`, [this.storeId, customerId]);
     return rows.map(row => ({ receipt: JSON.parse(row.snapshot_json) as InvoiceReceipt, status: row.status }));
+  }
+
+  async reviseInvoice(invoiceId: string, inputLines: InvoiceInputLine[], customerName: string, customerPhone: string, dateJalali: string, reason: string, details: InvoiceDetails = {}): Promise<InvoiceReceipt> {
+    if (!inputLines.length || !reason.trim()) throw new Error('ردیف و دلیل ویرایش فاکتور لازم است.');
+    if (dateJalali && !isValidJalaliDate(dateJalali)) throw new Error('تاریخ شمسی نامعتبر است.');
+    if (customerPhone && !/^\+?[0-9۰-۹٠-٩\s-]{7,20}$/.test(customerPhone)) throw new Error('شمارهٔ تماس مشتری نامعتبر است.');
+    if (details.dueDateJalali && !isValidJalaliDate(details.dueDateJalali)) throw new Error('تاریخ سررسید نامعتبر است.');
+    assertRial(details.shippingRial ?? 0); assertRial(details.paidRial ?? 0);
+    return this.db.transaction(async () => {
+      const rows = await this.db.query<{ current_revision: number; snapshot_json: string; revision_id: string }>(
+        `SELECT i.current_revision,r.snapshot_json,r.id AS revision_id FROM invoice i
+         JOIN invoice_revision r ON r.invoice_id=i.id AND r.revision_no=i.current_revision
+         WHERE i.id=? AND i.store_id=? AND i.status='issued'`, [invoiceId, this.storeId]);
+      if (!rows.length) throw new Error('فاکتور صادرشده پیدا نشد.');
+      const current = rows[0];
+      const previous = JSON.parse(current.snapshot_json) as InvoiceReceipt;
+      const now = new Date().toISOString();
+      const lines: InvoiceReceipt['lines'] = [];
+      for (const input of inputLines) {
+        if (!Number.isSafeInteger(input.quantity) || input.quantity < 1 || !Number.isSafeInteger(input.quantity * 1000)) throw new Error('تعداد کالا نامعتبر است.');
+        let name = input.name?.trim() ?? '';
+        let model = ''; let color = '';
+        let price = input.unitPriceRial;
+        if (input.productId) {
+          const products = await this.db.query<{ name: string; model: string | null; color: string | null; price_rial: number }>(
+            'SELECT name,model,color,price_rial FROM product WHERE id=? AND store_id=?', [input.productId, this.storeId]);
+          if (!products.length) throw new Error('کالای ردیف پیدا نشد.');
+          name ||= products[0].name;
+          model = products[0].model ?? ''; color = products[0].color ?? '';
+          price ??= products[0].price_rial;
+        }
+        if (!name || price === undefined) throw new Error('شرح و قیمت ردیف لازم است.');
+        const amounts = invoiceLineAmounts(price, input.quantity, input.discountBasisPoints);
+        lines.push({ productId: input.productId, name, model, color, quantity: input.quantity, unitPriceRial: price, discountBasisPoints: input.discountBasisPoints ?? 0, discountRial: amounts.discountRial, totalRial: amounts.totalRial });
+      }
+      const subtotal = lines.reduce((sum, line) => sum + BigInt(line.unitPriceRial) * BigInt(line.quantity), 0n);
+      const discount = lines.reduce((sum, line) => sum + BigInt(line.discountRial ?? 0), 0n);
+      const grand = subtotal - discount + BigInt(details.shippingRial ?? previous.shippingRial ?? 0);
+      if (subtotal > BigInt(Number.MAX_SAFE_INTEGER) || grand > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('مبلغ فاکتور بیش از حد مجاز است.');
+      const paid = details.paidRial ?? previous.paidRial ?? 0;
+      if (BigInt(paid) > grand) throw new Error('مبلغ پرداختی از مبلغ نهایی بیشتر است.');
+      const receipt: InvoiceReceipt = { ...previous, customerName: customerName.trim(), customerPhone: customerPhone.trim(), dateJalali: dateJalali || previous.dateJalali,
+        customerAddress: details.customerAddress?.trim() ?? previous.customerAddress, paymentMethod: details.paymentMethod?.trim() ?? previous.paymentMethod,
+        dueDateJalali: details.dueDateJalali ?? previous.dueDateJalali, showCardNumber: details.showCardNumber ?? previous.showCardNumber,
+        lines, subtotalRial: Number(subtotal), discountRial: Number(discount), shippingRial: details.shippingRial ?? previous.shippingRial ?? 0,
+        paidRial: paid, balanceRial: Number(grand) - paid, totalRial: Number(grand), revision: current.current_revision + 1 };
+      const revisionId = crypto.randomUUID();
+      await this.db.run(`INSERT INTO invoice_revision(id,invoice_id,revision_no,template_version_id,snapshot_json,subtotal_rial,discount_rial,shipping_rial,grand_total_rial,paid_rial,balance_rial,reason,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, [revisionId, invoiceId, receipt.revision!, receipt.templateVersionId ?? null, JSON.stringify(receipt), receipt.subtotalRial!, receipt.discountRial!, receipt.shippingRial!, receipt.totalRial, receipt.paidRial!, receipt.balanceRial!, reason.trim(), now]);
+      if (receipt.paidRial) await this.db.run('INSERT INTO payment(id,invoice_revision_id,amount_rial,method,paid_at) VALUES(?,?,?,?,?)', [crypto.randomUUID(), revisionId, receipt.paidRial, receipt.paymentMethod || 'other', now]);
+      const oldLines = await this.db.query<{ product_id: string | null; quantity_milli: number }>('SELECT product_id,quantity_milli FROM invoice_line WHERE invoice_revision_id=?', [current.revision_id]);
+      const stockDelta = new Map<string, number>();
+      for (const line of oldLines) if (line.product_id) stockDelta.set(line.product_id, (stockDelta.get(line.product_id) ?? 0) + line.quantity_milli);
+      for (const line of lines) if (line.productId) stockDelta.set(line.productId, (stockDelta.get(line.productId) ?? 0) - line.quantity * 1000);
+      for (const [productId, delta] of stockDelta) {
+        if (!delta) continue;
+        const update = delta < 0
+          ? await this.db.run('UPDATE stock_balance SET quantity_milli=quantity_milli+? WHERE product_id=? AND quantity_milli>=?', [delta, productId, -delta])
+          : await this.db.run('UPDATE stock_balance SET quantity_milli=quantity_milli+? WHERE product_id=? AND quantity_milli<=?', [delta, productId, Number.MAX_SAFE_INTEGER - delta]);
+        if (update.changes !== 1) throw new Error('موجودی برای ویرایش فاکتور کافی نیست؛ هیچ تغییری ثبت نشد.');
+        await this.db.run('INSERT INTO stock_movement(id,product_id,quantity_milli,reason,invoice_revision_id,created_at) VALUES(?,?,?,?,?,?)',
+          [crypto.randomUUID(), productId, delta, 'invoice_revision', revisionId, now]);
+      }
+      let customerId: string | null = null;
+      if (receipt.customerName) {
+        const existing = receipt.customerPhone ? await this.db.query<{ id: string }>('SELECT id FROM customer WHERE store_id=? AND phone=? AND archived_at IS NULL LIMIT 1', [this.storeId, receipt.customerPhone]) : [];
+        customerId = existing[0]?.id ?? crypto.randomUUID();
+        if (!existing.length) await this.db.run('INSERT INTO customer(id,store_id,name,phone,created_at) VALUES(?,?,?,?,?)', [customerId, this.storeId, receipt.customerName, receipt.customerPhone || null, now]);
+      }
+      for (const line of lines) await this.db.run(`INSERT INTO invoice_line(id,invoice_revision_id,product_id,name_snapshot,color_snapshot,unit_snapshot,quantity_milli,unit_price_rial,discount_rial,line_total_rial)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`, [crypto.randomUUID(), revisionId, line.productId ?? null, line.name, line.color ?? null, 'عدد', line.quantity * 1000, line.unitPriceRial, line.discountRial ?? 0, line.totalRial]);
+      const changed = await this.db.run('UPDATE invoice SET current_revision=?,customer_id=? WHERE id=? AND store_id=? AND current_revision=? AND status=\'issued\'',
+        [receipt.revision!, customerId, invoiceId, this.storeId, current.current_revision]);
+      if (changed.changes !== 1) throw new Error('فاکتور هم‌زمان تغییر کرده است.');
+      await this.audit('invoice', invoiceId, 'revise', { revision: receipt.revision, reason: reason.trim(), previousRevision: current.current_revision }, now);
+      return receipt;
+    });
   }
 
   async voidInvoice(invoiceId: string, reason: string): Promise<void> {
