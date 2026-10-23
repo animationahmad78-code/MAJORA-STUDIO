@@ -63,6 +63,7 @@ try {
   const entered = await evaluate(`(() => { const input = document.querySelector('.backup-card input[type="password"]'); if (!input) return false; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(password)}); input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
   if (!entered) throw new Error('Backup password input unavailable');
   await delay(300);
+  await evaluate('window.__majoraTestAlerts = []; window.alert = message => window.__majoraTestAlerts.push(String(message));');
   const clicked = await evaluate('(() => { const button = document.querySelector(".backup-card button.primary"); if (!button || button.disabled) return false; button.click(); return true; })()');
   if (!clicked) throw new Error('Backup button remained disabled');
   let files = '';
@@ -73,7 +74,7 @@ try {
     await delay(1000);
   }
   if (!files.includes('majora-backup-')) {
-    const feedback = await evaluate('document.body.innerText.slice(-500)');
+    const feedback = await evaluate('JSON.stringify({ alerts: window.__majoraTestAlerts, button: document.querySelector(".backup-card button.primary")?.textContent, filesystemPlugin: !!window.Capacitor?.Plugins?.Filesystem })');
     const nearby = adb('shell', 'find', '/sdcard', '-maxdepth', '7', '-iname', '*backup*');
     throw new Error(`Encrypted backup was not saved in Documents. Dialogs: ${JSON.stringify(dialogs)}. Nearby files: ${nearby}. UI: ${feedback}`);
   }
