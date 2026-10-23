@@ -81,8 +81,9 @@ try {
   if (!hit.includes('ساخت فایل ZIP')) throw new Error(`Backup tap target is obstructed: ${hit}`);
   adb('shell', 'uiautomator', 'dump', '/sdcard/majora-qa.xml');
   const hierarchy = adb('exec-out', 'cat', '/sdcard/majora-qa.xml');
-  const bounds = hierarchy.match(/resource-id="ir\.majora\.classicbag:id\/webview"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/);
-  if (!bounds) throw new Error('Cannot locate Android WebView bounds');
+  const webviewNode = hierarchy.match(/<node\b[^>]*class="android\.webkit\.WebView"[^>]*>/);
+  const bounds = webviewNode?.[0].match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/);
+  if (!bounds) throw new Error(`Cannot locate Android WebView bounds. Hierarchy: ${hierarchy.slice(0, 7000)}`);
   const viewport = await evaluate('({ width: innerWidth, height: innerHeight })');
   const touchX = Math.round(Number(bounds[1]) + point.x * (Number(bounds[3]) - Number(bounds[1])) / viewport.width);
   const touchY = Math.round(Number(bounds[2]) + point.y * (Number(bounds[4]) - Number(bounds[2])) / viewport.height);
