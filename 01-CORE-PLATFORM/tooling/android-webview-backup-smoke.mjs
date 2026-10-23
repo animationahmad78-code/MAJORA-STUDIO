@@ -41,14 +41,15 @@ socket.addEventListener('message', event => {
   if (response.error || response.result?.exceptionDetails) item.reject(new Error(JSON.stringify(response.error ?? response.result.exceptionDetails)));
   else item.resolve(response.result?.result?.value);
 });
-function evaluate(expression) {
+function command(method, params) {
   return new Promise((resolve, reject) => {
     const id = ++nextId;
     pending.set(id, { resolve, reject });
-    socket.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, returnByValue: true, awaitPromise: true } }));
-    setTimeout(() => { if (pending.delete(id)) reject(new Error(`WebView evaluation timed out: ${expression.slice(0, 90)}`)); }, 20000).unref();
+    socket.send(JSON.stringify({ id, method, params }));
+    setTimeout(() => { if (pending.delete(id)) reject(new Error(`WebView command timed out: ${method}`)); }, 20000).unref();
   });
 }
+const evaluate = expression => command('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
 
 try {
   socket.send(JSON.stringify({ id: ++nextId, method: 'Page.enable' }));
@@ -70,8 +71,14 @@ try {
   if (!entered) throw new Error('Backup password input unavailable');
   await delay(300);
   await evaluate('window.__majoraTestAlerts = []; window.alert = message => window.__majoraTestAlerts.push(String(message));');
-  const clicked = await evaluate('(() => { const button = document.querySelector(".backup-card button.primary"); if (!button || button.disabled) return false; button.click(); return true; })()');
-  if (!clicked) throw new Error('Backup button remained disabled');
+  const point = await evaluate('(() => { const button = document.querySelector(".backup-card button.primary"); if (!button || button.disabled) return null; button.scrollIntoView({ block: "center" }); const rect = button.getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }; })()');
+  if (!point) throw new Error('Backup button remained disabled');
+  await delay(150);
+  await command('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+  await command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+  await delay(300);
+  const afterTap = await evaluate('JSON.stringify({ button: document.querySelector(".backup-card button.primary")?.textContent, alerts: window.__majoraTestAlerts })');
+  console.log(`Backup control after native tap: ${afterTap}`);
   let files = '';
   for (let attempt = 0; attempt < 50; attempt++) {
     try { files = adb('shell', 'find', '/sdcard/Documents/MAJORA/Backups', '-type', 'f', '-name', '*.zip'); }
