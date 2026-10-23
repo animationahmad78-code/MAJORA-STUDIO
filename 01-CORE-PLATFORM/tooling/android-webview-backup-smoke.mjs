@@ -58,7 +58,13 @@ try {
   await delay(200);
   const settings = await evaluate('(() => { const button = [...document.querySelectorAll(".menu-drawer button")].find(item => item.textContent.includes("تنظیمات")); if (!button) return false; button.click(); return true; })()');
   if (!settings) throw new Error('Settings navigation unavailable');
-  await delay(300);
+  let ready = false;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    ready = await evaluate('document.body.innerText.includes("ذخیرهٔ نسخهٔ جدید قالب (فعلی:")');
+    if (ready) break;
+    await delay(500);
+  }
+  if (!ready) throw new Error('Native repository did not finish initializing');
   const password = randomBytes(18).toString('hex');
   const entered = await evaluate(`(() => { const input = document.querySelector('.backup-card input[type="password"]'); if (!input) return false; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(password)}); input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
   if (!entered) throw new Error('Backup password input unavailable');
