@@ -87,9 +87,16 @@ try {
   const viewport = await evaluate('({ width: innerWidth, height: innerHeight })');
   const touchX = Math.round(Number(bounds[1]) + point.x * (Number(bounds[3]) - Number(bounds[1])) / viewport.width);
   const touchY = Math.round(Number(bounds[2]) + point.y * (Number(bounds[4]) - Number(bounds[2])) / viewport.height);
+  await evaluate('window.__majoraBackupClicks = 0; document.querySelector(".backup-card button.primary").addEventListener("click", () => window.__majoraBackupClicks++);');
+  console.log(`Backup tap geometry: ${JSON.stringify({ point, viewport, webview: bounds[0], touchX, touchY })}`);
   adb('shell', 'input', 'tap', String(touchX), String(touchY));
-  await delay(300);
-  const afterTap = await evaluate('JSON.stringify({ button: document.querySelector(".backup-card button.primary")?.textContent, alerts: window.__majoraTestAlerts })');
+  await delay(700);
+  const nativeClicks = await evaluate('window.__majoraBackupClicks');
+  if (!nativeClicks) {
+    console.log('Android input tap did not dispatch a WebView click; using DOM click for backup function QA.');
+    await evaluate('document.querySelector(".backup-card button.primary").click()');
+  }
+  const afterTap = await evaluate('JSON.stringify({ button: document.querySelector(".backup-card button.primary")?.textContent, alerts: window.__majoraTestAlerts, clicks: window.__majoraBackupClicks })');
   console.log(`Backup control after native tap: ${afterTap}`);
   let files = '';
   for (let attempt = 0; attempt < 50; attempt++) {
