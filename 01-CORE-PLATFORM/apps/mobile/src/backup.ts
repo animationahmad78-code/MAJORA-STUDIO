@@ -13,10 +13,12 @@ const preferenceKeys = ['compactCards', 'showStock', 'showCardNumber', 'confirmI
 function storedPreferences(): Record<string, boolean> {
   const raw = localStorage.getItem('majora-ui-preferences-v1');
   if (!raw) return {};
-  const parsed: unknown = JSON.parse(raw);
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('تنظیمات ظاهری ذخیره‌شده نامعتبر است.');
-  const object = parsed as Record<string, unknown>;
-  return Object.fromEntries(preferenceKeys.filter(key => typeof object[key] === 'boolean').map(key => [key, object[key] as boolean]));
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const object = parsed as Record<string, unknown>;
+    return Object.fromEntries(preferenceKeys.filter(key => typeof object[key] === 'boolean').map(key => [key, object[key] as boolean]));
+  } catch { return {}; }
 }
 
 function base64(bytes: Uint8Array): string {
