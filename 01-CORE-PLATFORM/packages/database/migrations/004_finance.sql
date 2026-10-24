@@ -66,4 +66,29 @@ CREATE TABLE IF NOT EXISTS finance_journal_line (
   CHECK((debit_rial>0 AND credit_rial=0) OR (credit_rial>0 AND debit_rial=0))
 );
 CREATE INDEX IF NOT EXISTS finance_journal_account ON finance_journal_line(account,journal_id);
+INSERT OR IGNORE INTO finance_journal(id,source_type,source_id,note,created_at)
+SELECT 'legacy-sale-'||i.id,'sale',i.id,'فروش ثبت‌شده در نسخهٔ قبلی',COALESCE(i.issued_at,i.created_at)
+FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id AND r.revision_no=i.current_revision
+WHERE i.status='issued' AND r.grand_total_rial>0;
+INSERT OR IGNORE INTO finance_journal_line(id,journal_id,account,debit_rial,credit_rial)
+SELECT 'legacy-sale-ar-'||i.id,'legacy-sale-'||i.id,'receivable',r.grand_total_rial,0
+FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id AND r.revision_no=i.current_revision
+WHERE i.status='issued' AND r.grand_total_rial>0;
+INSERT OR IGNORE INTO finance_journal_line(id,journal_id,account,debit_rial,credit_rial)
+SELECT 'legacy-sale-revenue-'||i.id,'legacy-sale-'||i.id,'sales',0,r.grand_total_rial-r.shipping_rial
+FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id AND r.revision_no=i.current_revision
+WHERE i.status='issued' AND r.grand_total_rial>r.shipping_rial;
+INSERT OR IGNORE INTO finance_journal_line(id,journal_id,account,debit_rial,credit_rial)
+SELECT 'legacy-sale-shipping-'||i.id,'legacy-sale-'||i.id,'shipping_income',0,r.shipping_rial
+FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id AND r.revision_no=i.current_revision
+WHERE i.status='issued' AND r.shipping_rial>0;
+INSERT OR IGNORE INTO finance_journal(id,source_type,source_id,note,created_at)
+SELECT 'legacy-receipt-'||i.id,'receipt',i.id,'دریافت ثبت‌شده در نسخهٔ قبلی',COALESCE(i.issued_at,i.created_at)
+FROM invoice i JOIN invoice_finance f ON f.invoice_id=i.id WHERE f.paid_rial>0;
+INSERT OR IGNORE INTO finance_journal_line(id,journal_id,account,debit_rial,credit_rial)
+SELECT 'legacy-receipt-cash-'||i.id,'legacy-receipt-'||i.id,'cash_bank',f.paid_rial,0
+FROM invoice i JOIN invoice_finance f ON f.invoice_id=i.id WHERE f.paid_rial>0;
+INSERT OR IGNORE INTO finance_journal_line(id,journal_id,account,debit_rial,credit_rial)
+SELECT 'legacy-receipt-ar-'||i.id,'legacy-receipt-'||i.id,'receivable',0,f.paid_rial
+FROM invoice i JOIN invoice_finance f ON f.invoice_id=i.id WHERE f.paid_rial>0;
 INSERT INTO schema_migrations(version,applied_at) VALUES(4,datetime('now'));

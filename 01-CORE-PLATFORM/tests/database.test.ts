@@ -312,4 +312,21 @@ describe('SQLite operational records', () => {
     expect(journals.every(item => item.debit === item.credit)).toBe(true);
     sqlite.close();
   });
+  it('upgrades a v3 invoice to v4 finance without losing its original payment', () => {
+    const sqlite = new DatabaseSync(':memory:');
+    for (const name of ['001_init.sql', '002_product_detail.sql', '003_archive.sql'])
+      sqlite.exec(readFileSync(new URL(`../packages/database/migrations/${name}`, import.meta.url), 'utf8'));
+    sqlite.exec('PRAGMA foreign_keys=ON');
+    sqlite.prepare('INSERT INTO store(id,name,created_at) VALUES(?,?,?)').run('classic-bag-belt', 'کلاسیک', '2026-01-01');
+    sqlite.prepare('INSERT INTO invoice(id,store_id,invoice_number,status,current_revision,created_at,issued_at) VALUES(?,?,?,?,?,?,?)')
+      .run('legacy', 'classic-bag-belt', 1, 'issued', 1, '2026-01-02', '2026-01-02');
+    sqlite.prepare('INSERT INTO invoice_revision(id,invoice_id,revision_no,snapshot_json,subtotal_rial,discount_rial,shipping_rial,grand_total_rial,paid_rial,balance_rial,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run('legacy-r1', 'legacy', 1, JSON.stringify({ id: 'legacy', number: 1, totalRial: 1050, paidRial: 250, lines: [] }), 1000, 0, 50, 1050, 250, 800, 'issue', '2026-01-02');
+    sqlite.exec(readFileSync(new URL('../packages/database/migrations/004_finance.sql', import.meta.url), 'utf8'));
+    expect(sqlite.prepare('SELECT status,paid_rial FROM invoice_finance WHERE invoice_id=?').get('legacy')).toMatchObject({ status: 'partial', paid_rial: 250 });
+    const entries = sqlite.prepare('SELECT journal_id,SUM(debit_rial) AS debit,SUM(credit_rial) AS credit FROM finance_journal_line GROUP BY journal_id').all() as { debit: number; credit: number }[];
+    expect(entries).toHaveLength(2);
+    expect(entries.every(item => item.debit === item.credit)).toBe(true);
+    sqlite.close();
+  });
 });

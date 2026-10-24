@@ -533,9 +533,13 @@ export class ShopRepository {
       if (changed.changes !== 1) throw new Error('فاکتور هم‌زمان تغییر کرده است.');
       await this.db.run('UPDATE invoice_finance SET status=?,due_jalali=?,updated_at=? WHERE invoice_id=?', [receipt.paymentStatus!, receipt.dueDateJalali || null, now, invoiceId]);
       const difference = receipt.totalRial - previous.totalRial;
-      if (finance.status !== 'proforma' && difference !== 0) await this.journal('sale_revision', revisionId, `اصلاح فاکتور ${receipt.number}`, now,
-        difference > 0 ? [{ account: 'receivable', debit: difference }, { account: 'sales', credit: difference }]
-          : [{ account: 'sales', debit: -difference }, { account: 'receivable', credit: -difference }]);
+      const saleDifference = (receipt.totalRial - (receipt.shippingRial ?? 0)) - (previous.totalRial - (previous.shippingRial ?? 0));
+      const shippingDifference = (receipt.shippingRial ?? 0) - (previous.shippingRial ?? 0);
+      if (finance.status !== 'proforma' && (saleDifference !== 0 || shippingDifference !== 0)) await this.journal('sale_revision', revisionId, `اصلاح فاکتور ${receipt.number}`, now, [
+        { account: 'receivable', debit: Math.max(0, difference), credit: Math.max(0, -difference) },
+        { account: 'sales', debit: Math.max(0, -saleDifference), credit: Math.max(0, saleDifference) },
+        { account: 'shipping_income', debit: Math.max(0, -shippingDifference), credit: Math.max(0, shippingDifference) }
+      ]);
       await this.audit('invoice', invoiceId, 'revise', { revision: receipt.revision, reason: reason.trim(), previousRevision: current.current_revision }, now);
       return receipt;
     });
@@ -554,7 +558,7 @@ export class ShopRepository {
       const finance = financeRows[0];
       if (!finance) throw new Error('پروندهٔ مالی فاکتور پیدا نشد.');
       if (finance.paid_rial !== finance.refunded_rial || finance.returned_rial > 0) throw new Error('فاکتور دارای دریافت یا مرجوعی است؛ ابتدا تسویه و ثبت اصلاح مالی انجام شود.');
-      const revision = await this.db.query<{ grand_total_rial: number }>('SELECT grand_total_rial FROM invoice_revision WHERE id=?', [revisionId]);
+      const revision = await this.db.query<{ grand_total_rial: number; shipping_rial: number }>('SELECT grand_total_rial,shipping_rial FROM invoice_revision WHERE id=?', [revisionId]);
       const lines = await this.db.query<{ product_id: string | null; quantity_milli: number }>(
         'SELECT product_id,quantity_milli FROM invoice_line WHERE invoice_revision_id=?', [revisionId]);
       const at = new Date().toISOString();
@@ -571,7 +575,9 @@ export class ShopRepository {
       const updated = await this.db.run("UPDATE invoice SET status='void' WHERE id=? AND store_id=? AND status='issued'", [invoiceId, this.storeId]);
       if (updated.changes !== 1) throw new Error('وضعیت فاکتور هم‌زمان تغییر کرده است.');
       if (finance.status !== 'proforma' && revision[0]?.grand_total_rial > 0) await this.journal('void', invoiceId, `ابطال فاکتور: ${reason.trim()}`, at, [
-        { account: 'sales', debit: revision[0].grand_total_rial }, { account: 'receivable', credit: revision[0].grand_total_rial }
+        { account: 'sales', debit: revision[0].grand_total_rial - revision[0].shipping_rial },
+        { account: 'shipping_income', debit: revision[0].shipping_rial },
+        { account: 'receivable', credit: revision[0].grand_total_rial }
       ]);
       await this.audit('invoice', invoiceId, 'void', { reason: reason.trim(), revisionId }, at);
     });
