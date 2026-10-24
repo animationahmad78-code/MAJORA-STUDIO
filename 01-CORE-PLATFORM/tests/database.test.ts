@@ -8,10 +8,13 @@ function memoryShop() {
   const migration = readFileSync(new URL('../packages/database/migrations/001_init.sql', import.meta.url), 'utf8');
   const detailMigration = readFileSync(new URL('../packages/database/migrations/002_product_detail.sql', import.meta.url), 'utf8');
   const archiveMigration = readFileSync(new URL('../packages/database/migrations/003_archive.sql', import.meta.url), 'utf8');
+  const financeMigration = readFileSync(new URL('../packages/database/migrations/004_finance.sql', import.meta.url), 'utf8');
   sqlite.exec(migration);
   sqlite.exec(migration); // Starting the app again must not destroy or reject an existing database.
   sqlite.exec(detailMigration);
   sqlite.exec(archiveMigration);
+  sqlite.exec(financeMigration);
+  sqlite.exec('PRAGMA foreign_keys=ON');
   const port: SqlPort = {
     async execute(sql) { sqlite.exec(sql); },
     async run(sql, values: SqlValue[] = []) {
@@ -154,7 +157,7 @@ describe('SQLite operational records', () => {
     expect(sqlite.prepare('SELECT old_price_rial,new_price_rial FROM price_event WHERE reason=?').get('manual')).toMatchObject({ old_price_rial: 1000, new_price_rial: 1200 });
     await repo.archiveProduct('bag');
     expect(await repo.listProducts()).toEqual([]);
-    expect(await repo.listInvoices()).toEqual([issued]);
+    expect(await repo.listInvoices()).toMatchObject([JSON.parse(JSON.stringify(issued))]);
     expect(sqlite.prepare('SELECT COUNT(*) AS n FROM audit_event WHERE action=?').get('archive')).toMatchObject({ n: 1 });
     sqlite.close();
   });
@@ -178,7 +181,7 @@ describe('SQLite operational records', () => {
     await repo.voidInvoice(receipt.id, 'اشتباه در سفارش');
     expect((await repo.listProducts())[0].stock).toBe(3);
     expect(await repo.listInvoices()).toEqual([]);
-    expect(await repo.listInvoiceHistory()).toEqual([{ receipt, status: 'void' }]);
+    expect(await repo.listInvoiceHistory()).toMatchObject([{ receipt: JSON.parse(JSON.stringify(receipt)), status: 'void' }]);
     expect(sqlite.prepare('SELECT COUNT(*) AS n FROM stock_movement WHERE reason=?').get('void')).toMatchObject({ n: 1 });
     await expect(repo.voidInvoice(receipt.id, 'تکرار')).rejects.toThrow();
     await expect(repo.issueInvoice(receipt.id, 'مریم', [{ productId: 'bag', quantity: 1 }])).rejects.toThrow('باطل‌شده');
@@ -249,6 +252,64 @@ describe('SQLite operational records', () => {
     expect((await repo.listProducts()).map(x => x.id)).toEqual(['bag']);
     expect((await repo.listCustomers()).map(x => x.id)).toEqual([customerId]);
     expect((await repo.listInvoiceHistory()).map(x => x.receipt.id)).toEqual(['sale']);
+    sqlite.close();
+  });
+  it('keeps partial receipts, returns, refunds and stock in one consistent invoice', async () => {
+    const { sqlite, repo } = memoryShop();
+    await repo.initialize('test');
+    await repo.addProduct({ id: 'bag', name: 'کیف', category: 'کیف', priceRial: 1000, stock: 25 });
+    const issued = await repo.issueInvoice('finance-sale', 'مریم', [{ productId: 'bag', quantity: 20 }], '09123456789', '', '', '', true,
+      { paymentStatus: 'partial', paidRial: 5000, dueDateJalali: '۱۴۰۵/۰۸/۳۰' });
+    expect(issued).toMatchObject({ totalRial: 20000, paidRial: 5000, balanceRial: 15000, paymentStatus: 'partial' });
+    await expect(repo.recordInvoicePayment(issued.id, 16000, 'کارت')).rejects.toThrow('بیشتر');
+    await repo.recordInvoicePayment(issued.id, 10000, 'کارت');
+    expect((await repo.listInvoiceHistory())[0].receipt).toMatchObject({ paidRial: 15000, balanceRial: 5000, paymentStatus: 'partial' });
+    const returned = await repo.returnInvoice(issued.id, [{ index: 0, quantity: 10, restock: true }], 'مرجوعی تعدادی');
+    expect(returned.returnedRial).toBe(10000);
+    expect((await repo.listProducts())[0].stock).toBe(15);
+    expect((await repo.listReturnableLines(issued.id))[0].available).toBe(10);
+    await expect(repo.returnInvoice(issued.id, [{ index: 0, quantity: 11, restock: true }], 'زیاد')).rejects.toThrow('بیشتر');
+    expect((await repo.listInvoiceHistory())[0].receipt).toMatchObject({ returnedRial: 10000, paymentStatus: 'settled', balanceRial: 0 });
+    await repo.refundInvoicePayment(issued.id, 5000, 'کارت');
+    expect((await repo.listInvoiceHistory())[0].receipt).toMatchObject({ paidRial: 10000, refundedRial: 5000, balanceRial: 0 });
+    const journals = sqlite.prepare('SELECT journal_id,SUM(debit_rial) AS debit,SUM(credit_rial) AS credit FROM finance_journal_line GROUP BY journal_id').all() as { debit: number; credit: number }[];
+    expect(journals.every(item => item.debit === item.credit)).toBe(true);
+    sqlite.close();
+  });
+  it('keeps a proforma out of stock until conversion and purges selected archive items', async () => {
+    const { sqlite, repo } = memoryShop();
+    await repo.initialize('test');
+    await repo.addProduct({ id: 'belt', name: 'کمربند', category: 'کمربند', priceRial: 400, stock: 2 });
+    const proforma = await repo.issueInvoice('draft-sale', 'رضا', [{ productId: 'belt', quantity: 1 }], '', '', '', '', true, { paymentStatus: 'proforma' });
+    expect((await repo.listProducts())[0].stock).toBe(2);
+    await repo.convertProforma(proforma.id);
+    expect((await repo.listProducts())[0].stock).toBe(1);
+    await repo.archiveProduct('belt');
+    expect((await repo.purgeArchived('product', ['belt'])).deleted).toBe(1);
+    await repo.compactDatabase();
+    expect(await repo.listProducts()).toEqual([]);
+    expect((await repo.listInvoiceHistory())[0].receipt.lines[0].name).toContain('کمربند');
+    sqlite.close();
+  });
+  it('records purchases, supplier payments, expenses and cheques with balanced journals', async () => {
+    const { sqlite, repo } = memoryShop();
+    await repo.initialize('test');
+    await repo.addProduct({ id: 'bag', name: 'کیف', category: 'کیف', priceRial: 1000, stock: 0 });
+    const purchaseId = await repo.createPurchase('تأمین‌کننده', [{ productId: 'bag', quantity: 3, unitCostRial: 600 }], 500, '۱۴۰۵/۰۸/۳۰');
+    expect((await repo.listProducts())[0].stock).toBe(3);
+    expect((await repo.listFinanceOverview()).purchases[0]).toMatchObject({ totalRial: 1800, paidRial: 500 });
+    await repo.recordPurchasePayment(purchaseId, 1300, 'کارت');
+    await expect(repo.recordPurchasePayment(purchaseId, 1, 'کارت')).rejects.toThrow('بیشتر');
+    const expenseId = await repo.createExpense('اجاره', 'ماه مهر', 1000, false, '۱۴۰۵/۰۸/۳۰');
+    await repo.settleExpense(expenseId);
+    const chequeId = await repo.createCheque({ direction: 'received', party: 'مشتری', serial: '1001', bank: 'بانک', amountRial: 2000, dueJalali: '۱۴۰۵/۰۸/۳۰', note: '' });
+    await repo.setChequeStatus(chequeId, 'cleared');
+    const overview = await repo.listFinanceOverview();
+    expect(overview.purchases[0].paidRial).toBe(1800);
+    expect(overview.expenses[0].settled).toBe(true);
+    expect(overview.cheques[0].status).toBe('cleared');
+    const journals = sqlite.prepare('SELECT journal_id,SUM(debit_rial) AS debit,SUM(credit_rial) AS credit FROM finance_journal_line GROUP BY journal_id').all() as { debit: number; credit: number }[];
+    expect(journals.every(item => item.debit === item.credit)).toBe(true);
     sqlite.close();
   });
 });
