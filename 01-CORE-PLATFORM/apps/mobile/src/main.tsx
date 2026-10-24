@@ -1,24 +1,27 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { applyPriceIncrease, changedPrice, formatRial, parseRial, undoPriceBatch, type PriceBatch, type PriceEvent, type Product } from '@majora/domain';
-import { invoiceLineAmounts, normalizeSearch, type CustomerSummary, type InvoiceHistoryEntry, type InvoiceInputLine, type InvoiceReceipt, type ShopRepository } from '@majora/database';
+import { invoiceLineAmounts, normalizeSearch, type CustomerSummary, type FinanceOverview, type InvoiceHistoryEntry, type InvoiceInputLine, type InvoiceReceipt, type PaymentStatus, type ShopRepository } from '@majora/database';
 import { Browser } from '@capacitor/browser';
 import { Camera } from '@capacitor/camera';
 import { Directory, Encoding, Filesystem } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
+import { registerPlugin } from '@capacitor/core';
 import { nativeDevice, openNativeShop } from './native-db';
 import { prepareProductPhoto, productPhotoUrl, removeProductPhoto, storeProductPhoto } from './product-photo';
 import { InvoiceDocument, type PaperSize } from './invoice-document';
 import type { InvoiceExportFormat } from './invoice-export';
-import type { BackupArtifact } from './backup';
 import { buildDashboard, type SalesPeriod } from './dashboard';
 import { DashboardView } from './dashboard-view';
+import { FinanceView, ReturnsView, PaymentBadge } from './finance-ui';
 import './style.css';
 import './final-ui.css';
 const majoraLogo = '/brand/majora-logo.png';
 const storeLogo = '/brand/store-logo.png';
+const invoiceLogo = '/brand/store-logo-gold.png';
+const navigation = registerPlugin<{ exit(): Promise<void> }>('MajoraNavigation');
 
-type Page = 'home' | 'sale' | 'products' | 'customers' | 'prices' | 'invoices' | 'invoice' | 'archive' | 'search' | 'settings' | 'support';
+type Page = 'home' | 'sale' | 'products' | 'customers' | 'prices' | 'invoices' | 'invoice' | 'archive' | 'search' | 'settings' | 'support' | 'finance' | 'returns';
 type Data = { products: Product[]; batches: PriceBatch[]; events: PriceEvent[]; storeName: string; slogan: string; phone: string; address: string; card: string; cardHolder: string; note: string; conditions: string[]; socialTelegram: string; socialInstagram: string; socialContact: string };
 const defaults: Data = {
   products: [], batches: [], events: [], storeName: 'کیف و کمربند کلاسیک', slogan: 'استایل کامل از کیف و کمربند',
@@ -69,6 +72,7 @@ function RialField({ amount, onCommit }: { amount: number; onCommit: (value: str
 }
 const formatPercent = (basisPoints: number) => new Intl.NumberFormat('fa-IR', { maximumFractionDigits: 2 }).format(basisPoints / 100);
 const jalaliToday = () => new Intl.DateTimeFormat('fa-IR-u-ca-persian', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+const jalaliDateKey = (value: string) => latinDigits(value).replace(/[^0-9/]/g, '').split('/').map((part, index) => index ? part.padStart(2, '0') : part).join('/');
 type UiPreferences = { compactCards: boolean; showStock: boolean; showCardNumber: boolean; confirmIssue: boolean; welcomeSound: boolean };
 const initialPreferences: UiPreferences = { compactCards: false, showStock: true, showCardNumber: true, confirmIssue: true, welcomeSound: true };
 function loadPreferences(): UiPreferences { try { return { ...initialPreferences, ...JSON.parse(localStorage.getItem('majora-ui-preferences-v1') || '{}') }; } catch { return initialPreferences; } }
@@ -115,6 +119,7 @@ function App() {
   const [customerFirst, setCustomerFirst] = useState(''); const [customerLast, setCustomerLast] = useState(''); const [customerPhone, setCustomerPhone] = useState(''); const [invoiceDate, setInvoiceDate] = useState(''); const [invoiceNo, setInvoiceNo] = useState('پیش‌نمایش'); const [quantity, setQuantity] = useState('1'); const [mono, setMono] = useState(false);
   const [customerAddress, setCustomerAddress] = useState(''); const [paymentMethod, setPaymentMethod] = useState(''); const [dueDate, setDueDate] = useState('');
   const [shipping, setShipping] = useState(''); const [paid, setPaid] = useState(''); const [invoiceShowCard, setInvoiceShowCard] = useState(preferences.showCardNumber);
+  const [paymentStatus, setPaymentStatus] = useState<PaymentStatus | ''>('');
   const customer = [customerFirst.trim(), customerLast.trim()].filter(Boolean).join(' ');
   const [customerStepDone, setCustomerStepDone] = useState(false);
   const [cartOpen, setCartOpen] = useState(false);
@@ -127,6 +132,10 @@ function App() {
   const [receiptRevisions, setReceiptRevisions] = useState<{ receipt: InvoiceReceipt; reason: string; revisedAt: string }[]>([]);
   const [revisionBase, setRevisionBase] = useState<InvoiceReceipt | null>(null); const [revisionReason, setRevisionReason] = useState('اصلاح فاکتور');
   const [invoices, setInvoices] = useState<InvoiceHistoryEntry[]>([]);
+  const [financeOverview, setFinanceOverview] = useState<FinanceOverview>({ invoices: [], purchases: [], expenses: [], cheques: [] });
+  const [returnTargetId, setReturnTargetId] = useState('');
+  const [imageExportOpen, setImageExportOpen] = useState(false);
+  const [archiveSelection, setArchiveSelection] = useState<Record<'invoice' | 'product' | 'customer', string[]>>({ invoice: [], product: [], customer: [] });
   const [archivedInvoices, setArchivedInvoices] = useState<InvoiceHistoryEntry[]>([]);
   const [archivedProducts, setArchivedProducts] = useState<Product[]>([]);
   const [archivedCustomers, setArchivedCustomers] = useState<CustomerSummary[]>([]);
@@ -140,10 +149,6 @@ function App() {
   const [globalSearch, setGlobalSearch] = useState('');
   const [paperSize, setPaperSize] = useState<PaperSize>('a4');
   const [previewWidth, setPreviewWidth] = useState(0); const [fitPreview, setFitPreview] = useState(true);
-  const [backupPassword, setBackupPassword] = useState(''); const [restorePassword, setRestorePassword] = useState('');
-  const [restoreFile, setRestoreFile] = useState<File | null>(null); const [backupBusy, setBackupBusy] = useState(false);
-  const [backupArtifact, setBackupArtifact] = useState<BackupArtifact | null>(null);
-  const [backupProgress, setBackupProgress] = useState('');
   const [salesPeriod, setSalesPeriod] = useState<SalesPeriod>('day');
   const invoicePreviewRef = useRef<HTMLDivElement>(null);
   const [issuing, setIssuing] = useState(false);
@@ -152,15 +157,18 @@ function App() {
   const issueLock = useRef(false);
   const booted = useRef(false);
   const welcomePlayed = useRef(false);
+  const pageHistory = useRef<Page[]>(['home']);
+  const exitTapAt = useRef(0);
   useEffect(() => { if (!nativeDevice || booted.current) return; booted.current = true; openNativeShop().then(async repo => {
     setRepository(repo);
-    const [products, history, savedInvoices, savedCustomers, savedArchivedProducts, savedArchivedInvoices, savedArchivedCustomers] = await Promise.all([
-      repo.listProducts(), repo.listPriceHistory(), repo.listInvoiceHistory(), repo.listCustomers(), repo.listArchivedProducts(), repo.listArchivedInvoices(), repo.listArchivedCustomers()
+    const [products, history, savedInvoices, savedCustomers, savedArchivedProducts, savedArchivedInvoices, savedArchivedCustomers, overview] = await Promise.all([
+      repo.listProducts(), repo.listPriceHistory(), repo.listInvoiceHistory(), repo.listCustomers(), repo.listArchivedProducts(), repo.listArchivedInvoices(), repo.listArchivedCustomers(), repo.listFinanceOverview()
     ]);
     let template = await repo.loadTemplate();
     if (!template) { await repo.saveTemplate(templateFields(defaults)); template = await repo.loadTemplate(); }
     setData(current => applyTemplate({ ...current, products, batches: history.batches, events: history.events }, template?.fields ?? {}));
     setInvoices(savedInvoices);
+    setFinanceOverview(overview);
     setCustomers(savedCustomers);
     setArchivedProducts(savedArchivedProducts); setArchivedInvoices(savedArchivedInvoices); setArchivedCustomers(savedArchivedCustomers);
     setTemplateVersion(template?.version ?? null);
@@ -208,15 +216,21 @@ function App() {
     setArchivedProducts(archived);
   };
   const refreshRecords = async (repo: ShopRepository) => {
-    const [activeInvoices, inactiveInvoices, activeCustomers, inactiveCustomers] = await Promise.all([
-      repo.listInvoiceHistory(), repo.listArchivedInvoices(), repo.listCustomers(), repo.listArchivedCustomers()
+    const [activeInvoices, inactiveInvoices, activeCustomers, inactiveCustomers, overview] = await Promise.all([
+      repo.listInvoiceHistory(), repo.listArchivedInvoices(), repo.listCustomers(), repo.listArchivedCustomers(), repo.listFinanceOverview()
     ]);
     setInvoices(activeInvoices); setArchivedInvoices(inactiveInvoices); setCustomers(activeCustomers); setArchivedCustomers(inactiveCustomers);
+    setFinanceOverview(overview);
   };
   const alert = (s: string) => { setMessage(s); window.setTimeout(() => setMessage(''), 5000); };
   const active = data.products.filter(p => !p.archived);
   const dashboard = useMemo(() => buildDashboard([...invoices, ...archivedInvoices], active, [...customers, ...archivedCustomers], salesPeriod),
     [invoices, archivedInvoices, data.products, customers, archivedCustomers, salesPeriod]);
+  const todayKey = jalaliDateKey(jalaliToday());
+  const dueCount = financeOverview.invoices.filter(item => item.paymentStatus !== 'proforma' && (item.balanceRial ?? 0) > 0 && item.dueDateJalali && jalaliDateKey(item.dueDateJalali) <= todayKey).length
+    + financeOverview.purchases.filter(item => item.totalRial > item.paidRial && item.dueJalali && jalaliDateKey(item.dueJalali) <= todayKey).length
+    + financeOverview.expenses.filter(item => !item.settled && item.dueJalali && jalaliDateKey(item.dueJalali) <= todayKey).length
+    + financeOverview.cheques.filter(item => item.status === 'open' && jalaliDateKey(item.dueJalali) <= todayKey).length;
   const inspectedProduct = data.products.find(p => p.id === inspectedProductId);
   const categories = useMemo(() => Array.from(new Set(active.map(p => p.category))).sort((a, b) => a.localeCompare(b, 'fa')), [data.products]);
   const categoryRoots = useMemo(() => Array.from(new Set(categories.map(c => c.split('/')[0].trim()))), [categories]);
@@ -242,7 +256,7 @@ function App() {
   const displayReceipt: InvoiceReceipt = receipt ?? { id: revisionBase?.id ?? 'preview', number: revisionBase?.number ?? 0, at: revisionBase?.at ?? new Date().toISOString(), dateJalali: invoiceDate || revisionBase?.dateJalali || jalaliToday(),
     customerName: customer, customerPhone, customerAddress, paymentMethod, dueDateJalali: dueDate,
     showCardNumber: invoiceShowCard, lines: draftDisplayLines, subtotalRial: draftSubtotal, discountRial: draftDiscount,
-    shippingRial: rialOrZero(shipping), paidRial: rialOrZero(paid), balanceRial: Math.max(0, draftGrand - rialOrZero(paid)), totalRial: draftGrand };
+    shippingRial: rialOrZero(shipping), paidRial: paymentStatus === 'settled' && !revisionBase ? draftGrand : rialOrZero(paid), balanceRial: Math.max(0, draftGrand - (paymentStatus === 'settled' && !revisionBase ? draftGrand : rialOrZero(paid))), paymentStatus: paymentStatus || undefined, totalRial: draftGrand };
   const displayData = receipt?.templateFields ? applyTemplate(data, receipt.templateFields) : data;
   const selectedInvoiceStatus = invoices.find(entry => entry.receipt.id === receipt?.id)?.status;
   const latestInvoiceRevision = invoices.find(entry => entry.receipt.id === receipt?.id)?.receipt.revision ?? 1;
@@ -253,9 +267,9 @@ function App() {
     .sort((a, b) => invoiceSort === 'newest' ? b.receipt.number - a.receipt.number : a.receipt.number - b.receipt.number);
   const resetInvoicePreview = () => { setReceipt(null); setInvoiceNo(revisionBase ? String(revisionBase.number) : 'پیش‌نمایش'); };
   function newInvoice() {
-    setReceipt(null); setRevisionBase(null); setInvoiceNo('پیش‌نمایش'); setCustomerFirst(''); setCustomerLast(''); setCustomerPhone(''); setInvoiceDate(''); setDraftLines([]); setCartOpen(false); setCustomerStepDone(false); setPage('sale');
+    setReceipt(null); setRevisionBase(null); setInvoiceNo('پیش‌نمایش'); setCustomerFirst(''); setCustomerLast(''); setCustomerPhone(''); setInvoiceDate(''); setDraftLines([]); setCartOpen(false); setCustomerStepDone(false); changePage('sale');
     setQuantity('1'); setManualName(''); setManualPrice(''); setDiscountEnabled(false); setDiscountPercent(''); setInvoiceSelectedLines([]);
-    setCustomerAddress(''); setPaymentMethod(''); setDueDate(''); setShipping(''); setPaid(''); setInvoiceShowCard(preferences.showCardNumber);
+    setCustomerAddress(''); setPaymentMethod(''); setDueDate(''); setShipping(''); setPaid(''); setPaymentStatus(''); setInvoiceShowCard(preferences.showCardNumber);
     requestId.current = crypto.randomUUID();
   }
   function addProductToCart(product: Product) {
@@ -316,6 +330,7 @@ function App() {
     setInvoiceDate(saved.dateJalali ?? '');
     setCustomerAddress(saved.customerAddress ?? ''); setPaymentMethod(saved.paymentMethod ?? ''); setDueDate(saved.dueDateJalali ?? '');
     setShipping(formatRial(saved.shippingRial ?? 0)); setPaid(formatRial(saved.paidRial ?? 0)); setInvoiceShowCard(saved.showCardNumber ?? true);
+    setPaymentStatus(saved.paymentStatus ?? 'unpaid');
     setDraftLines(saved.lines.map(line => ({ productId: line.productId, name: line.name, quantity: line.quantity,
       unitPriceRial: line.unitPriceRial, discountBasisPoints: line.discountBasisPoints ?? Math.round((line.discountRial ?? 0) * 10000 / Math.max(1, line.unitPriceRial * line.quantity)) })));
     setDiscountEnabled((saved.discountRial ?? 0) > 0); changePage('invoice');
@@ -329,12 +344,13 @@ function App() {
     const parts = saved.customerName.trim().split(/\s+/);
     setCustomerFirst(parts.shift() ?? ''); setCustomerLast(parts.join(' ')); setCustomerPhone(saved.customerPhone ?? ''); setCustomerAddress(saved.customerAddress ?? ''); setCustomerStepDone(true);
   }
-  async function saveInvoiceFile(format: InvoiceExportFormat, action: 'share' | 'print' = 'share') {
+  async function saveInvoiceFile(format: InvoiceExportFormat, action: 'share' | 'print' | 'gallery' = 'share') {
     try {
       if (!invoicePreviewRef.current) throw new Error('پیش‌نمایش فاکتور آماده نیست.');
       const { exportInvoice } = await import('./invoice-export');
       const pageCount = await exportInvoice(receipt?.number ?? revisionBase?.number ?? 'preview', format, paperSize, invoicePreviewRef.current, action);
-      alert(action === 'print' ? `پنجرهٔ چاپ ${pageCount} صفحه باز شد.` : `${pageCount} صفحهٔ فاکتور برای ذخیره یا اشتراک آماده شد.`);
+      setImageExportOpen(false);
+      alert(action === 'print' ? `پنجرهٔ چاپ ${pageCount} صفحه باز شد.` : action === 'gallery' ? `${pageCount} تصویر در گالری ذخیره شد.` : `${pageCount} صفحهٔ فاکتور برای ذخیره یا اشتراک آماده شد.`);
     } catch (error) { alert(`خروجی فاکتور انجام نشد: ${(error as Error).message}`); }
   }
   async function takeProductPhoto() {
@@ -357,37 +373,6 @@ function App() {
       if (kind === 'invoice' && receipt?.id === id && archived) setReceipt(null);
       alert(archived ? 'به بایگانی منتقل شد.' : 'از بایگانی بازگردانده شد.');
     } catch (error) { alert((error as Error).message); }
-  }
-  async function makeBackup() {
-    if (!repository || backupBusy) return;
-    setBackupBusy(true);
-    try { const { createEncryptedBackup } = await import('./backup'); const result = await createEncryptedBackup(repository, backupPassword, data, storeLogo,
-      (current, total) => setBackupProgress(`ساخت PDF فاکتور ${formatRial(current)} از ${formatRial(total)}`));
-      setBackupArtifact(result); setBackupPassword(''); setBackupProgress('');
-      alert('فایل ZIP رمزدار آماده شد. اکنون «ذخیره فایل» یا «اشتراک‌گذاری» را انتخاب کنید.');
-    } catch (error) { alert(`پشتیبان ساخته نشد: ${(error as Error).message}`); }
-    finally { setBackupBusy(false); setBackupProgress(''); }
-  }
-  async function savePreparedBackup() {
-    if (!backupArtifact || backupBusy) return;
-    setBackupBusy(true);
-    try { const { saveBackupToChosenFile } = await import('./backup'); const saved = await saveBackupToChosenFile(backupArtifact);
-      if (saved) alert('فایل ZIP در محل انتخاب‌شده ذخیره شد. برای اطمینان، نگهداری یک نسخه در جای دیگر هم مناسب است.'); }
-    catch (error) { alert(`ذخیرهٔ فایل انجام نشد: ${(error as Error).message}`); }
-    finally { setBackupBusy(false); }
-  }
-  async function sharePreparedBackup() {
-    if (!backupArtifact || backupBusy) return;
-    setBackupBusy(true);
-    try { const { shareBackup } = await import('./backup'); await shareBackup(backupArtifact); }
-    catch (error) { if (!/cancel|لغو/i.test((error as Error).message)) alert(`اشتراک‌گذاری انجام نشد: ${(error as Error).message}`); }
-    finally { setBackupBusy(false); }
-  }
-  async function restoreBackup() {
-    if (!restoreFile || backupBusy || !window.confirm('بازیابی در پایگاه دادهٔ جدا بررسی می‌شود و سپس برنامه از دادهٔ بازیابی‌شده باز می‌شود. ادامه می‌دهید؟')) return;
-    setBackupBusy(true);
-    try { const { restoreEncryptedBackup } = await import('./backup'); await restoreEncryptedBackup(restoreFile, restorePassword); }
-    catch (error) { alert(`بازیابی انجام نشد: ${(error as Error).message}`); setRestorePassword(''); setBackupBusy(false); }
   }
   function setPreference<K extends keyof UiPreferences>(key: K, value: UiPreferences[K]) {
     const next = { ...preferences, [key]: value }; setPreferences(next); localStorage.setItem('majora-ui-preferences-v1', JSON.stringify(next));
@@ -456,14 +441,20 @@ function App() {
   }
   async function issue() {
     if (issueLock.current) return;
+    if (!revisionBase && !paymentStatus) { alert('پیش از ثبت، یکی از چهار وضعیت پرداخت را انتخاب کنید.'); return; }
     if (preferences.confirmIssue && !window.confirm(`${revisionBase ? 'ویرایش' : 'صدور'} فاکتور با ${draftLines.length} ردیف و مبلغ نهایی ${formatRial(draftGrand)} ریال تأیید شود؟`)) return;
     issueLock.current = true; setIssuing(true);
     try {
       if (!nativeDevice || !repository) throw new Error('صدور قطعی فقط در برنامهٔ نصب‌شده با پایگاه داده فعال است.');
       if (!draftLines.length) throw new Error('دست‌کم یک ردیف به فاکتور اضافه کنید.');
       const details = { customerAddress, paymentMethod, dueDateJalali: dueDate,
-        shippingRial: shipping.trim() ? parseRial(shipping) : 0, paidRial: paid.trim() ? parseRial(paid) : 0, showCardNumber: invoiceShowCard };
+        shippingRial: shipping.trim() ? parseRial(shipping) : 0,
+        paidRial: paymentStatus === 'settled' && !revisionBase ? draftGrand : paid.trim() ? parseRial(paid) : 0,
+        showCardNumber: invoiceShowCard, paymentStatus: (revisionBase ? revisionBase.paymentStatus : paymentStatus) as PaymentStatus };
       if (details.paidRial > draftGrand) throw new Error('مبلغ پرداختی از مبلغ نهایی بیشتر است.');
+      if (!revisionBase && paymentStatus === 'partial' && (details.paidRial <= 0 || details.paidRial >= draftGrand)) throw new Error('پیش‌پرداخت باید بیشتر از صفر و کمتر از مبلغ نهایی باشد.');
+      if (!revisionBase && (paymentStatus === 'unpaid' || paymentStatus === 'proforma') && details.paidRial !== 0) throw new Error('برای این وضعیت، مبلغ پرداختی باید صفر باشد.');
+      if (!revisionBase && (paymentStatus === 'partial' || paymentStatus === 'unpaid') && !dueDate.trim()) throw new Error('برای پیگیری مانده، تاریخ سررسید را وارد کنید.');
       const issued = revisionBase
         ? await repository.reviseInvoice(revisionBase.id, draftLines, customer, customerPhone, invoiceDate, revisionReason, details)
         : await repository.issueInvoice(requestId.current, customer, draftLines, customerPhone, invoiceDate, customerFirst, customerLast, invoiceShowCard, details);
@@ -544,13 +535,70 @@ function App() {
       else { const at = new Date().toISOString(); const result = undoPriceBatch(data.products, data.events, batch.id, crypto.randomUUID(), at); save({ ...data, products: result.products, events: [...data.events, ...result.events], batches: data.batches.map(x => x.id === batch.id ? { ...x, undoneAt: at } : x) }); alert(`${result.events.length} قیمت برگشت؛ ${result.conflicts.length} تعارض بدون تغییر باقی ماند.`); } } catch (error) { alert((error as Error).message); }
   }
   function changeField(key: keyof Data, value: string) { save({ ...data, [key]: value }); }
+  const refreshAll = async () => { if (!repository) return; await Promise.all([refreshRecords(repository), refreshNative(repository)]); };
+  const openInvoice = (saved: InvoiceReceipt) => { setReceipt(saved); setInvoiceNo(String(saved.number)); changePage('invoice'); };
+  const openReturn = (saved: InvoiceReceipt) => { setReturnTargetId(saved.id); changePage('returns'); };
+  const toggleArchiveSelection = (kind: 'invoice' | 'product' | 'customer', id: string) => setArchiveSelection(current => ({ ...current, [kind]: current[kind].includes(id) ? current[kind].filter(value => value !== id) : [...current[kind], id] }));
+  async function deleteArchived(kind?: 'invoice' | 'product' | 'customer', oneId?: string, allInGroup = false) {
+    if (!repository) return alert('حذف بایگانی در نسخهٔ نصب‌شده فعال است.');
+    const all = { invoice: archivedInvoices.map(item => item.receipt.id), product: archivedProducts.map(item => item.id), customer: archivedCustomers.map(item => item.id) };
+    const selected = kind ? { invoice: [], product: [], customer: [], [kind]: oneId ? [oneId] : allInGroup ? all[kind] : archiveSelection[kind] } as Record<'invoice' | 'product' | 'customer', string[]> : all;
+    const count = selected.invoice.length + selected.product.length + selected.customer.length;
+    if (!count) return alert('موردی برای حذف انتخاب نشده است.');
+    if (!window.confirm(`حذف دائمی ${formatRial(count)} مورد از بایگانی؟ این کار برگشت‌پذیر نیست.`)) return;
+    try {
+      let deleted = 0;
+      for (const group of ['invoice', 'customer', 'product'] as const) {
+        if (!selected[group].length) continue;
+        const result = await repository.purgeArchived(group, selected[group]); deleted += result.deleted;
+        for (const path of result.imagePaths) await removeProductPhoto(path);
+      }
+      let compacted = true;
+      try { await repository.compactDatabase(); } catch { compacted = false; }
+      setArchiveSelection({ invoice: [], product: [], customer: [] }); await refreshAll();
+      alert(`${formatRial(deleted)} مورد از بایگانی حذف شد.${compacted ? ' فضای پایگاه داده نیز فشرده شد.' : ' فضای آزاد پایگاه داده در عملیات بعدی دوباره استفاده می‌شود.'}`);
+    } catch (error) { alert(`حذف بایگانی کامل نشد: ${(error as Error).message}`); await refreshAll(); }
+  }
   const nav: { key: Page; label: string; icon: string }[] = [
     { key: 'home', label: 'خانه', icon: '⌂' }, { key: 'sale', label: 'فروش تازه', icon: '＋' }, { key: 'products', label: 'کالاها', icon: '▦' },
-    { key: 'invoices', label: 'فاکتورها', icon: '▤' }, { key: 'customers', label: 'مشتریان', icon: '♧' }, { key: 'prices', label: 'قیمت گروهی', icon: '٪' },
+    { key: 'invoices', label: 'فاکتورها', icon: '▤' }, { key: 'customers', label: 'مشتریان', icon: '♧' }, { key: 'prices', label: 'افزایش قیمت', icon: '٪' },
+    { key: 'finance', label: 'حساب‌ها و پرداخت‌ها', icon: '◈' }, { key: 'returns', label: 'مرجوعی‌ها', icon: '↶' },
     { key: 'search', label: 'جست‌وجوی همگانی', icon: '⌕' }, { key: 'archive', label: 'بایگانی', icon: '▣' },
     { key: 'settings', label: 'تنظیمات', icon: '⚙' }, { key: 'support', label: 'پشتیبانی ماژورا', icon: '◉' }
   ];
-  function changePage(next: Page) { setPage(next); setMenuOpen(false); setShortcutProductId(null); setSearch(''); setCategoryPath(''); window.scrollTo(0, 0); }
+  function changePage(next: Page) {
+    if (next !== page) pageHistory.current.push(next);
+    setPage(next); setMenuOpen(false); setShortcutProductId(null); setSearch(''); setCategoryPath(''); window.scrollTo(0, 0);
+  }
+  useEffect(() => {
+    const back = () => {
+      if (imageExportOpen) return void setImageExportOpen(false);
+      if (cameraCandidate) return void setCameraCandidate('');
+      if (productFormOpen) return void clearProductForm();
+      if (inspectedProductId) return void setInspectedProductId(null);
+      if (cartOpen) return void setCartOpen(false);
+      if (menuOpen) return void setMenuOpen(false);
+      if (shortcutProductId) return void setShortcutProductId(null);
+      if (pageHistory.current.length > 1) {
+        pageHistory.current.pop(); setPage(pageHistory.current[pageHistory.current.length - 1]); window.scrollTo(0, 0); return;
+      }
+      if (page !== 'home') { setPage('home'); pageHistory.current = ['home']; return; }
+      if (Date.now() - exitTapAt.current < 2200) { void navigation.exit(); return; }
+      exitTapAt.current = Date.now(); alert('برای خروج از برنامه، یک بار دیگر کلید بازگشت را بزنید.');
+    };
+    const keyboard = (event: KeyboardEvent) => { if (event.key === 'Escape') back(); };
+    window.addEventListener('majora-back', back);
+    window.addEventListener('keydown', keyboard);
+    return () => { window.removeEventListener('majora-back', back); window.removeEventListener('keydown', keyboard); };
+  }, [page, menuOpen, cartOpen, shortcutProductId, inspectedProductId, productFormOpen, cameraCandidate, imageExportOpen]);
+  useEffect(() => {
+    if (!shortcutProductId) return;
+    const close = (event: PointerEvent) => {
+      if (!(event.target as Element).closest('.shortcut-menu, .shortcut-trigger')) setShortcutProductId(null);
+    };
+    document.addEventListener('pointerdown', close);
+    return () => document.removeEventListener('pointerdown', close);
+  }, [shortcutProductId]);
   const catalog = (mode: 'sale' | 'browse') => <>
     <div className="catalog-tools">
       <label className="catalog-search"><span className="sr-only">جست‌وجوی کالا</span><input value={search} onChange={event => setSearch(event.target.value)} placeholder="جست‌وجوی نام، مدل، رنگ یا دسته…" type="search"/></label>
@@ -564,7 +612,7 @@ function App() {
       <small className="tile-detail">{[product.model, product.color].filter(Boolean).join(' · ') || product.category.replaceAll('/', ' › ')}</small>
       <b className="tile-price">{formatRial(product.priceRial)} <span>ریال</span></b>
       {preferences.showStock && <span className={`tile-stock ${product.stock === 0 ? 'zero' : ''}`}>موجودی {formatRial(product.stock)}</span>}
-      {mode === 'sale' ? <button className="tile-add" onClick={() => addProductToCart(product)} aria-label={`افزودن ${product.name} به فاکتور`} disabled={product.stock < 1}>+ افزودن</button> : <div className="tile-actions"><button onClick={() => startProductEdit(product)}>ویرایش</button><button aria-label={`میانبرهای ${product.name}`} aria-expanded={shortcutProductId === product.id} onClick={() => setShortcutProductId(shortcutProductId === product.id ? null : product.id)}>⋯</button></div>}
+      {mode === 'sale' ? <button className="tile-add" onClick={() => addProductToCart(product)} aria-label={`افزودن ${product.name} به فاکتور`} disabled={product.stock < 1}>+ افزودن</button> : <div className="tile-actions"><button onClick={() => startProductEdit(product)}>ویرایش</button><button className="shortcut-trigger" aria-label={`میانبرهای ${product.name}`} aria-expanded={shortcutProductId === product.id} onClick={() => setShortcutProductId(shortcutProductId === product.id ? null : product.id)}>⋯</button></div>}
       {mode === 'browse' && shortcutProductId === product.id && <div className="shortcut-menu"><button onClick={() => openProductSearch(product, 'torob')}>ترب</button><button onClick={() => openProductSearch(product, 'digikala')}>دیجیکالا</button><button onClick={() => openProductSearch(product, 'details')}>مشخصات کالا</button></div>}
     </article>)}</div> : <div className="empty-catalog"><strong>کالایی در این بخش پیدا نشد</strong><p>نام، رنگ یا دسته را تغییر دهید.{mode === 'browse' ? ' برای شروع می‌توانید کالا اضافه کنید.' : ''}</p></div>}
     {filtered.length > visibleCount && <button className="load-more" onClick={() => setVisibleCount(count => count + 40)}>نمایش ۴۰ کالای بعدی</button>}
@@ -573,36 +621,38 @@ function App() {
   return <div className="shell" dir="rtl">
     <aside className="sidebar"><div className="brand"><img src={storeLogo} alt="نشان فروشگاه"/><span>{data.storeName}</span></div><nav aria-label="دسترسی سریع">{nav.slice(0, 4).map(n => <button key={n.key} className={page===n.key?'active':''} onClick={() => changePage(n.key)}><span aria-hidden="true">{n.icon}</span>{n.label}</button>)}</nav><div className="side-note">Powered by MAJORA</div></aside>
     {menuOpen && <div className="menu-backdrop" onClick={() => setMenuOpen(false)}><aside className="menu-drawer" onClick={event => event.stopPropagation()} aria-label="منوی کامل"><div className="menu-header"><strong>همهٔ بخش‌ها</strong><button aria-label="بستن منو" onClick={() => setMenuOpen(false)}>×</button></div>{nav.map(n => <button key={n.key} className={page===n.key?'active':''} onClick={() => changePage(n.key)}><span aria-hidden="true">{n.icon}</span>{n.label}</button>)}<div className="menu-powered"><img src={majoraLogo} alt="MAJORA"/>Powered by MAJORA</div></aside></div>}
-    <div className="main"><header className="topbar"><button className="menu-trigger" aria-label="باز کردن منوی کامل" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}>☰</button><img className="topbar-logo" src={storeLogo} alt=""/><div className="topbar-title"><strong>{data.storeName}</strong><small>{page === 'sale' ? 'انتخاب سریع کالا' : page === 'products' ? 'فهرست و مدیریت کالا' : 'فضای کار فروشگاه'}</small></div><button className="topbar-search" aria-label="جست‌وجوی همگانی" onClick={() => changePage('search')}>⌕</button><span className="offline">{nativeDevice?'آفلاین':'نمونه'}</span></header>
+    <div className="main"><header className="topbar"><button className="menu-trigger" aria-label="باز کردن منوی کامل" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}>☰</button><img className="topbar-logo" src={storeLogo} alt=""/><div className="topbar-title"><strong>{data.storeName}</strong><small>{page === 'sale' ? 'انتخاب سریع کالا' : page === 'products' ? 'فهرست و مدیریت کالا' : 'فضای کار فروشگاه'}</small></div>{dueCount > 0 && <button className="due-notification" aria-label={`${dueCount} یادآوری مالی`} onClick={() => changePage('finance')}>◉ <span>{formatRial(dueCount)}</span></button>}<button className="topbar-search" aria-label="جست‌وجوی همگانی" onClick={() => changePage('search')}>⌕</button><span className="offline">{nativeDevice?'آفلاین':'نمونه'}</span></header>
     <main>
       {message && <div className="notice" role="status">{message}</div>}
-       {page==='home' && <DashboardView data={dashboard} period={salesPeriod} onPeriod={setSalesPeriod} onSale={newInvoice} onProducts={() => changePage('products')} onInvoices={() => changePage('invoices')}/>}
+       {page==='home' && <><DashboardView data={dashboard} period={salesPeriod} onPeriod={setSalesPeriod} onSale={newInvoice} onProducts={() => changePage('products')} onInvoices={() => changePage('invoices')}/><section className="card finance-home"><div><span className="eyebrow">وضعیت حساب‌ها</span><h2>دریافت‌ها و مانده‌ها</h2></div><div className="finance-home-stats"><span>مطالبات <strong>{formatRial(financeOverview.invoices.filter(item => item.paymentStatus !== 'proforma').reduce((sum, item) => sum + Math.max(0, item.balanceRial ?? 0), 0))} ریال</strong></span><span>پیش‌فاکتورها <strong>{formatRial(financeOverview.invoices.filter(item => item.paymentStatus === 'proforma').length)}</strong></span></div><button onClick={() => changePage('finance')}>مدیریت حساب‌ها ←</button></section></>}
+       {page==='finance' && <FinanceView repository={repository} overview={financeOverview} products={active} onRefresh={refreshAll} onOpenInvoice={openInvoice} onReturn={openReturn}/>}
+       {page==='returns' && <ReturnsView repository={repository} invoices={financeOverview.invoices} initialId={returnTargetId} onRefresh={refreshAll} onOpenInvoice={openInvoice}/>}
        {page==='products' && <><div className="section-heading catalog-heading"><div><span className="eyebrow">کاتالوگ فروشگاه</span><h1>کالاها</h1></div><button className="primary" onClick={() => { clearProductForm(); setProductFormOpen(true); }}>+ کالای تازه</button></div>{catalog('browse')}
          {productFormOpen && <div className="sheet-backdrop" onClick={clearProductForm}><section className="editor-sheet" onClick={event => event.stopPropagation()} aria-label={editingId ? 'ویرایش کالا' : 'افزودن کالا'}><div className="sheet-header"><h2>{editingId ? 'ویرایش کالا' : 'کالای تازه'}</h2><button aria-label="بستن" onClick={clearProductForm}>×</button></div><form onSubmit={saveProduct} className="form"><p className="field-hint">نام و مدل را دقیق بنویسید تا میانبر جست‌وجوی اینترنتی نتیجهٔ بهتری بدهد.</p><label>نام کالا<input value={name} onChange={e => setName(e.target.value)} required placeholder="مثلاً کیف دستی چرم"/></label><div className="form-pair"><label>مدل<input value={model} onChange={e => setModel(e.target.value)} placeholder="کد یا مدل"/></label><label>رنگ<input value={color} onChange={e => setColor(e.target.value)} placeholder="مثلاً قهوه‌ای"/></label></div>
-           <div className="category-form"><label>دستهٔ اصلی<input list="category-root-options" value={category.split('/')[0] ?? ''} onChange={event => { const root = event.target.value.trim(); setCategory(root ? [root, ...category.split('/').slice(1)].filter(Boolean).join('/') : ''); }} placeholder="مثلاً کیف"/><datalist id="category-root-options">{categoryRoots.map(root => <option key={root} value={root}/>)}</datalist></label><label>زیردسته<input list="category-child-options" value={category.split('/')[1] ?? ''} onChange={event => { const root = category.split('/')[0]; setCategory([root, event.target.value.trim(), category.split('/')[2]].filter(Boolean).join('/')); }} disabled={!category.split('/')[0]} placeholder="مثلاً دستی"/><datalist id="category-child-options">{categories.filter(item => item.startsWith(`${category.split('/')[0]}/`)).map(item => <option key={item} value={item.split('/')[1]}/>)}</datalist></label><label>جزئیات دسته<input value={category.split('/')[2] ?? ''} onChange={event => setCategory([category.split('/')[0], category.split('/')[1], event.target.value.trim()].filter(Boolean).join('/'))} disabled={!category.split('/')[1]} placeholder="مثلاً چرم"/></label></div>
+           <div className="category-form"><label>دستهٔ اصلی<input list="category-root-options" value={category.split('/')[0] ?? ''} onChange={event => { const root = event.target.value; setCategory(root ? [root, ...category.split('/').slice(1)].filter(Boolean).join('/') : ''); }} placeholder="مثلاً کیف"/><datalist id="category-root-options">{categoryRoots.map(root => <option key={root} value={root}/>)}</datalist></label><label>زیردسته<input list="category-child-options" value={category.split('/')[1] ?? ''} onChange={event => { const root = category.split('/')[0]; setCategory([root, event.target.value, category.split('/')[2]].filter(Boolean).join('/')); }} disabled={!category.split('/')[0]} placeholder="مثلاً دستی"/><datalist id="category-child-options">{categories.filter(item => item.startsWith(`${category.split('/')[0]}/`)).map(item => <option key={item} value={item.split('/')[1]}/>)}</datalist></label><label>جزئیات دسته<input value={category.split('/')[2] ?? ''} onChange={event => setCategory([category.split('/')[0], category.split('/')[1], event.target.value].filter(Boolean).join('/'))} disabled={!category.split('/')[1]} placeholder="مثلاً چرم"/></label></div>
            <div className="form-pair"><label>قیمت (ریال)<input inputMode="numeric" value={price} onChange={e => onGroupedRialChange(e, setPrice)} required placeholder="۱٬۲۵۰٬۰۰۰"/></label><label>موجودی<input inputMode="numeric" value={stock} onChange={e => onGroupedRialChange(e, setStock)} placeholder="۰"/></label></div>
            <div className="photo-actions"><label>انتخاب فایل عکس<input type="file" accept="image/*" onChange={async event => { const file = event.target.files?.[0]; if (file) try { setPhotoDataUrl(await prepareProductPhoto(file)); setCameraCandidate(''); } catch (error) { alert((error as Error).message); } }}/></label><button type="button" onClick={takeProductPhoto}>عکاسی با دوربین</button></div>
            {cameraCandidate && <div className="camera-review"><img src={cameraCandidate} alt="عکس تازه از دوربین"/><div><button type="button" onClick={() => { setPhotoDataUrl(cameraCandidate); setCameraCandidate(''); }}>استفاده از این عکس</button><button type="button" onClick={takeProductPhoto}>تلاش دوباره</button></div></div>}
            {photoDataUrl && <img className="photo-preview" src={photoDataUrl} alt="پیش‌نمایش عکس کالا"/>}<button className="primary" type="submit">{editingId ? 'ذخیرهٔ تغییرها' : 'ثبت کالا'}</button>{editingId && <div className="editor-secondary"><button type="button" onClick={() => editPrice(data.products.find(item => item.id === editingId)!)}>تغییر سریع قیمت</button><button type="button" onClick={() => archiveProduct(data.products.find(item => item.id === editingId)!)}>بایگانی کالا</button></div>}</form></section></div>}
        </>}
-       {page==='customers' && <><div className="section-heading"><div><span className="eyebrow">باشگاه مشتریان</span><h1>مشتریان</h1></div><button className="primary" disabled={!customers.length} onClick={exportCustomersCsv}>خروجی CSV</button></div><div className="customer-layout"><section className="card"><label className="catalog-search">جست‌وجوی نام یا شماره<input type="search" value={customerSearch} onChange={event => setCustomerSearch(event.target.value)} placeholder="نام یا شمارهٔ همراه"/></label><div className="customer-list">{customers.filter(item => normalizeSearch(`${item.name} ${item.phone}`).includes(normalizeSearch(customerSearch))).map(item => <button key={item.id} className={selectedCustomerId === item.id ? 'active' : ''} onClick={() => setSelectedCustomerId(item.id)}><strong>{item.name}</strong><span dir="ltr">{item.phone || 'بدون شماره'}</span><small>{formatRial(item.invoiceCount)} فاکتور</small></button>)}{!customers.length && <p className="empty">با ثبت نخستین فاکتور به نام مشتری، پروندهٔ او اینجا ساخته می‌شود.</p>}</div></section><section className="card"><h2>{customers.find(item => item.id === selectedCustomerId)?.name || 'پروندهٔ مشتری'}</h2>{selectedCustomerId ? <div className="saved-invoices">{customerInvoices.map(entry => <button key={entry.receipt.id} onClick={() => { setReceipt(entry.receipt); setInvoiceNo(String(entry.receipt.number)); changePage('invoice'); }}>فاکتور {formatRial(entry.receipt.number)} · {new Date(entry.receipt.at).toLocaleDateString('fa-IR-u-ca-persian')} · {formatRial(entry.receipt.totalRial)} ریال</button>)}{!customerInvoices.length && <p className="empty">فاکتوری برای این مشتری ثبت نشده است.</p>}</div> : <p className="empty">برای دیدن خریدهای قبلی، نام یک مشتری را انتخاب کنید.</p>}</section></div></>}
+       {page==='customers' && <><div className="section-heading"><div><span className="eyebrow">باشگاه مشتریان</span><h1>مشتریان</h1></div><button className="primary" disabled={!customers.length} onClick={exportCustomersCsv}>خروجی CSV</button></div><div className="customer-layout"><section className="card"><label className="catalog-search">جست‌وجوی نام یا شماره<input type="search" value={customerSearch} onChange={event => setCustomerSearch(event.target.value)} placeholder="نام یا شمارهٔ همراه"/></label><div className="customer-list">{customers.filter(item => normalizeSearch(`${item.name} ${item.phone}`).includes(normalizeSearch(customerSearch))).map(item => <button key={item.id} className={selectedCustomerId === item.id ? 'active' : ''} onClick={() => setSelectedCustomerId(item.id)}><strong>{item.name}</strong><span dir="ltr">{item.phone || 'بدون شماره'}</span><small>{formatRial(item.invoiceCount)} فاکتور</small></button>)}{!customers.length && <p className="empty">با ثبت نخستین فاکتور به نام مشتری، پروندهٔ او اینجا ساخته می‌شود.</p>}</div></section><section className="card"><h2>{customers.find(item => item.id === selectedCustomerId)?.name || 'پروندهٔ مشتری'}</h2>{selectedCustomerId ? <div className="saved-invoices">{customers.find(item => item.id === selectedCustomerId)?.phone && <a className="call-customer" href={`tel:${latinDigits(customers.find(item => item.id === selectedCustomerId)!.phone).replace(/[^0-9+]/g, '')}`}>تماس با {customers.find(item => item.id === selectedCustomerId)?.name}</a>}{customerInvoices.map(entry => <button key={entry.receipt.id} onClick={() => openInvoice(entry.receipt)}><PaymentBadge status={entry.receipt.paymentStatus ?? 'unpaid'}/> فاکتور {formatRial(entry.receipt.number)} · {new Date(entry.receipt.at).toLocaleDateString('fa-IR-u-ca-persian')} · {formatRial(entry.receipt.totalRial)} ریال</button>)}{!customerInvoices.length && <p className="empty">فاکتوری برای این مشتری ثبت نشده است.</p>}</div> : <p className="empty">برای دیدن خریدهای قبلی، نام یک مشتری را انتخاب کنید.</p>}</section></div></>}
        {page==='sale' && <><div className="sale-header"><div><span className="eyebrow">۱ از ۲ · انتخاب کالا</span><h1>فاکتور جدید</h1></div><button className="text-button" onClick={newInvoice}>شروع دوباره</button></div>
          {!customerStepDone && !!customers.length && <details className="customer-start card existing-customer"><summary>انتخاب مشتری قبلی ({formatRial(customers.length)})</summary><label>جست‌وجوی نام، نام خانوادگی یا شماره<input type="search" value={customerSearch} onChange={event => setCustomerSearch(event.target.value)} placeholder="مشتری را پیدا کنید"/></label><div className="customer-list">{customers.filter(item => normalizeSearch(`${item.name} ${item.phone}`).includes(normalizeSearch(customerSearch))).map(item => <button key={item.id} onClick={() => startSaleForCustomer(item)}><strong>{item.name}</strong><span dir="ltr">{item.phone}</span><small>{item.lastPurchaseAt ? new Date(item.lastPurchaseAt).toLocaleDateString('fa-IR-u-ca-persian') : 'بدون خرید'}</small></button>)}</div></details>}
          {!customerStepDone ? <section className="customer-start card"><h2>مشخصات مشتری</h2><p className="muted">برای ثبت در باشگاه مشتریان، نام و شمارهٔ همراه را وارد کنید.</p><div className="customer-strip"><label>نام<input value={customerFirst} onChange={event => setCustomerFirst(event.target.value)} placeholder="نام"/></label><label>نام خانوادگی<input value={customerLast} onChange={event => setCustomerLast(event.target.value)} placeholder="نام خانوادگی"/></label><label>شمارهٔ همراه<input value={customerPhone} onChange={event => setCustomerPhone(event.target.value)} inputMode="tel" dir="ltr" placeholder="09…"/></label></div><div className="customer-actions"><button className="primary" onClick={() => { const mobile = latinDigits(customerPhone).replace(/[\s-]/g, ''); if (!customerFirst.trim() || !customerLast.trim()) return alert('نام و نام خانوادگی مشتری را وارد کنید.'); if (!/^09\d{9}$/.test(mobile)) return alert('شمارهٔ همراه را به صورت ۰۹ و ۱۱ رقم وارد کنید.'); setCustomerPhone(mobile); setCustomerStepDone(true); }}>ادامه و انتخاب کالا ←</button><button className="text-button" onClick={() => { setCustomerFirst(''); setCustomerLast(''); setCustomerPhone(''); setCustomerStepDone(true); }}>فروش به خریدار حضوری</button></div></section> : <><div className="customer-summary"><span>{customer || 'خریدار حضوری'} {customerPhone && `· ${customerPhone}`}</span><button onClick={() => setCustomerStepDone(false)}>ویرایش مشتری</button></div>{catalog('sale')}<div className="cart-dock"><button className="cart-toggle" onClick={() => setCartOpen(true)}><span>سبد · {formatRial(draftLines.reduce((sum, line) => sum + line.quantity, 0))} کالا</span><strong>{formatRial(draftTotal)} ریال</strong></button><button className="primary" onClick={() => changePage('invoice')} disabled={!draftLines.length}>بازبینی فاکتور ←</button></div></>}
          {cartOpen && <div className="sheet-backdrop" onClick={() => setCartOpen(false)}><section className="cart-sheet" onClick={event => event.stopPropagation()} aria-label="سبد فاکتور"><div className="sheet-header"><h2>سبد این مشتری</h2><button aria-label="بستن سبد" onClick={() => setCartOpen(false)}>×</button></div>{draftLines.length ? draftLines.map((line, index) => <div className="cart-row" key={`${line.productId || line.name}-${index}`}><div><strong>{line.name}</strong><small>{formatRial(line.unitPriceRial ?? 0)} ریال × {formatRial(line.quantity)}</small></div><div className="quantity-stepper"><button aria-label={`کاهش ${line.name}`} onClick={() => line.quantity > 1 ? updateCartQuantity(index, String(line.quantity - 1)) : setDraftLines(current => current.filter((_, i) => i !== index))}>−</button><input aria-label={`تعداد ${line.name}`} type="number" min="1" defaultValue={line.quantity} key={`${index}-${line.quantity}`} onBlur={event => updateCartQuantity(index, event.target.value)} inputMode="numeric"/><button aria-label={`افزایش ${line.name}`} onClick={() => updateCartQuantity(index, String(line.quantity + 1))}>+</button></div></div>) : <p className="empty">هنوز کالایی انتخاب نشده است.</p>}<button className="primary" disabled={!draftLines.length} onClick={() => changePage('invoice')}>بازبینی فاکتور · {formatRial(draftTotal)} ریال</button></section></div>}</>}
-       {page==='prices' && <><div className="section-heading"><div><span className="eyebrow">کنترل قیمت</span><h1>افزایش گروهی</h1></div></div><div className="two-col"><section className="card"><h2>انتخاب کالا و درصد</h2><label className="form">درصد افزایش<input inputMode="decimal" value={percent} onChange={e=>setPercent(e.target.value)} placeholder="مثلاً ۱۰"/></label>
+       {page==='prices' && <><div className="section-heading"><div><span className="eyebrow">کنترل قیمت</span><h1>افزایش قیمت</h1></div></div><div className="two-col"><section className="card"><h2>افزایش گروهی یا انتخابی</h2><label className="form">درصد افزایش<input inputMode="decimal" value={percent} onChange={e=>setPercent(e.target.value)} placeholder="مثلاً ۱۰"/></label>
          <label className="toggle-row"><span>همهٔ کالاهای فعال ({formatRial(active.length)})</span><input type="checkbox" checked={allPrices} onChange={event => { setAllPrices(event.target.checked); setSelected([]); }}/></label>
          {!allPrices && <><label className="catalog-search">جست‌وجوی نام، مدل، رنگ یا دسته<input type="search" value={priceSearch} onChange={event => setPriceSearch(event.target.value)} placeholder="کالای مورد نظر…"/></label><div className="category-roots"><button className={!priceCategory ? 'selected' : ''} onClick={() => setPriceCategory('')}>همهٔ دسته‌ها</button>{categoryRoots.map(root => <button key={root} className={priceCategory === root ? 'selected' : ''} onClick={() => setPriceCategory(root)}>{root}</button>)}</div>{priceCategory && <div className="category-children">{categories.filter(item => item.startsWith(`${priceCategory}/`)).map(item => <button key={item} className={priceCategory === item ? 'selected' : ''} onClick={() => setPriceCategory(item)}>{item.replaceAll('/', ' › ')}</button>)}</div>}
            <div className="checks">{priceFiltered.map(p => <label key={p.id}><input type="checkbox" checked={selected.includes(p.id)} onChange={event => setSelected(current => event.target.checked ? [...new Set([...current, p.id])] : current.filter(id => id !== p.id))}/><span>{p.name} <small>{p.category.replaceAll('/', ' › ')}</small></span><small>{formatRial(p.priceRial)} ریال</small></label>)}{!priceFiltered.length && <p className="empty">کالایی پیدا نشد.</p>}</div></>}
          <p className="muted">{allPrices ? 'همهٔ کالاهای فعال' : `${formatRial(selected.length)} کالای یکتا`} انتخاب شده‌اند.</p><button className="primary" onClick={applyBatch} disabled={!active.length || (!allPrices && !selected.length)}>اعمال به {allPrices ? active.length : selected.length} کالا</button></section><section className="card"><h2>تاریخچهٔ گروهی</h2>{data.batches.length? data.batches.map(b=><article className="batch" key={b.id}><div><strong>{formatPercent(b.percentBasisPoints)}٪ افزایش</strong><small>{new Date(b.at).toLocaleString('fa-IR')} · {b.productIds.length} کالا {b.undoneAt?'· بازگردانی‌شده':''}</small></div><button onClick={()=>undo(b)} disabled={!!b.undoneAt}>{b.undoneAt?'بازگردانی شد':'بازگردانی'}</button></article>):<p className="empty">هنوز تغییری ثبت نشده است.</p>}<p className="muted">در صورت تغییر مستقل قیمت پس از این عملیات، بازگردانی آن کالا را دست‌نخورده نگه می‌دارد.</p></section></div></>}
       {page==='invoices' && <><div className="section-heading"><div><span className="eyebrow">سوابق فروش</span><h1>فاکتورها</h1></div><button className="primary" onClick={newInvoice}>+ فاکتور تازه</button></div>
         <div className="record-filters"><label>جست‌وجوی فاکتور<input type="search" value={invoiceSearch} onChange={event => setInvoiceSearch(event.target.value)} placeholder="شماره، نام، کالا یا تاریخ"/></label><label>تاریخ شمسی<input value={invoiceDateFilter} onChange={event => setInvoiceDateFilter(event.target.value)} placeholder="۱۴۰۵/۰۷"/></label><label>ترتیب<select value={invoiceSort} onChange={event => setInvoiceSort(event.target.value as 'newest' | 'oldest')}><option value="newest">جدیدترین</option><option value="oldest">قدیمی‌ترین</option></select></label></div>
-        <div className="record-list">{visibleInvoices.map(entry => <article className="record-card" key={entry.receipt.id}><div><strong>فاکتور {formatRial(entry.receipt.number)} · {entry.receipt.customerName || 'خریدار حضوری'}</strong><small>{entry.receipt.dateJalali} · {entry.status === 'void' ? 'باطل‌شده' : 'صادرشده'} · {entry.receipt.lines.length} ردیف</small><b>{formatRial(entry.receipt.totalRial)} ریال</b></div><div className="record-actions"><button onClick={() => { setReceipt(entry.receipt); setInvoiceNo(String(entry.receipt.number)); changePage('invoice'); }}>مشاهده و خروجی</button>{entry.status === 'issued' && <button onClick={() => beginRevision(entry.receipt)}>ویرایش</button>}<button onClick={() => startSaleForInvoice(entry.receipt)}>فاکتور تازه برای مشتری</button><button onClick={() => setArchive('invoice', entry.receipt.id, true)}>بایگانی</button></div></article>)}{!visibleInvoices.length && <p className="empty-catalog">فاکتوری با این فیلتر پیدا نشد.</p>}</div>
+        <div className="record-list">{visibleInvoices.map(entry => <article className={`record-card status-${entry.receipt.paymentStatus ?? 'unpaid'}`} key={entry.receipt.id}><div><strong>فاکتور {formatRial(entry.receipt.number)} · {entry.receipt.customerName || 'خریدار حضوری'}</strong><small>{entry.receipt.dateJalali} · {entry.status === 'void' ? 'باطل‌شده' : 'صادرشده'} · {entry.receipt.lines.length} ردیف</small><PaymentBadge status={entry.receipt.paymentStatus ?? 'unpaid'}/><b>{formatRial(entry.receipt.totalRial)} ریال</b></div><div className="record-actions"><button onClick={() => openInvoice(entry.receipt)}>مشاهده و خروجی</button>{entry.status === 'issued' && <button onClick={() => beginRevision(entry.receipt)}>ویرایش</button>}{entry.status === 'issued' && entry.receipt.paymentStatus !== 'proforma' && <button onClick={() => openReturn(entry.receipt)}>مرجوعی</button>}<button onClick={() => changePage('finance')}>وضعیت پرداخت</button>{entry.receipt.customerPhone && <a href={`tel:${latinDigits(entry.receipt.customerPhone).replace(/[^0-9+]/g, '')}`}>تماس با {entry.receipt.customerName || 'مشتری'}</a>}<button onClick={() => startSaleForInvoice(entry.receipt)}>فاکتور تازه برای مشتری</button><button onClick={() => setArchive('invoice', entry.receipt.id, true)}>بایگانی</button></div></article>)}{!visibleInvoices.length && <p className="empty-catalog">فاکتوری با این فیلتر پیدا نشد.</p>}</div>
       </>}
-      {page==='archive' && <><div className="section-heading"><div><span className="eyebrow">سوابق کنارگذاشته‌شده</span><h1>بایگانی</h1></div></div><div className="archive-sections">
-        <section className="card"><h2>فاکتورها · {formatRial(archivedInvoices.length)}</h2>{archivedInvoices.map(entry => <div className="archive-row" key={entry.receipt.id}><span>فاکتور {formatRial(entry.receipt.number)} · {entry.receipt.customerName || 'خریدار حضوری'}</span><button onClick={() => { setReceipt(entry.receipt); setInvoiceNo(String(entry.receipt.number)); changePage('invoice'); }}>مشاهده / خروجی</button><button onClick={() => setArchive('invoice', entry.receipt.id, false)}>بازگردانی</button></div>)}{!archivedInvoices.length && <p className="muted">فاکتور بایگانی‌شده‌ای نیست.</p>}</section>
-        <section className="card"><h2>کالاها · {formatRial(archivedProducts.length)}</h2>{archivedProducts.map(product => <div className="archive-row" key={product.id}><span>{product.name} · {formatRial(product.priceRial)} ریال</span><button onClick={() => setArchive('product', product.id, false)}>بازگردانی</button></div>)}{!archivedProducts.length && <p className="muted">کالای بایگانی‌شده‌ای نیست.</p>}</section>
-        <section className="card"><h2>مشتریان · {formatRial(archivedCustomers.length)}</h2>{archivedCustomers.map(item => <div className="archive-row" key={item.id}><span>{item.name} · <bdi dir="ltr">{item.phone}</bdi></span><button onClick={() => setArchive('customer', item.id, false)}>بازگردانی</button></div>)}{!archivedCustomers.length && <p className="muted">مشتری بایگانی‌شده‌ای نیست.</p>}</section>
+      {page==='archive' && <><div className="section-heading"><div><span className="eyebrow">سوابق کنارگذاشته‌شده</span><h1>بایگانی</h1></div><button className="danger" disabled={!archivedInvoices.length && !archivedProducts.length && !archivedCustomers.length} onClick={() => void deleteArchived()}>حذف تمام بایگانی</button></div><p className="muted">حذف دائمی فقط برای موارد بایگانی‌شده انجام می‌شود. اسناد مالی مرتبط برای حفظ سازگاری حساب‌ها نگهداری می‌شوند.</p><div className="archive-sections">
+        <section className="card"><div className="archive-group-head"><h2>فاکتورها · {formatRial(archivedInvoices.length)}</h2><button disabled={!archivedInvoices.length} onClick={() => setArchiveSelection(current => ({ ...current, invoice: archivedInvoices.map(item => item.receipt.id) }))}>انتخاب همه</button><button disabled={!archiveSelection.invoice.length} onClick={() => void deleteArchived('invoice')}>حذف انتخابی</button><button className="danger" disabled={!archivedInvoices.length} onClick={() => void deleteArchived('invoice', undefined, true)}>حذف کل فاکتورها</button></div>{archivedInvoices.map(entry => <div className="archive-row" key={entry.receipt.id}><label><input type="checkbox" checked={archiveSelection.invoice.includes(entry.receipt.id)} onChange={() => toggleArchiveSelection('invoice', entry.receipt.id)}/><span>فاکتور {formatRial(entry.receipt.number)} · {entry.receipt.customerName || 'خریدار حضوری'}</span></label><button onClick={() => openInvoice(entry.receipt)}>مشاهده / خروجی</button><button onClick={() => openReturn(entry.receipt)}>مرجوعی</button><button onClick={() => setArchive('invoice', entry.receipt.id, false)}>بازگردانی</button><button className="danger" onClick={() => void deleteArchived('invoice', entry.receipt.id)}>حذف</button></div>)}{!archivedInvoices.length && <p className="muted">فاکتور بایگانی‌شده‌ای نیست.</p>}</section>
+        <section className="card"><div className="archive-group-head"><h2>کالاها · {formatRial(archivedProducts.length)}</h2><button disabled={!archivedProducts.length} onClick={() => setArchiveSelection(current => ({ ...current, product: archivedProducts.map(item => item.id) }))}>انتخاب همه</button><button disabled={!archiveSelection.product.length} onClick={() => void deleteArchived('product')}>حذف انتخابی</button><button className="danger" disabled={!archivedProducts.length} onClick={() => void deleteArchived('product', undefined, true)}>حذف کل کالاها</button></div>{archivedProducts.map(product => <div className="archive-row" key={product.id}><label><input type="checkbox" checked={archiveSelection.product.includes(product.id)} onChange={() => toggleArchiveSelection('product', product.id)}/><span>{product.name} · {formatRial(product.priceRial)} ریال</span></label><button onClick={() => setArchive('product', product.id, false)}>بازگردانی</button><button className="danger" onClick={() => void deleteArchived('product', product.id)}>حذف</button></div>)}{!archivedProducts.length && <p className="muted">کالای بایگانی‌شده‌ای نیست.</p>}</section>
+        <section className="card"><div className="archive-group-head"><h2>مشتریان · {formatRial(archivedCustomers.length)}</h2><button disabled={!archivedCustomers.length} onClick={() => setArchiveSelection(current => ({ ...current, customer: archivedCustomers.map(item => item.id) }))}>انتخاب همه</button><button disabled={!archiveSelection.customer.length} onClick={() => void deleteArchived('customer')}>حذف انتخابی</button><button className="danger" disabled={!archivedCustomers.length} onClick={() => void deleteArchived('customer', undefined, true)}>حذف کل مشتریان</button></div>{archivedCustomers.map(item => <div className="archive-row" key={item.id}><label><input type="checkbox" checked={archiveSelection.customer.includes(item.id)} onChange={() => toggleArchiveSelection('customer', item.id)}/><span>{item.name} · <bdi dir="ltr">{item.phone}</bdi></span></label><button onClick={() => setArchive('customer', item.id, false)}>بازگردانی</button><button className="danger" onClick={() => void deleteArchived('customer', item.id)}>حذف</button></div>)}{!archivedCustomers.length && <p className="muted">مشتری بایگانی‌شده‌ای نیست.</p>}</section>
       </div></>}
       {page==='search' && <><div className="section-heading"><div><span className="eyebrow">دسترسی سریع</span><h1>جست‌وجوی همگانی</h1></div></div><label className="global-search">نام کالا، مشتری، شماره تماس یا شماره فاکتور<input autoFocus type="search" value={globalSearch} onChange={event => setGlobalSearch(event.target.value)} placeholder="برای جست‌وجو بنویسید…"/></label>{globalSearch.trim() && <div className="global-results">
         <section className="card"><h2>کالاها</h2>{active.filter(item => normalizeSearch(`${item.name} ${item.model ?? ''} ${item.color ?? ''} ${item.category}`).includes(normalizeSearch(globalSearch))).slice(0, 20).map(item => <button key={item.id} onClick={() => { changePage('products'); setSearch(item.name); setInspectedProductId(item.id); }}>{item.name} · {formatRial(item.priceRial)} ریال</button>)}</section>
@@ -611,12 +661,13 @@ function App() {
       </div>}</>}
       {page==='invoice' && <>
          <div className="section-heading"><div><span className="eyebrow">بازبینی و خروجی</span><h1>{invoiceNo === 'پیش‌نمایش' ? 'پیش‌نمایش فاکتور' : `فاکتور شمارهٔ ${invoiceNo}`}</h1></div></div>
-         <div className="invoice-export-bar"><label><input type="checkbox" checked={mono} onChange={e=>setMono(e.target.checked)}/> سیاه‌وسفید</label><label>کاغذ<select value={paperSize} onChange={e => setPaperSize(e.target.value as PaperSize)}><option value="a4">A4</option><option value="a5">A5</option></select></label><button onClick={() => setFitPreview(value => !value)}>{fitPreview ? 'نمایش درشت' : 'نمایش کامل'}</button><button onClick={() => saveInvoiceFile('pdf')}>PDF {paperSize.toUpperCase()}</button><button onClick={() => saveInvoiceFile('png')}>تصویر PNG</button><button onClick={() => saveInvoiceFile('pdf', 'print')}>چاپ {paperSize.toUpperCase()}</button></div>
+         <div className="invoice-export-bar"><label><input type="checkbox" checked={mono} onChange={e=>setMono(e.target.checked)}/> سیاه‌وسفید</label><label>کاغذ<select value={paperSize} onChange={e => setPaperSize(e.target.value as PaperSize)}><option value="a4">A4</option><option value="a5">A5</option></select></label><button onClick={() => setFitPreview(value => !value)}>{fitPreview ? 'نمایش درشت' : 'نمایش کامل'}</button><button onClick={() => saveInvoiceFile('pdf')}>PDF {paperSize.toUpperCase()}</button><button onClick={() => setImageExportOpen(true)}>تصویر PNG</button><button onClick={() => saveInvoiceFile('pdf', 'print')}>چاپ {paperSize.toUpperCase()}</button></div>
+         {imageExportOpen && <div className="sheet-backdrop" onClick={() => setImageExportOpen(false)}><section className="image-export-choice card" onClick={event => event.stopPropagation()} role="dialog" aria-label="خروجی تصویر فاکتور"><h2>خروجی تصویر فاکتور</h2><p>تصویر با همان رنگ و قالب پیش‌نمایش ساخته می‌شود.</p><button className="primary" onClick={() => void saveInvoiceFile('png', 'gallery')}>ذخیره در گالری</button><button onClick={() => void saveInvoiceFile('png', 'share')}>اشتراک‌گذاری</button><button onClick={() => setImageExportOpen(false)}>انصراف</button></section></div>}
         <div className="invoice-layout">
-          <div className="invoice-preview-scroll" ref={invoicePreviewRef}><div style={{ zoom: fitPreview ? Math.min(1, (previewWidth || window.innerWidth - 24) / (paperSize === 'a4' ? 794 : 560)) : 1 }}><InvoiceDocument brand={displayData} receipt={displayReceipt} mono={mono} paper={paperSize} logo={storeLogo}/></div></div>
+          <div className="invoice-preview-scroll" ref={invoicePreviewRef}><div style={{ zoom: fitPreview ? Math.min(1, (previewWidth || window.innerWidth - 24) / (paperSize === 'a4' ? 794 : 560)) : 1 }}><InvoiceDocument brand={displayData} receipt={displayReceipt} mono={mono} paper={paperSize} logo={mono ? storeLogo : invoiceLogo}/></div></div>
            <section className="card controls invoice-editor">
              <h2>{receipt ? (selectedInvoiceStatus === 'void' ? 'سند باطل‌شده' : 'سند ثبت‌شده') : 'تنظیمات این فاکتور'}</h2>
-             {receipt ? <><button onClick={newInvoice}>+ فاکتور تازه</button><button onClick={() => shareInvoiceText(receipt)}>اشتراک متن فاکتور / پیامک</button><button onClick={() => copyInvoiceText(receipt)}>کپی متن فاکتور</button>{nativeDevice && selectedInvoiceStatus === 'issued' && (receipt.revision ?? 1) === latestInvoiceRevision && <><button onClick={() => beginRevision(receipt)}>ویرایش همین فاکتور</button><button onClick={voidSelectedInvoice}>ابطال فاکتور و بازگردانی موجودی</button></>}{receiptRevisions.length > 1 && <details className="history-panel"><summary>نسخه‌های این فاکتور ({formatRial(receiptRevisions.length)})</summary>{receiptRevisions.map(item => <button key={item.receipt.revision} onClick={() => setReceipt(item.receipt)}>نسخهٔ {formatRial(item.receipt.revision ?? 1)} · {new Date(item.revisedAt).toLocaleString('fa-IR')} · {item.reason}</button>)}</details>}</> : <>
+             {receipt ? <><PaymentBadge status={receipt.paymentStatus ?? 'unpaid'}/><button onClick={newInvoice}>+ فاکتور تازه</button><button onClick={() => shareInvoiceText(receipt)}>اشتراک متن فاکتور / پیامک</button><button onClick={() => copyInvoiceText(receipt)}>کپی متن فاکتور</button>{receipt.customerPhone && <a className="call-customer" href={`tel:${latinDigits(receipt.customerPhone).replace(/[^0-9+]/g, '')}`}>تماس با {receipt.customerName || 'مشتری'}</a>}{nativeDevice && selectedInvoiceStatus === 'issued' && <><button onClick={() => openReturn(receipt)}>ثبت مرجوعی</button><button onClick={() => changePage('finance')}>مدیریت پرداخت</button></>}{nativeDevice && selectedInvoiceStatus === 'issued' && (receipt.revision ?? 1) === latestInvoiceRevision && <><button onClick={() => beginRevision(receipt)}>ویرایش همین فاکتور</button><button onClick={voidSelectedInvoice}>ابطال فاکتور و بازگردانی موجودی</button></>}{receiptRevisions.length > 1 && <details className="history-panel"><summary>نسخه‌های این فاکتور ({formatRial(receiptRevisions.length)})</summary>{receiptRevisions.map(item => <button key={item.receipt.revision} onClick={() => setReceipt(item.receipt)}>نسخهٔ {formatRial(item.receipt.revision ?? 1)} · {new Date(item.revisedAt).toLocaleString('fa-IR')} · {item.reason}</button>)}</details>}</> : <>
                <button className="text-button" onClick={() => changePage('sale')}>← بازگشت به انتخاب کالا</button>
                <div className="form-pair"><label>نام خریدار<input value={customerFirst} onChange={e => setCustomerFirst(e.target.value)}/></label><label>نام خانوادگی<input value={customerLast} onChange={e => setCustomerLast(e.target.value)}/></label></div>
                <label>شمارهٔ تماس<input value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} inputMode="tel" dir="ltr"/></label>
@@ -629,9 +680,11 @@ function App() {
                <div className="invoice-percent"><label>افزایش درصدی همین فاکتور<input inputMode="decimal" value={invoicePercent} onChange={e => setInvoicePercent(e.target.value)} placeholder="مثلاً ۱۰"/></label><button onClick={applyInvoicePercent} disabled={!draftLines.length}>اعمال به {invoiceSelectedLines.length || draftLines.length} ردیف</button></div>
                <div className="invoice-discount"><label className="toggle-row"><span>تخفیف این فاکتور</span><input type="checkbox" checked={discountEnabled} onChange={event => { setDiscountEnabled(event.target.checked); if (!event.target.checked) setDraftLines(lines => lines.map(line => ({ ...line, discountBasisPoints: 0 }))); }}/></label>{discountEnabled && <><label>درصد تخفیف<input inputMode="decimal" value={discountPercent} onChange={event => setDiscountPercent(event.target.value)} placeholder="مثلاً ۱۰"/></label><button onClick={applyInvoiceDiscount} disabled={!draftLines.length}>اعمال به {invoiceSelectedLines.length || draftLines.length} ردیف</button><small>برای انتخاب چند ردیف، تیک آن‌ها را در فهرست بالا بزنید؛ بدون تیک به همه اعمال می‌شود.</small></>}</div>
                {revisionBase && <label className="revision-reason">دلیل ویرایش نسخهٔ {formatRial(revisionBase.revision ?? 1)}<input value={revisionReason} onChange={event => setRevisionReason(event.target.value)} required/></label>}
-               <div className="form-pair"><label>هزینه ارسال (ریال)<input inputMode="numeric" value={shipping} onChange={event => onGroupedRialChange(event, setShipping)} placeholder="۰"/></label><label>مبلغ پرداختی (ریال)<input inputMode="numeric" value={paid} onChange={event => onGroupedRialChange(event, setPaid)} placeholder="۰"/></label></div>
-               <strong className="invoice-grand-total">مبلغ نهایی: {formatRial(draftGrand)} ریال · مانده: {formatRial(Math.max(0, draftGrand - rialOrZero(paid)))}</strong>
-               {nativeDevice ? <><button className="primary" onClick={issue} disabled={!draftLines.length || issuing}>{issuing ? 'در حال ثبت…' : revisionBase ? 'ثبت نسخهٔ اصلاح‌شده' : 'ثبت نهایی و کسر موجودی'}</button><p className="muted">{revisionBase ? 'نسخهٔ قبلی فاکتور و شمارهٔ آن حفظ می‌شود.' : 'شمارهٔ فاکتور هنگام ثبت قطعی تخصیص می‌یابد.'}</p></> : <p className="muted">این مرورگر فقط پیش‌نمایش است. ثبت قطعی در برنامهٔ نصب‌شده انجام می‌شود.</p>}
+               <div className="form-pair"><label>هزینه ارسال (ریال)<input inputMode="numeric" value={shipping} onChange={event => onGroupedRialChange(event, setShipping)} placeholder="۰"/></label></div>
+               {!revisionBase ? <fieldset className="payment-choice"><legend>وضعیت پرداخت پیش از ثبت فاکتور</legend>{([['settled','تسویه کامل شد'],['partial','پیش‌پرداخت داده شد'],['unpaid','تسویه نشده'],['proforma','پیش‌فاکتور؛ خرید هنوز قطعی نیست']] as const).map(([value,label]) => <label key={value}><input type="radio" name="invoice-payment-status" checked={paymentStatus === value} onChange={() => { setPaymentStatus(value); setPaid(''); }}/>{label}</label>)}</fieldset> : <p className="muted">وضعیت پرداخت فاکتور ثبت‌شده در بخش «حساب‌ها و پرداخت‌ها» تغییر می‌کند.</p>}
+               {paymentStatus === 'partial' && !revisionBase && <label>مبلغ پیش‌پرداخت (ریال)<input inputMode="numeric" value={paid} onChange={event => onGroupedRialChange(event, setPaid)} placeholder="مبلغ دریافتی را وارد کنید"/></label>}
+               <strong className="invoice-grand-total">مبلغ نهایی: {formatRial(draftGrand)} ریال · مانده: {formatRial(Math.max(0, draftGrand - (paymentStatus === 'settled' && !revisionBase ? draftGrand : rialOrZero(paid))))}</strong>
+               {nativeDevice ? <><button className="primary" onClick={issue} disabled={!draftLines.length || issuing || (!revisionBase && !paymentStatus)}>{issuing ? 'در حال ثبت…' : revisionBase ? 'ثبت نسخهٔ اصلاح‌شده' : 'ثبت نهایی فاکتور'}</button><p className="muted">{revisionBase ? 'نسخهٔ قبلی فاکتور و شمارهٔ آن حفظ می‌شود.' : 'شمارهٔ فاکتور هنگام ثبت قطعی تخصیص می‌یابد.'}</p></> : <p className="muted">این مرورگر فقط پیش‌نمایش است. ثبت قطعی در برنامهٔ نصب‌شده انجام می‌شود.</p>}
              </>}
              {nativeDevice && <details className="history-panel"><summary>تاریخچهٔ فاکتورها ({formatRial(invoices.length)})</summary><label>جست‌وجوی شماره، خریدار، کالا یا تاریخ<input value={invoiceSearch} onChange={event => setInvoiceSearch(event.target.value)} placeholder="شماره یا نام یا تاریخ"/></label><div className="saved-invoices">{visibleInvoices.map(entry => <button key={entry.receipt.id} onClick={() => { setReceipt(entry.receipt); setInvoiceNo(String(entry.receipt.number)); }}>{`شمارهٔ ${entry.receipt.number} · ${entry.status === 'void' ? 'باطل‌شده' : 'صادرشده'} · ${entry.receipt.customerName || 'خریدار حضوری'} · ${formatRial(entry.receipt.totalRial)} ریال`}</button>)}{!visibleInvoices.length && <p className="empty">فاکتوری پیدا نشد.</p>}</div></details>}
            </section>
@@ -639,20 +692,7 @@ function App() {
       </>}
        {page==='settings' && <><div className="section-heading"><div><span className="eyebrow">شخصی‌سازی</span><h1>تنظیمات</h1></div></div><section className="card preference-card"><h2>نحوهٔ کار برنامه</h2>{([['compactCards','نمایش فشردهٔ کالاها'],['showStock','نمایش موجودی روی کارت کالا'],['showCardNumber','نمایش شماره کارت در فاکتور'],['confirmIssue','تأیید دوباره پیش از ثبت فاکتور']] as const).map(([key,label]) => <label className="toggle-row" key={key}><span>{label}</span><input type="checkbox" checked={preferences[key]} onChange={event => setPreference(key, event.target.checked)}/></label>)}</section><section className="card"><h2>اطلاعات فروشگاه و متن فاکتور</h2><p className="muted">هر تغییر در پیش‌نمایش دیده می‌شود. {nativeDevice ? 'برای حفظ آن، نسخهٔ جدید قالب را ذخیره کنید.' : 'قالب نسخه‌دار در برنامهٔ نصب‌شده ذخیره می‌شود.'}</p><div className="settings-grid">{([['storeName','نام فروشگاه'],['slogan','شعار'],['phone','تلفن‌ها'],['address','نشانی'],['card','شماره کارت'],['cardHolder','نام صاحب کارت'],['note','یادآوری پرداخت']] as const).map(([key,label]) => <label key={key}>{label}<input value={data[key]} onChange={e => changeField(key,e.target.value)}/></label>)}</div><details><summary>ویرایش شش بند شرایط فروش</summary>{data.conditions.map((c,i) => <label className="condition-field" key={i}>بند {i+1}<textarea value={c} rows={3} onChange={e => save({ ...data, conditions: data.conditions.map((x,j) => j === i ? e.target.value : x) })}/></label>)}</details>{nativeDevice && <button className="primary" onClick={persistTemplate}>ذخیرهٔ نسخهٔ جدید قالب {templateVersion ? `(فعلی: ${templateVersion})` : ''}</button>}</section></>}
        {page==='settings' && <section className="card"><h2>شناسه‌های پایین فاکتور</h2><div className="settings-grid"><label>تلگرام نخست<input value={data.socialTelegram} onChange={event => changeField('socialTelegram', event.target.value)}/></label><label>اینستاگرام<input value={data.socialInstagram} onChange={event => changeField('socialInstagram', event.target.value)}/></label><label>شناسهٔ تماس<input value={data.socialContact} onChange={event => changeField('socialContact', event.target.value)}/></label></div><p className="muted">پس از تغییر، دکمهٔ «ذخیرهٔ نسخهٔ جدید قالب» را بزنید.</p><label className="toggle-row"><span>صدای کوتاه خوشامد هنگام ورود</span><input type="checkbox" checked={preferences.welcomeSound} onChange={event => setPreference('welcomeSound', event.target.checked)}/></label></section>}
-       {page==='settings' && <section className="card backup-card">
-         <h2>پشتیبان‌گیری و بازیابی رمزدار</h2>
-         <p className="muted">ZIP شامل داده‌ها، سوابق، بایگانی، تنظیمات، عکس‌های کالا و PDF فاکتورها است. فایل را با «ذخیره فایل» در محل دلخواه نگه دارید یا با «اشتراک‌گذاری» به گوشی دیگر بفرستید. بدون گذرواژه بازیابی ممکن نیست.</p>
-         <label>گذرواژهٔ پشتیبان تازه<input type="password" autoComplete="new-password" value={backupPassword} onChange={event => setBackupPassword(event.target.value)} placeholder="دست‌کم ۱۲ نویسه"/></label>
-         <button className="primary" onClick={makeBackup} disabled={!repository || backupBusy || backupPassword.length < 12}>{backupBusy ? 'در حال آماده‌سازی…' : 'ساخت فایل ZIP رمزدار'}</button>
-         {backupProgress && <p role="status">{backupProgress}</p>}
-         {backupArtifact && <div className="backup-ready" role="status"><strong>فایل آماده: <bdi dir="ltr">{backupArtifact.filename}</bdi></strong><small>{formatRial(backupArtifact.bytes)} بایت · تا قبل از پاک‌شدن حافظهٔ موقت، آن را ذخیره یا ارسال کنید.</small><div className="backup-actions"><button onClick={savePreparedBackup} disabled={backupBusy}>ذخیره فایل در محل دلخواه</button><button onClick={sharePreparedBackup} disabled={backupBusy}>اشتراک‌گذاری ZIP</button></div></div>}
-         <hr/>
-         <h3>بازیابی از فایل گوشی دیگر</h3>
-         <label>انتخاب فایل ZIP پشتیبان<input type="file" accept=".zip,application/zip" onChange={event => setRestoreFile(event.target.files?.[0] ?? null)}/></label>
-         <label>گذرواژهٔ همان فایل<input type="password" autoComplete="off" value={restorePassword} onChange={event => setRestorePassword(event.target.value)}/></label>
-         <button onClick={restoreBackup} disabled={!repository || !restoreFile || !restorePassword || backupBusy}>بررسی و بازیابی فایل انتخاب‌شده</button>
-       </section>}
-       {page==='support' && <div className="support card"><img src={majoraLogo} alt="لوگوی MAJORA"/><span className="eyebrow">توسعه و پشتیبانی</span><h1>ماژورا</h1><p>شرکت نرم‌افزاری و توسعهٔ کسب‌وکار ماژورا</p><strong>نرم‌افزار به سبک کار شما</strong><strong className="support-tagline">با ماژورا کسب‌وکارت هوشمنده، کافیه مشکلتو بگی!!!</strong><p>برای راهنمایی برنامه یا درخواست توسعهٔ اختصاصی:</p><div className="support-links"><a href="tel:09105796971"><span>تماس: </span><bdi dir="ltr">0910-579-6971</bdi></a><a href="tel:09019990440"><span>تماس: </span><bdi dir="ltr">0901-999-0440</bdi></a><a href="https://www.instagram.com/majora_app/" target="_blank" rel="noreferrer">اینستاگرام: ‎@majora_app</a></div></div>}
+       {page==='support' && <div className="majora-showcase"><div className="majora-glow"/><img src={majoraLogo} alt="لوگوی MAJORA"/><span>POWERED BY MAJORA</span><h1>ماژورا</h1><strong>با ماژورا کسب‌وکارت هوشمنده، کافیه مشکلتو بگی!!!</strong><div className="majora-contacts"><a href="tel:09105796971">تماس <bdi dir="ltr">0910-579-6971</bdi></a><a href="tel:09019990440">تماس <bdi dir="ltr">0901-999-0440</bdi></a><a href="https://www.instagram.com/majora_app/" target="_blank" rel="noreferrer">اینستاگرام <bdi dir="ltr">@majora_app</bdi></a></div></div>}
        {inspectedProduct && <div className="sheet-backdrop" onClick={() => setInspectedProductId(null)}><section className="product-detail-sheet" onClick={event => event.stopPropagation()} aria-label={`جزئیات ${inspectedProduct.name}`}><div className="sheet-header"><h2>جزئیات کالا</h2><button aria-label="بستن جزئیات" onClick={() => setInspectedProductId(null)}>×</button></div><div className="detail-photo"><ProductImage product={inspectedProduct}/></div><h2>{inspectedProduct.name}</h2><p>{[inspectedProduct.model, inspectedProduct.color, inspectedProduct.category.replaceAll('/', ' › ')].filter(Boolean).join(' · ')}</p><p><strong>{formatRial(inspectedProduct.priceRial)} ریال</strong> · موجودی {formatRial(inspectedProduct.stock)}</p>{page === 'sale' ? <button className="primary" onClick={() => { addProductToCart(inspectedProduct); setInspectedProductId(null); }}>+ افزودن به فاکتور</button> : <button className="primary" onClick={() => { startProductEdit(inspectedProduct); setInspectedProductId(null); }}>ویرایش کالا</button>}</section></div>}
      </main><footer className="mobile-nav">{nav.slice(0, 4).map(n => <button key={n.key} className={page===n.key?'active':''} onClick={() => changePage(n.key)}><span aria-hidden="true">{n.icon}</span>{n.label}</button>)}<button onClick={() => setMenuOpen(true)}><span aria-hidden="true">☰</span>بیشتر</button></footer></div>
   </div>;

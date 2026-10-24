@@ -12,6 +12,7 @@ const config = JSON.parse(await readFile(join(client, 'brand-config', 'store.jso
 if (config.slug !== 'classic-bag-belt' || config.appId !== 'ir.majora.classicbag') throw new Error('Unexpected client configuration');
 await mkdir(join(output, 'fonts'), { recursive: true });
 await copyFile(join(client, 'original-assets', 'ClassicBag-mark.png'), join(output, 'store-logo.png'));
+await copyFile(join(client, 'design-system', 'store-logo-gold.png'), join(output, 'store-logo-gold.png'));
 await mkdir(dirname(androidMark), { recursive: true });
 await copyFile(join(client, 'original-assets', 'ClassicBag-mark.png'), androidMark);
 await copyFile(join(company, 'IMG_1137.PNG'), join(output, 'majora-logo.png'));
