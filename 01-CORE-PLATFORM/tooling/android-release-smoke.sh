@@ -37,7 +37,9 @@ for attempt in $(seq 1 40); do
   sleep 2
 done
 adb shell pidof "$PACKAGE"
-sleep 5
+# The cold emulator can keep the app on its database setup screen for several
+# seconds after its process starts. Capture the settled UI, not the splash.
+sleep 25
 adb shell pidof "$PACKAGE"
 adb exec-out screencap -p > "$RUNNER_TEMP/majora-release-home.png"
 test -s "$RUNNER_TEMP/majora-release-home.png"
