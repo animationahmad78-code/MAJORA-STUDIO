@@ -18,6 +18,7 @@
 .finance-row-top{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.finance-row strong{overflow-wrap:anywhere}.finance-row small{color:#49667f;line-height:1.6}.finance-row .overdue{color:#a53422;font-weight:800}
 .payment-badge{display:inline-flex;align-items:center;min-height:25px;border-radius:20px;padding:2px 9px;font-size:.72rem;font-weight:900;white-space:nowrap}
 .payment-badge.status-settled{background:#d9f3e6;color:#126144}.payment-badge.status-partial{background:#fff0bd;color:#7d5100}.payment-badge.status-unpaid{background:#ffe0db;color:#9a3025}.payment-badge.status-proforma{background:#edf0f4;color:#445466;border:1px solid #b2becb}
+.payment-badge.status-cheque{background:#ffe6c6;color:#824200;border:1px solid #eb9a40}
 .finance-actions,.finance-inline{display:flex;gap:7px;align-items:end;flex-wrap:wrap}.finance-inline label{flex:1 1 120px}.finance-inline .toggle-row{flex:0 1 auto}
 .finance-form{display:grid;gap:9px;border-top:1px solid #d9e5ec;padding-top:13px}.finance-form h3{margin:0;color:#0b3567}.finance-form>strong{color:#0b3567}
 .finance-picker,.finance-product-options{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:7px;max-height:230px;overflow:auto}.finance-picker button,.finance-product-options button{justify-content:space-between;gap:5px;text-align:start}.finance-picker button.selected,.finance-product-options button.selected{background:#d9e9f7;border-color:#2373b5}

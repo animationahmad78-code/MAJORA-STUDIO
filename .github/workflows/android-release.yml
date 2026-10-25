@@ -1,4 +1,4 @@
-name: Android signed release candidate
+name: Android signed release
 
 on:
   workflow_dispatch:
@@ -65,11 +65,11 @@ jobs:
           PACKAGE_INFO=$("$AAPT" dump badging "$APK" | grep '^package:')
           echo "$PACKAGE_INFO"
           echo "$PACKAGE_INFO" | grep -F "name='ir.majora.classicbag'"
-          echo "$PACKAGE_INFO" | grep -F "versionCode='4'"
+          echo "$PACKAGE_INFO" | grep -F "versionCode='5'"
           sha256sum "$APK"
       - uses: actions/upload-artifact@v4
         with:
-          name: majora-classicbag-signed-release-candidate
+          name: majora-classicbag-v1.0.3-signed-release
           path: 01-CORE-PLATFORM/apps/mobile/android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 30

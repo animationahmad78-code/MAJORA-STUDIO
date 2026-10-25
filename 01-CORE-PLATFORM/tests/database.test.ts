@@ -9,11 +9,13 @@ function memoryShop() {
   const detailMigration = readFileSync(new URL('../packages/database/migrations/002_product_detail.sql', import.meta.url), 'utf8');
   const archiveMigration = readFileSync(new URL('../packages/database/migrations/003_archive.sql', import.meta.url), 'utf8');
   const financeMigration = readFileSync(new URL('../packages/database/migrations/004_finance.sql', import.meta.url), 'utf8');
+  const chequeMigration = readFileSync(new URL('../packages/database/migrations/005_cheque_invoice.sql', import.meta.url), 'utf8');
   sqlite.exec(migration);
   sqlite.exec(migration); // Starting the app again must not destroy or reject an existing database.
   sqlite.exec(detailMigration);
   sqlite.exec(archiveMigration);
   sqlite.exec(financeMigration);
+  sqlite.exec(chequeMigration);
   sqlite.exec('PRAGMA foreign_keys=ON');
   const port: SqlPort = {
     async execute(sql) { sqlite.exec(sql); },
@@ -310,6 +312,41 @@ describe('SQLite operational records', () => {
     expect(overview.cheques[0].status).toBe('cleared');
     const journals = sqlite.prepare('SELECT journal_id,SUM(debit_rial) AS debit,SUM(credit_rial) AS credit FROM finance_journal_line GROUP BY journal_id').all() as { debit: number; credit: number }[];
     expect(journals.every(item => item.debit === item.credit)).toBe(true);
+    sqlite.close();
+  });
+  it('upgrades populated v4 cheque records to v5 without losing prior finance data', () => {
+    const sqlite = new DatabaseSync(':memory:');
+    for (const file of ['001_init.sql', '002_product_detail.sql', '003_archive.sql', '004_finance.sql']) {
+      sqlite.exec(readFileSync(new URL(`../packages/database/migrations/${file}`, import.meta.url), 'utf8'));
+    }
+    sqlite.prepare('INSERT INTO cheque_entry(id,direction,party,serial,bank,amount_rial,due_jalali,status,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+      .run('prior-cheque', 'received', 'مشتری قبلی', '۱۲۳', 'بانک', 1200000, '۱۴۰۵/۰۸/۱۲', 'open', '', '2026-10-01', '2026-10-01');
+    sqlite.exec(readFileSync(new URL('../packages/database/migrations/005_cheque_invoice.sql', import.meta.url), 'utf8'));
+    expect(sqlite.prepare('SELECT party,amount_rial,status,registration_status,invoice_id FROM cheque_entry WHERE id=?').get('prior-cheque'))
+      .toMatchObject({ party: 'مشتری قبلی', amount_rial: 1200000, status: 'open', registration_status: 'unknown', invoice_id: null });
+    expect(sqlite.prepare('SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1').get()).toEqual({ version: 5 });
+    sqlite.close();
+  });
+  it('links a cheque to its invoice and records money only when the cheque clears', async () => {
+    const { sqlite, repo } = memoryShop();
+    await repo.initialize('test');
+    const cheque = { serial: '12345', bank: 'بانک نمونه', amountRial: 8000, dueJalali: '۱۴۰۵/۰۸/۳۰',
+      sayadId: '1234567890123456', issuerNationalId: '0012345678', registrationStatus: 'registered' as const,
+      photoPath: 'cheque-images/example.jpg', showDetails: true, showImage: false };
+    const issued = await repo.issueInvoice('cheque-sale', 'احمد', [{ name: 'کیف', quantity: 1, unitPriceRial: 8000 }], '', '', '', '', true,
+      { paymentStatus: 'cheque', cheque });
+    expect(issued).toMatchObject({ paymentStatus: 'cheque', paidRial: 0, balanceRial: 8000 });
+    const open = (await repo.listInvoiceHistory())[0].receipt;
+    expect(open.cheque).toMatchObject({ serial: '12345', status: 'open', showDetails: true });
+    await expect(repo.recordInvoicePayment(open.id, 8000, 'کارت')).rejects.toThrow('چک باز');
+    const entry = (await repo.listFinanceOverview()).cheques[0];
+    expect(entry.invoiceId).toBe(open.id);
+    await repo.setChequeStatus(entry.id, 'cleared');
+    await expect(repo.setChequeStatus(entry.id, 'cleared')).rejects.toThrow();
+    expect((await repo.listInvoiceHistory())[0].receipt).toMatchObject({ paymentStatus: 'settled', paidRial: 8000, balanceRial: 0, cheque: { status: 'cleared' } });
+    expect(sqlite.prepare('SELECT COUNT(*) AS count FROM invoice_payment_event WHERE invoice_id=?').get(open.id)).toMatchObject({ count: 1 });
+    const journals = sqlite.prepare('SELECT journal_id,SUM(debit_rial) AS debit,SUM(credit_rial) AS credit FROM finance_journal_line GROUP BY journal_id').all() as { debit: number; credit: number }[];
+    expect(journals.every(row => row.debit === row.credit)).toBe(true);
     sqlite.close();
   });
   it('upgrades a v3 invoice to v4 finance without losing its original payment', () => {

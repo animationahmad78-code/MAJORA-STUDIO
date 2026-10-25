@@ -1,5 +1,6 @@
 .dashboard { display:grid;gap:12px; }
 .dashboard-hero { background:linear-gradient(120deg,#062b57,#104a78);color:#fff;border-radius:17px;padding:22px;display:flex;justify-content:space-between;align-items:center;gap:15px; }
+.dashboard-store-mark{width:92px;height:92px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 7px 12px #03142e70)}
 .dashboard-hero span { color:#ebc176;font-size:.8rem;font-weight:800; }
 .dashboard-hero h1 { margin:3px 0;font-size:1.55rem; }
 .dashboard-hero p { margin:0;color:#dce9f1;font-size:.82rem; }
@@ -46,3 +47,4 @@
 .low-stock-list span { padding:5px 8px;border-radius:99px;background:#fff1e5;color:#8d4d15;font-size:.73rem;font-weight:700; }
 .dashboard-empty { color:#66808d;font-size:.8rem; }
 @media(max-width:700px) { .dashboard-hero { padding:14px; } .dashboard-hero h1 { font-size:1.15rem; } .dashboard-hero p { font-size:.7rem; } .dashboard-hero button { padding:5px 8px;font-size:.75rem; } .dashboard-kpis { grid-template-columns:repeat(2,minmax(0,1fr)); } .dashboard-kpis article { padding:9px; } .dashboard-kpis strong { font-size:1.1rem; } .dashboard-grid { grid-template-columns:1fr; } .dashboard-insight { display:grid;gap:4px; } .dashboard-list-row { grid-template-columns:24px 1fr; } .dashboard-list-row small { grid-column:2; } .sales-chart { gap:3px;height:150px; } .sales-column strong { font-size:.54rem; } }
+@media(max-width:700px){.dashboard-store-mark{width:62px;height:62px}.dashboard-hero{gap:7px}.dashboard-hero button{white-space:normal;max-width:82px;line-height:1.35}}

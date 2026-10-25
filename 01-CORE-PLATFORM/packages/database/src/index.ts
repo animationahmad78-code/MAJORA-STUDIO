@@ -11,14 +11,15 @@ type ProductRow = { id: string; name: string; category: string | null; model: st
 type EventRow = { id: string; batch_id: string; product_id: string; old_price_rial: number; new_price_rial: number; created_at: string; reason: string };
 type BatchRow = { id: string; percent_basis_points: number; created_at: string; scope: string; source_batch_id: string | null; product_ids: string | null; undone_at: string | null };
 export type InvoiceInputLine = { productId?: string; name?: string; unitPriceRial?: number; quantity: number; discountBasisPoints?: number };
-export type PaymentStatus = 'settled' | 'partial' | 'unpaid' | 'proforma';
-export type InvoiceDetails = { customerAddress?: string; paymentMethod?: string; dueDateJalali?: string; shippingRial?: number; paidRial?: number; showCardNumber?: boolean; paymentStatus?: PaymentStatus };
-export type InvoiceReceipt = { id: string; number: number; at: string; dateJalali?: string; customerName: string; customerPhone?: string; customerAddress?: string; paymentMethod?: string; dueDateJalali?: string; showCardNumber?: boolean; paymentStatus?: PaymentStatus; returnedRial?: number; refundedRial?: number; lines: { productId?: string; name: string; model?: string; color?: string; quantity: number; unitPriceRial: number; discountBasisPoints?: number; discountRial?: number; totalRial: number }[]; subtotalRial?: number; discountRial?: number; shippingRial?: number; paidRial?: number; balanceRial?: number; totalRial: number; revision?: number; templateVersionId?: string; templateFields?: Record<string, string> };
+export type PaymentStatus = 'settled' | 'partial' | 'unpaid' | 'proforma' | 'cheque';
+export type ChequeDetails = { serial: string; bank: string; amountRial: number; dueJalali: string; sayadId: string; issuerNationalId: string; beneficiaryNationalId?: string; registrationStatus: 'unknown' | 'unregistered' | 'registered' | 'confirmed'; photoPath?: string; showDetails: boolean; showImage: boolean; status?: ChequeEntry['status'] };
+export type InvoiceDetails = { customerAddress?: string; paymentMethod?: string; dueDateJalali?: string; shippingRial?: number; paidRial?: number; showCardNumber?: boolean; paymentStatus?: PaymentStatus; cheque?: ChequeDetails };
+export type InvoiceReceipt = { id: string; number: number; at: string; dateJalali?: string; customerName: string; customerPhone?: string; customerAddress?: string; paymentMethod?: string; dueDateJalali?: string; showCardNumber?: boolean; paymentStatus?: PaymentStatus; cheque?: ChequeDetails; returnedRial?: number; refundedRial?: number; lines: { productId?: string; name: string; model?: string; color?: string; quantity: number; unitPriceRial: number; discountBasisPoints?: number; discountRial?: number; totalRial: number }[]; subtotalRial?: number; discountRial?: number; shippingRial?: number; paidRial?: number; balanceRial?: number; totalRial: number; revision?: number; templateVersionId?: string; templateFields?: Record<string, string> };
 export type InvoiceHistoryEntry = { receipt: InvoiceReceipt; status: 'issued' | 'void' };
 export type FinanceOverview = { invoices: InvoiceReceipt[]; purchases: PurchaseEntry[]; expenses: ExpenseEntry[]; cheques: ChequeEntry[] };
 export type PurchaseEntry = { id: string; supplier: string; totalRial: number; paidRial: number; dueJalali: string; note: string; createdAt: string };
 export type ExpenseEntry = { id: string; category: string; description: string; amountRial: number; settled: boolean; dueJalali: string; createdAt: string };
-export type ChequeEntry = { id: string; direction: 'received' | 'issued'; party: string; serial: string; bank: string; amountRial: number; dueJalali: string; status: 'open' | 'cleared' | 'returned' | 'cancelled'; note: string; createdAt: string };
+export type ChequeEntry = { id: string; direction: 'received' | 'issued'; party: string; serial: string; bank: string; amountRial: number; dueJalali: string; status: 'open' | 'cleared' | 'returned' | 'cancelled'; note: string; createdAt: string; invoiceId?: string; sayadId?: string; issuerNationalId?: string; beneficiaryNationalId?: string; registrationStatus?: ChequeDetails['registrationStatus']; photoPath?: string; showDetails?: boolean; showImage?: boolean };
 export type ReturnLineInput = { index: number; quantity: number; restock: boolean };
 export type CustomerSummary = { id: string; name: string; firstName: string; lastName: string; phone: string; invoiceCount: number; lastPurchaseAt: string | null; createdAt?: string };
 
@@ -272,7 +273,15 @@ export class ShopRepository {
     if (details.dueDateJalali && !isValidJalaliDate(details.dueDateJalali)) throw new Error('تاریخ سررسید نامعتبر است.');
     assertRial(details.shippingRial ?? 0); assertRial(details.paidRial ?? 0);
     const requestedStatus = details.paymentStatus;
-    if (requestedStatus && !(['settled', 'partial', 'unpaid', 'proforma'] as string[]).includes(requestedStatus)) throw new Error('وضعیت پرداخت نامعتبر است.');
+    if (requestedStatus && !(['settled', 'partial', 'unpaid', 'proforma', 'cheque'] as string[]).includes(requestedStatus)) throw new Error('وضعیت پرداخت نامعتبر است.');
+    if (requestedStatus === 'cheque') {
+      const cheque = details.cheque;
+      if (!cheque || !cheque.serial.trim() || !cheque.bank.trim() || !isValidJalaliDate(cheque.dueJalali)) throw new Error('شماره، بانک و سررسید معتبر چک لازم است.');
+      if (!/^\d{16}$/.test(cheque.sayadId) || !/^\d{10}$/.test(cheque.issuerNationalId)) throw new Error('شناسه صیادی ۱۶ رقمی و کد ملی صادرکننده ۱۰ رقمی لازم است.');
+      if (cheque.beneficiaryNationalId && !/^\d{10}$/.test(cheque.beneficiaryNationalId)) throw new Error('کد ملی ذی‌نفع باید ۱۰ رقمی باشد.');
+      assertRial(cheque.amountRial);
+      if (cheque.amountRial <= 0) throw new Error('مبلغ چک باید مثبت باشد.');
+    }
     return this.db.transaction(async () => {
       const previous = await this.db.query<{ snapshot_json: string; status: string }>(`SELECT r.snapshot_json,i.status FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id
         WHERE i.id=? AND i.store_id=? AND r.revision_no=1`, [requestId, this.storeId]);
@@ -312,13 +321,15 @@ export class ShopRepository {
       const paymentStatus: PaymentStatus = requestedStatus ?? (paidRial >= Number(total) ? 'settled' : paidRial > 0 ? 'partial' : 'unpaid');
       if ((paymentStatus === 'settled' && paidRial !== Number(total)) ||
           (paymentStatus === 'partial' && (paidRial <= 0 || paidRial >= Number(total))) ||
-          ((paymentStatus === 'unpaid' || paymentStatus === 'proforma') && paidRial !== 0)) throw new Error('وضعیت پرداخت با مبلغ دریافتی سازگار نیست.');
+          ((paymentStatus === 'unpaid' || paymentStatus === 'proforma' || paymentStatus === 'cheque') && paidRial !== 0)) throw new Error('وضعیت پرداخت با مبلغ دریافتی سازگار نیست.');
+      if (paymentStatus === 'cheque' && details.cheque!.amountRial > Number(total)) throw new Error('مبلغ چک از مبلغ فاکتور بیشتر است.');
       if (requestedStatus && (paymentStatus === 'partial' || paymentStatus === 'unpaid') && !details.dueDateJalali) throw new Error('برای ماندهٔ فاکتور تاریخ سررسید تعیین کنید.');
       const template = await this.loadTemplate();
       const receipt: InvoiceReceipt = { id: requestId, number, at: now, dateJalali: dateJalali || new Intl.DateTimeFormat('fa-IR-u-ca-persian', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now)), customerName: customerName.trim(), customerPhone: customerPhone.trim(),
         customerAddress: details.customerAddress?.trim() ?? '', paymentMethod: details.paymentMethod?.trim() ?? '', dueDateJalali: details.dueDateJalali ?? '',
         showCardNumber: details.showCardNumber ?? showCardNumber, lines, subtotalRial: Number(subtotal), discountRial: Number(discount), shippingRial: details.shippingRial ?? 0,
-        paidRial, balanceRial: Number(total) - paidRial, paymentStatus, totalRial: Number(total), revision: 1, templateVersionId: template?.id, templateFields: template?.fields };
+        paidRial, balanceRial: Number(total) - paidRial, paymentStatus, cheque: paymentStatus === 'cheque' ? { ...details.cheque!, status: 'open' } : undefined,
+        totalRial: Number(total), revision: 1, templateVersionId: template?.id, templateFields: template?.fields };
       let customerId: string | null = null;
       if (receipt.customerName) {
         const existing = receipt.customerPhone ? await this.db.query<{ id: string }>('SELECT id FROM customer WHERE store_id=? AND phone=? AND archived_at IS NULL ORDER BY created_at LIMIT 1', [this.storeId, receipt.customerPhone]) : [];
@@ -331,7 +342,14 @@ export class ShopRepository {
         VALUES(?,?,?,?,?,?,?,?)`, [requestId, this.storeId, customerId, number, 'issued', 1, now, now]);
       await this.db.run(`INSERT INTO invoice_revision(id,invoice_id,revision_no,template_version_id,snapshot_json,subtotal_rial,discount_rial,shipping_rial,grand_total_rial,paid_rial,balance_rial,reason,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, [revisionId, requestId, 1, template?.id ?? null, JSON.stringify(receipt), receipt.subtotalRial!, receipt.discountRial!, receipt.shippingRial!, receipt.totalRial, receipt.paidRial!, receipt.balanceRial!, 'issue', now]);
-      await this.db.run('INSERT INTO invoice_finance(invoice_id,status,paid_rial,due_jalali,updated_at) VALUES(?,?,?,?,?)', [requestId, paymentStatus, paidRial, details.dueDateJalali || null, now]);
+      await this.db.run('INSERT INTO invoice_finance(invoice_id,status,paid_rial,due_jalali,updated_at) VALUES(?,?,?,?,?)', [requestId, paymentStatus === 'cheque' ? 'unpaid' : paymentStatus, paidRial, details.dueDateJalali || details.cheque?.dueJalali || null, now]);
+      if (paymentStatus === 'cheque' && details.cheque) {
+        const cheque = details.cheque;
+        const chequeId = crypto.randomUUID();
+        await this.db.run(`INSERT INTO cheque_entry(id,direction,party,serial,bank,amount_rial,due_jalali,status,note,created_at,updated_at,invoice_id,sayad_id,issuer_national_id,beneficiary_national_id,registration_status,photo_path,show_details,show_image)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [chequeId, 'received', receipt.customerName || 'خریدار حضوری', cheque.serial.trim(), cheque.bank.trim(), cheque.amountRial, cheque.dueJalali, 'open', null, now, now, requestId, cheque.sayadId, cheque.issuerNationalId, cheque.beneficiaryNationalId || null, cheque.registrationStatus, cheque.photoPath || null, Number(cheque.showDetails), Number(cheque.showImage)]);
+        await this.audit('cheque', chequeId, 'create', { invoiceId: requestId, amountRial: cheque.amountRial }, now);
+      }
       if (receipt.paidRial) await this.db.run('INSERT INTO payment(id,invoice_revision_id,amount_rial,method,paid_at) VALUES(?,?,?,?,?)', [crypto.randomUUID(), revisionId, receipt.paidRial, receipt.paymentMethod || 'other', now]);
       if (paidRial) await this.db.run('INSERT INTO invoice_payment_event(id,invoice_id,amount_rial,direction,method,created_at) VALUES(?,?,?,?,?,?)', [crypto.randomUUID(), requestId, paidRial, 'receive', receipt.paymentMethod || 'other', now]);
       for (const line of lines) {
@@ -442,12 +460,21 @@ export class ShopRepository {
     const rows = await this.db.query<{ invoice_id: string; status: PaymentStatus; paid_rial: number; returned_rial: number; refunded_rial: number }>(
       `SELECT invoice_id,status,paid_rial,returned_rial,refunded_rial FROM invoice_finance WHERE invoice_id IN (${ids.map(() => '?').join(',')})`, ids);
     const byId = new Map(rows.map(row => [row.invoice_id, row]));
+    const chequeRows = await this.db.query<{ invoice_id: string; status: ChequeEntry['status']; serial: string; bank: string; amount_rial: number; due_jalali: string; sayad_id: string; issuer_national_id: string; beneficiary_national_id: string | null; registration_status: ChequeDetails['registrationStatus']; photo_path: string | null; show_details: number; show_image: number }>(
+      `SELECT invoice_id,status,serial,bank,amount_rial,due_jalali,sayad_id,issuer_national_id,beneficiary_national_id,registration_status,photo_path,show_details,show_image FROM cheque_entry WHERE invoice_id IN (${ids.map(() => '?').join(',')})`, ids);
+    const chequesByInvoice = new Map(chequeRows.map(row => [row.invoice_id, row]));
     return receipts.map(receipt => {
       const finance = byId.get(receipt.id);
       if (!finance) return receipt;
       const paid = finance.paid_rial - finance.refunded_rial;
       const netTotal = receipt.totalRial - finance.returned_rial;
-      return { ...receipt, paymentStatus: finance.status, paidRial: paid, returnedRial: finance.returned_rial,
+      const cheque = chequesByInvoice.get(receipt.id);
+      return { ...receipt, paymentStatus: cheque?.status === 'open' ? 'cheque' : finance.status,
+        cheque: cheque ? { serial: cheque.serial, bank: cheque.bank, amountRial: cheque.amount_rial, dueJalali: cheque.due_jalali,
+          sayadId: cheque.sayad_id, issuerNationalId: cheque.issuer_national_id, beneficiaryNationalId: cheque.beneficiary_national_id ?? '',
+          registrationStatus: cheque.registration_status, photoPath: cheque.photo_path ?? '', showDetails: !!cheque.show_details,
+          showImage: !!cheque.show_image, status: cheque.status } : receipt.cheque,
+        paidRial: paid, returnedRial: finance.returned_rial,
         refundedRial: finance.refunded_rial, balanceRial: Math.max(0, netTotal - paid) };
     });
   }
@@ -497,11 +524,13 @@ export class ShopRepository {
       const paid = finance.paid_rial - finance.refunded_rial;
       if (details.paidRial !== undefined && details.paidRial !== paid) throw new Error('مبلغ دریافتی را در بخش وضعیت پرداخت ثبت یا اصلاح کنید.');
       if (BigInt(paid) > grand) throw new Error('مبلغ پرداختی از مبلغ نهایی بیشتر است.');
+      const pendingCheque = await this.db.query<{ amount_rial: number }>('SELECT amount_rial FROM cheque_entry WHERE invoice_id=? AND status=?', [invoiceId, 'open']);
+      if (pendingCheque.length && BigInt(pendingCheque[0].amount_rial) > grand - BigInt(paid)) throw new Error('مبلغ چک باز از ماندهٔ فاکتور اصلاح‌شده بیشتر می‌شود؛ ابتدا وضعیت چک را تعیین کنید.');
       const receipt: InvoiceReceipt = { ...previous, customerName: customerName.trim(), customerPhone: customerPhone.trim(), dateJalali: dateJalali || previous.dateJalali,
         customerAddress: details.customerAddress?.trim() ?? previous.customerAddress, paymentMethod: details.paymentMethod?.trim() ?? previous.paymentMethod,
         dueDateJalali: details.dueDateJalali ?? previous.dueDateJalali, showCardNumber: details.showCardNumber ?? previous.showCardNumber,
         lines, subtotalRial: Number(subtotal), discountRial: Number(discount), shippingRial: details.shippingRial ?? previous.shippingRial ?? 0,
-        paidRial: paid, balanceRial: Number(grand) - paid, paymentStatus: finance.status === 'proforma' ? 'proforma' : paid >= Number(grand) ? 'settled' : paid > 0 ? 'partial' : 'unpaid', totalRial: Number(grand), revision: current.current_revision + 1 };
+        paidRial: paid, balanceRial: Number(grand) - paid, paymentStatus: pendingCheque.length ? 'cheque' : finance.status === 'proforma' ? 'proforma' : paid >= Number(grand) ? 'settled' : paid > 0 ? 'partial' : 'unpaid', totalRial: Number(grand), revision: current.current_revision + 1 };
       const revisionId = crypto.randomUUID();
       await this.db.run(`INSERT INTO invoice_revision(id,invoice_id,revision_no,template_version_id,snapshot_json,subtotal_rial,discount_rial,shipping_rial,grand_total_rial,paid_rial,balance_rial,reason,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, [revisionId, invoiceId, receipt.revision!, receipt.templateVersionId ?? null, JSON.stringify(receipt), receipt.subtotalRial!, receipt.discountRial!, receipt.shippingRial!, receipt.totalRial, receipt.paidRial!, receipt.balanceRial!, reason.trim(), now]);
@@ -531,7 +560,7 @@ export class ShopRepository {
       const changed = await this.db.run('UPDATE invoice SET current_revision=?,customer_id=? WHERE id=? AND store_id=? AND current_revision=? AND status=\'issued\'',
         [receipt.revision!, customerId, invoiceId, this.storeId, current.current_revision]);
       if (changed.changes !== 1) throw new Error('فاکتور هم‌زمان تغییر کرده است.');
-      await this.db.run('UPDATE invoice_finance SET status=?,due_jalali=?,updated_at=? WHERE invoice_id=?', [receipt.paymentStatus!, receipt.dueDateJalali || null, now, invoiceId]);
+      await this.db.run('UPDATE invoice_finance SET status=?,due_jalali=?,updated_at=? WHERE invoice_id=?', [receipt.paymentStatus === 'cheque' ? 'unpaid' : receipt.paymentStatus!, receipt.dueDateJalali || null, now, invoiceId]);
       const difference = receipt.totalRial - previous.totalRial;
       const saleDifference = (receipt.totalRial - (receipt.shippingRial ?? 0)) - (previous.totalRial - (previous.shippingRial ?? 0));
       const shippingDifference = (receipt.shippingRial ?? 0) - (previous.shippingRial ?? 0);
@@ -557,6 +586,8 @@ export class ShopRepository {
         'SELECT status,paid_rial,returned_rial,refunded_rial FROM invoice_finance WHERE invoice_id=?', [invoiceId]);
       const finance = financeRows[0];
       if (!finance) throw new Error('پروندهٔ مالی فاکتور پیدا نشد.');
+      const openCheque = await this.db.query<{ id: string }>('SELECT id FROM cheque_entry WHERE invoice_id=? AND status=?', [invoiceId, 'open']);
+      if (openCheque.length) throw new Error('ابتدا وضعیت چک باز این فاکتور را تعیین کنید.');
       if (finance.paid_rial !== finance.refunded_rial || finance.returned_rial > 0) throw new Error('فاکتور دارای دریافت یا مرجوعی است؛ ابتدا تسویه و ثبت اصلاح مالی انجام شود.');
       const revision = await this.db.query<{ grand_total_rial: number; shipping_rial: number }>('SELECT grand_total_rial,shipping_rial FROM invoice_revision WHERE id=?', [revisionId]);
       const lines = await this.db.query<{ product_id: string | null; quantity_milli: number }>(
@@ -594,6 +625,8 @@ export class ShopRepository {
       if (!rows.length) throw new Error('فاکتور فعال پیدا نشد.');
       const row = rows[0];
       if (row.status === 'proforma') throw new Error('پیش‌فاکتور ابتدا باید به فروش قطعی تبدیل شود.');
+      const openCheque = await this.db.query<{ id: string }>('SELECT id FROM cheque_entry WHERE invoice_id=? AND status=?', [invoiceId, 'open']);
+      if (openCheque.length) throw new Error('تا تعیین وضعیت چک باز، دریافت دیگری برای این فاکتور ثبت نکنید.');
       const receipt = JSON.parse(row.snapshot_json) as InvoiceReceipt;
       const remaining = receipt.totalRial - row.returned_rial - row.paid_rial + row.refunded_rial;
       if (amountRial > remaining) throw new Error('دریافت از ماندهٔ واقعی فاکتور بیشتر است.');
@@ -839,10 +872,15 @@ export class ShopRepository {
     assertRial(input.amountRial);
     if (!['received', 'issued'].includes(input.direction) || !input.party.trim() || !input.serial.trim() || input.amountRial <= 0 || !isValidJalaliDate(input.dueJalali))
       throw new Error('مشخصات و سررسید چک نامعتبر است.');
+    if (input.sayadId && !/^\d{16}$/.test(input.sayadId)) throw new Error('شناسهٔ صیادی باید ۱۶ رقم باشد.');
+    if (input.issuerNationalId && !/^\d{10}$/.test(input.issuerNationalId)) throw new Error('کد ملی صادرکننده باید ۱۰ رقم باشد.');
     return this.db.transaction(async () => {
       const id = crypto.randomUUID(); const at = new Date().toISOString();
-      await this.db.run('INSERT INTO cheque_entry(id,direction,party,serial,bank,amount_rial,due_jalali,status,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-        [id, input.direction, input.party.trim(), input.serial.trim(), input.bank.trim() || null, input.amountRial, input.dueJalali, 'open', input.note.trim() || null, at, at]);
+      await this.db.run(`INSERT INTO cheque_entry(id,direction,party,serial,bank,amount_rial,due_jalali,status,note,created_at,updated_at,invoice_id,sayad_id,issuer_national_id,beneficiary_national_id,registration_status,photo_path,show_details,show_image)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [id, input.direction, input.party.trim(), input.serial.trim(), input.bank.trim() || null, input.amountRial, input.dueJalali, 'open', input.note.trim() || null, at, at,
+          input.invoiceId || null, input.sayadId || null, input.issuerNationalId || null, input.beneficiaryNationalId || null, input.registrationStatus || 'unknown', input.photoPath || null,
+          Number(!!input.showDetails), Number(!!input.showImage)]);
       await this.audit('cheque', id, 'create', { direction: input.direction, amountRial: input.amountRial }, at);
       return id;
     });
@@ -852,9 +890,67 @@ export class ShopRepository {
     if (!['cleared', 'returned', 'cancelled'].includes(status)) throw new Error('وضعیت چک نامعتبر است.');
     await this.db.transaction(async () => {
       const at = new Date().toISOString();
+      const rows = await this.db.query<{ invoice_id: string | null; amount_rial: number; direction: string }>('SELECT invoice_id,amount_rial,direction FROM cheque_entry WHERE id=? AND status=?', [id, 'open']);
+      if (!rows.length) throw new Error('چک باز پیدا نشد یا قبلاً تعیین‌تکلیف شده است.');
+      const cheque = rows[0];
+      if (status === 'cleared' && cheque.invoice_id) {
+        const finance = await this.db.query<{ paid_rial: number; refunded_rial: number; returned_rial: number; total_rial: number; number: number }>(
+          `SELECT f.paid_rial,f.refunded_rial,f.returned_rial,r.grand_total_rial AS total_rial,i.invoice_number AS number
+           FROM invoice_finance f JOIN invoice i ON i.id=f.invoice_id JOIN invoice_revision r ON r.invoice_id=i.id AND r.revision_no=i.current_revision
+           WHERE f.invoice_id=? AND i.status='issued'`, [cheque.invoice_id]);
+        if (!finance.length) throw new Error('فاکتور فعال این چک پیدا نشد.');
+        const current = finance[0];
+        const remaining = current.total_rial - current.returned_rial - current.paid_rial + current.refunded_rial;
+        if (cheque.amount_rial > remaining) throw new Error('مبلغ چک از ماندهٔ فعلی فاکتور بیشتر است؛ ابتدا پرونده را بررسی کنید.');
+        const nextPaid = current.paid_rial + cheque.amount_rial;
+        const nextStatus = nextPaid - current.refunded_rial === current.total_rial - current.returned_rial ? 'settled' : 'partial';
+        await this.db.run('UPDATE invoice_finance SET paid_rial=?,status=?,updated_at=? WHERE invoice_id=?', [nextPaid, nextStatus, at, cheque.invoice_id]);
+        await this.db.run('INSERT INTO invoice_payment_event(id,invoice_id,amount_rial,direction,method,note,created_at) VALUES(?,?,?,?,?,?,?)',
+          [id, cheque.invoice_id, cheque.amount_rial, 'receive', 'cheque', `وصول چک ${id}`, at]);
+        await this.journal('cheque_clear', id, `وصول چک فاکتور ${current.number}`, at, [
+          { account: 'cash_bank', debit: cheque.amount_rial }, { account: 'receivable', credit: cheque.amount_rial }
+        ]);
+      }
       const changed = await this.db.run('UPDATE cheque_entry SET status=?,updated_at=? WHERE id=? AND status=?', [status, at, id, 'open']);
       if (changed.changes !== 1) throw new Error('چک باز پیدا نشد یا قبلاً تعیین‌تکلیف شده است.');
-      await this.audit('cheque', id, status, {}, at);
+      await this.audit('cheque', id, status, { invoiceId: cheque.invoice_id, amountRial: cheque.amount_rial }, at);
+    });
+  }
+
+  async updateCheque(id: string, changes: Partial<ChequeEntry>): Promise<string | undefined> {
+    return this.db.transaction(async () => {
+      const rows = await this.db.query<{ invoice_id: string | null; party: string; serial: string; bank: string | null; amount_rial: number; due_jalali: string; status: string; note: string | null; sayad_id: string | null; issuer_national_id: string | null; beneficiary_national_id: string | null; registration_status: ChequeDetails['registrationStatus']; photo_path: string | null; show_details: number; show_image: number }>('SELECT * FROM cheque_entry WHERE id=?', [id]);
+      if (!rows.length) throw new Error('پروندهٔ چک پیدا نشد.');
+      const old = rows[0];
+      if (old.status !== 'open') throw new Error('مشخصات چک تعیین‌تکلیف‌شده قابل تغییر نیست؛ وضعیت آن را جداگانه بررسی کنید.');
+      const next = {
+        party: changes.party?.trim() ?? old.party, serial: changes.serial?.trim() ?? old.serial, bank: changes.bank?.trim() ?? old.bank ?? '',
+        amountRial: changes.amountRial ?? old.amount_rial, dueJalali: changes.dueJalali ?? old.due_jalali, note: changes.note?.trim() ?? old.note ?? '',
+        sayadId: changes.sayadId?.trim() ?? old.sayad_id ?? '', issuerNationalId: changes.issuerNationalId?.trim() ?? old.issuer_national_id ?? '',
+        beneficiaryNationalId: changes.beneficiaryNationalId?.trim() ?? old.beneficiary_national_id ?? '',
+        registrationStatus: changes.registrationStatus ?? old.registration_status, photoPath: changes.photoPath ?? old.photo_path ?? '',
+        showDetails: changes.showDetails ?? !!old.show_details, showImage: changes.showImage ?? !!old.show_image
+      };
+      assertRial(next.amountRial);
+      if (!next.party || !next.serial || !next.bank || next.amountRial <= 0 || !isValidJalaliDate(next.dueJalali)) throw new Error('نام طرف حساب، شماره، بانک، مبلغ و سررسید معتبر لازم است.');
+      if (next.sayadId && !/^\d{16}$/.test(next.sayadId)) throw new Error('شناسهٔ صیادی باید ۱۶ رقم باشد.');
+      if (next.issuerNationalId && !/^\d{10}$/.test(next.issuerNationalId)) throw new Error('کد ملی صادرکننده باید ۱۰ رقم باشد.');
+      if (next.beneficiaryNationalId && !/^\d{10}$/.test(next.beneficiaryNationalId)) throw new Error('کد ملی ذی‌نفع باید ۱۰ رقم باشد.');
+      if (old.invoice_id) {
+        const totals = await this.db.query<{ total: number; paid: number; returned: number; refunded: number }>(
+          `SELECT r.grand_total_rial AS total,f.paid_rial AS paid,f.returned_rial AS returned,f.refunded_rial AS refunded
+           FROM invoice i JOIN invoice_revision r ON r.invoice_id=i.id AND r.revision_no=i.current_revision
+           JOIN invoice_finance f ON f.invoice_id=i.id WHERE i.id=?`, [old.invoice_id]);
+        if (!totals.length || next.amountRial > totals[0].total - totals[0].returned - totals[0].paid + totals[0].refunded)
+          throw new Error('مبلغ چک از ماندهٔ فاکتور بیشتر است.');
+      }
+      const at = new Date().toISOString();
+      await this.db.run(`UPDATE cheque_entry SET party=?,serial=?,bank=?,amount_rial=?,due_jalali=?,note=?,sayad_id=?,issuer_national_id=?,beneficiary_national_id=?,registration_status=?,photo_path=?,show_details=?,show_image=?,updated_at=? WHERE id=?`,
+        [next.party, next.serial, next.bank, next.amountRial, next.dueJalali, next.note || null, next.sayadId || null,
+          next.issuerNationalId || null, next.beneficiaryNationalId || null, next.registrationStatus, next.photoPath || null,
+          Number(next.showDetails), Number(next.showImage), at, id]);
+      await this.audit('cheque', id, 'update', { amountRial: next.amountRial, dueJalali: next.dueJalali, registrationStatus: next.registrationStatus }, at);
+      return old.photo_path && old.photo_path !== next.photoPath ? old.photo_path : undefined;
     });
   }
 
@@ -863,13 +959,16 @@ export class ShopRepository {
       this.listInvoiceHistory(), this.listArchivedInvoices(),
       this.db.query<{ id: string; supplier: string; total_rial: number; paid_rial: number; due_jalali: string | null; note: string | null; created_at: string }>('SELECT * FROM purchase_entry ORDER BY created_at DESC'),
       this.db.query<{ id: string; category: string; description: string; amount_rial: number; settled: number; due_jalali: string | null; created_at: string }>('SELECT * FROM expense_entry ORDER BY created_at DESC'),
-      this.db.query<{ id: string; direction: 'received' | 'issued'; party: string; serial: string; bank: string | null; amount_rial: number; due_jalali: string; status: ChequeEntry['status']; note: string | null; created_at: string }>('SELECT * FROM cheque_entry ORDER BY due_jalali ASC')
+      this.db.query<{ id: string; direction: 'received' | 'issued'; party: string; serial: string; bank: string | null; amount_rial: number; due_jalali: string; status: ChequeEntry['status']; note: string | null; created_at: string; invoice_id: string | null; sayad_id: string | null; issuer_national_id: string | null; beneficiary_national_id: string | null; registration_status: ChequeDetails['registrationStatus']; photo_path: string | null; show_details: number; show_image: number }>('SELECT * FROM cheque_entry ORDER BY due_jalali ASC')
     ]);
     return {
       invoices: [...active, ...archived].filter(entry => entry.status === 'issued').map(entry => entry.receipt),
       purchases: purchases.map(item => ({ id: item.id, supplier: item.supplier, totalRial: item.total_rial, paidRial: item.paid_rial, dueJalali: item.due_jalali ?? '', note: item.note ?? '', createdAt: item.created_at })),
       expenses: expenses.map(item => ({ id: item.id, category: item.category, description: item.description, amountRial: item.amount_rial, settled: !!item.settled, dueJalali: item.due_jalali ?? '', createdAt: item.created_at })),
-      cheques: cheques.map(item => ({ id: item.id, direction: item.direction, party: item.party, serial: item.serial, bank: item.bank ?? '', amountRial: item.amount_rial, dueJalali: item.due_jalali, status: item.status, note: item.note ?? '', createdAt: item.created_at }))
+      cheques: cheques.map(item => ({ id: item.id, direction: item.direction, party: item.party, serial: item.serial, bank: item.bank ?? '', amountRial: item.amount_rial, dueJalali: item.due_jalali, status: item.status, note: item.note ?? '', createdAt: item.created_at,
+        invoiceId: item.invoice_id ?? undefined, sayadId: item.sayad_id ?? undefined, issuerNationalId: item.issuer_national_id ?? undefined,
+        beneficiaryNationalId: item.beneficiary_national_id ?? undefined, registrationStatus: item.registration_status,
+        photoPath: item.photo_path ?? undefined, showDetails: !!item.show_details, showImage: !!item.show_image }))
     };
   }
 
@@ -882,6 +981,9 @@ export class ShopRepository {
         if (kind === 'invoice') {
           const found = await this.db.query<{ id: string }>('SELECT id FROM invoice WHERE id=? AND store_id=? AND archived_at IS NOT NULL', [id, this.storeId]);
           if (!found.length) throw new Error('یکی از فاکتورهای انتخاب‌شده در بایگانی نیست.');
+          const chequePhotos = await this.db.query<{ photo_path: string | null }>('SELECT photo_path FROM cheque_entry WHERE invoice_id=?', [id]);
+          photos.push(...chequePhotos.map(row => row.photo_path).filter((path): path is string => !!path));
+          await this.db.run('DELETE FROM cheque_entry WHERE invoice_id=?', [id]);
           await this.db.run('DELETE FROM sales_return_line WHERE return_id IN (SELECT id FROM sales_return WHERE invoice_id=?)', [id]);
           await this.db.run('DELETE FROM sales_return WHERE invoice_id=?', [id]);
           await this.db.run('DELETE FROM invoice_payment_event WHERE invoice_id=?', [id]);

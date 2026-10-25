@@ -5,6 +5,7 @@ import schema from '../../../packages/database/migrations/001_init.sql?raw';
 import productDetailMigration from '../../../packages/database/migrations/002_product_detail.sql?raw';
 import archiveMigration from '../../../packages/database/migrations/003_archive.sql?raw';
 import financeMigration from '../../../packages/database/migrations/004_finance.sql?raw';
+import chequeInvoiceMigration from '../../../packages/database/migrations/005_cheque_invoice.sql?raw';
 
 export const nativeDevice = Capacitor.isNativePlatform();
 let pending: Promise<ShopRepository> | undefined;
@@ -44,6 +45,8 @@ export function openNativeShop(): Promise<ShopRepository> {
     if (!archiveApplied.length) await port.transaction(async () => { await port.execute(archiveMigration); });
     const financeApplied = await port.query<{ version: number }>('SELECT version FROM schema_migrations WHERE version=4');
     if (!financeApplied.length) await port.transaction(async () => { await port.execute(financeMigration); });
+    const chequeApplied = await port.query<{ version: number }>('SELECT version FROM schema_migrations WHERE version=5');
+    if (!chequeApplied.length) await port.transaction(async () => { await port.execute(chequeInvoiceMigration); });
     const repo = new ShopRepository(port);
     await repo.initialize('کیف و کمربند کلاسیک');
     return repo;

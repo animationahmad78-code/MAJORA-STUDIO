@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { applyPriceIncrease, changedPrice, formatRial, parseRial, undoPriceBatch, type PriceBatch, type PriceEvent, type Product } from '@majora/domain';
-import { invoiceLineAmounts, normalizeSearch, type CustomerSummary, type FinanceOverview, type InvoiceHistoryEntry, type InvoiceInputLine, type InvoiceReceipt, type PaymentStatus, type ShopRepository } from '@majora/database';
+import { invoiceLineAmounts, normalizeSearch, type ChequeDetails, type CustomerSummary, type FinanceOverview, type InvoiceHistoryEntry, type InvoiceInputLine, type InvoiceReceipt, type PaymentStatus, type ShopRepository } from '@majora/database';
 import { Browser } from '@capacitor/browser';
 import { Camera } from '@capacitor/camera';
 import { Directory, Encoding, Filesystem } from '@capacitor/filesystem';
@@ -9,11 +9,15 @@ import { Share } from '@capacitor/share';
 import { registerPlugin } from '@capacitor/core';
 import { nativeDevice, openNativeShop } from './native-db';
 import { prepareProductPhoto, productPhotoUrl, removeProductPhoto, storeProductPhoto } from './product-photo';
+import { prepareChequePhoto, readChequePhoto, removeChequePhoto, storeChequePhoto } from './cheque-photo';
 import { InvoiceDocument, type PaperSize } from './invoice-document';
 import type { InvoiceExportFormat } from './invoice-export';
 import { buildDashboard, type SalesPeriod } from './dashboard';
 import { DashboardView } from './dashboard-view';
 import { FinanceView, ReturnsView, PaymentBadge } from './finance-ui';
+import { JalaliDateField, parseJalali } from './jalali-date';
+import { MajoraAbout } from './majora-about';
+import { HelpCenter } from './help-center';
 import './style.css';
 import './final-ui.css';
 const majoraLogo = '/brand/majora-logo.png';
@@ -21,7 +25,7 @@ const storeLogo = '/brand/store-logo.png';
 const invoiceLogo = '/brand/store-logo-gold.png';
 const navigation = registerPlugin<{ exit(): Promise<void> }>('MajoraNavigation');
 
-type Page = 'home' | 'sale' | 'products' | 'customers' | 'prices' | 'invoices' | 'invoice' | 'archive' | 'search' | 'settings' | 'support' | 'finance' | 'returns';
+type Page = 'home' | 'sale' | 'products' | 'customers' | 'prices' | 'invoices' | 'invoice' | 'archive' | 'search' | 'settings' | 'support' | 'finance' | 'returns' | 'help';
 type Data = { products: Product[]; batches: PriceBatch[]; events: PriceEvent[]; storeName: string; slogan: string; phone: string; address: string; card: string; cardHolder: string; note: string; conditions: string[]; socialTelegram: string; socialInstagram: string; socialContact: string };
 const defaults: Data = {
   products: [], batches: [], events: [], storeName: 'کیف و کمربند کلاسیک', slogan: 'استایل کامل از کیف و کمربند',
@@ -120,6 +124,12 @@ function App() {
   const [customerAddress, setCustomerAddress] = useState(''); const [paymentMethod, setPaymentMethod] = useState(''); const [dueDate, setDueDate] = useState('');
   const [shipping, setShipping] = useState(''); const [paid, setPaid] = useState(''); const [invoiceShowCard, setInvoiceShowCard] = useState(preferences.showCardNumber);
   const [paymentStatus, setPaymentStatus] = useState<PaymentStatus | ''>('');
+  const [chequeSerial, setChequeSerial] = useState(''); const [chequeBank, setChequeBank] = useState('');
+  const [chequeAmount, setChequeAmount] = useState(''); const [chequeDue, setChequeDue] = useState('');
+  const [chequeSayad, setChequeSayad] = useState(''); const [chequeIssuerId, setChequeIssuerId] = useState(''); const [chequeBeneficiaryId, setChequeBeneficiaryId] = useState('');
+  const [chequeRegistration, setChequeRegistration] = useState<ChequeDetails['registrationStatus']>('unknown');
+  const [chequePhoto, setChequePhoto] = useState(''); const [chequeShowDetails, setChequeShowDetails] = useState(false); const [chequeShowImage, setChequeShowImage] = useState(false);
+  const [receiptChequePhoto, setReceiptChequePhoto] = useState('');
   const customer = [customerFirst.trim(), customerLast.trim()].filter(Boolean).join(' ');
   const [customerStepDone, setCustomerStepDone] = useState(false);
   const [cartOpen, setCartOpen] = useState(false);
@@ -135,6 +145,8 @@ function App() {
   const [financeOverview, setFinanceOverview] = useState<FinanceOverview>({ invoices: [], purchases: [], expenses: [], cheques: [] });
   const [returnTargetId, setReturnTargetId] = useState('');
   const [imageExportOpen, setImageExportOpen] = useState(false);
+  const [textExportOpen, setTextExportOpen] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
   const [archiveSelection, setArchiveSelection] = useState<Record<'invoice' | 'product' | 'customer', string[]>>({ invoice: [], product: [], customer: [] });
   const [archivedInvoices, setArchivedInvoices] = useState<InvoiceHistoryEntry[]>([]);
   const [archivedProducts, setArchivedProducts] = useState<Product[]>([]);
@@ -159,6 +171,13 @@ function App() {
   const welcomePlayed = useRef(false);
   const pageHistory = useRef<Page[]>(['home']);
   const exitTapAt = useRef(0);
+  useEffect(() => {
+    let active = true;
+    setReceiptChequePhoto('');
+    const path = receipt?.cheque?.photoPath ?? revisionBase?.cheque?.photoPath;
+    if (path) void readChequePhoto(path).then(image => { if (active) setReceiptChequePhoto(image ?? ''); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [receipt?.cheque?.photoPath, revisionBase?.cheque?.photoPath]);
   useEffect(() => { if (!nativeDevice || booted.current) return; booted.current = true; openNativeShop().then(async repo => {
     setRepository(repo);
     const [products, history, savedInvoices, savedCustomers, savedArchivedProducts, savedArchivedInvoices, savedArchivedCustomers, overview] = await Promise.all([
@@ -227,7 +246,7 @@ function App() {
   const dashboard = useMemo(() => buildDashboard([...invoices, ...archivedInvoices], active, [...customers, ...archivedCustomers], salesPeriod),
     [invoices, archivedInvoices, data.products, customers, archivedCustomers, salesPeriod]);
   const todayKey = jalaliDateKey(jalaliToday());
-  const dueCount = financeOverview.invoices.filter(item => item.paymentStatus !== 'proforma' && (item.balanceRial ?? 0) > 0 && item.dueDateJalali && jalaliDateKey(item.dueDateJalali) <= todayKey).length
+  const dueCount = financeOverview.invoices.filter(item => item.paymentStatus !== 'proforma' && item.paymentStatus !== 'cheque' && (item.balanceRial ?? 0) > 0 && item.dueDateJalali && jalaliDateKey(item.dueDateJalali) <= todayKey).length
     + financeOverview.purchases.filter(item => item.totalRial > item.paidRial && item.dueJalali && jalaliDateKey(item.dueJalali) <= todayKey).length
     + financeOverview.expenses.filter(item => !item.settled && item.dueJalali && jalaliDateKey(item.dueJalali) <= todayKey).length
     + financeOverview.cheques.filter(item => item.status === 'open' && jalaliDateKey(item.dueJalali) <= todayKey).length;
@@ -235,6 +254,7 @@ function App() {
   const customerPaymentStatus = (item: CustomerSummary): PaymentStatus => {
     const related = financeOverview.invoices.filter(invoice => item.phone ? invoice.customerPhone === item.phone : invoice.customerName === item.name);
     if (related.some(invoice => invoice.paymentStatus === 'unpaid' && (invoice.balanceRial ?? 0) > 0)) return 'unpaid';
+    if (related.some(invoice => invoice.paymentStatus === 'cheque' && (invoice.balanceRial ?? 0) > 0)) return 'cheque';
     if (related.some(invoice => invoice.paymentStatus === 'partial' && (invoice.balanceRial ?? 0) > 0)) return 'partial';
     if (related.some(invoice => invoice.paymentStatus === 'proforma')) return 'proforma';
     return 'settled';
@@ -263,20 +283,26 @@ function App() {
   const displayReceipt: InvoiceReceipt = receipt ?? { id: revisionBase?.id ?? 'preview', number: revisionBase?.number ?? 0, at: revisionBase?.at ?? new Date().toISOString(), dateJalali: invoiceDate || revisionBase?.dateJalali || jalaliToday(),
     customerName: customer, customerPhone, customerAddress, paymentMethod, dueDateJalali: dueDate,
     showCardNumber: invoiceShowCard, lines: draftDisplayLines, subtotalRial: draftSubtotal, discountRial: draftDiscount,
-    shippingRial: rialOrZero(shipping), paidRial: paymentStatus === 'settled' && !revisionBase ? draftGrand : rialOrZero(paid), balanceRial: Math.max(0, draftGrand - (paymentStatus === 'settled' && !revisionBase ? draftGrand : rialOrZero(paid))), paymentStatus: paymentStatus || undefined, totalRial: draftGrand };
+    shippingRial: rialOrZero(shipping), paidRial: paymentStatus === 'settled' && !revisionBase ? draftGrand : rialOrZero(paid), balanceRial: Math.max(0, draftGrand - (paymentStatus === 'settled' && !revisionBase ? draftGrand : rialOrZero(paid))), paymentStatus: paymentStatus || undefined,
+    cheque: revisionBase?.cheque ?? (paymentStatus === 'cheque' ? { serial: chequeSerial, bank: chequeBank, amountRial: rialOrZero(chequeAmount), dueJalali: chequeDue, sayadId: chequeSayad,
+      issuerNationalId: chequeIssuerId, beneficiaryNationalId: chequeBeneficiaryId, registrationStatus: chequeRegistration, photoPath: chequePhoto,
+      showDetails: chequeShowDetails, showImage: chequeShowImage, status: 'open' } : undefined),
+    totalRial: draftGrand };
   const displayData = receipt?.templateFields ? applyTemplate(data, receipt.templateFields) : data;
+  const chequeImageReady = !displayReceipt.cheque?.showImage || !(displayReceipt.cheque.photoPath) || !!(receipt || revisionBase ? receiptChequePhoto : chequePhoto);
   const selectedInvoiceStatus = invoices.find(entry => entry.receipt.id === receipt?.id)?.status;
   const latestInvoiceRevision = invoices.find(entry => entry.receipt.id === receipt?.id)?.receipt.revision ?? 1;
   const invoiceQuery = normalizeSearch(latinDigits(invoiceSearch.trim()));
   const visibleInvoices = (invoiceQuery ? invoices.filter(({ receipt: saved }) =>
     normalizeSearch(latinDigits([saved.number, saved.customerName, saved.at, new Date(saved.at).toLocaleDateString('fa-IR'), ...saved.lines.map(line => line.name)].join(' '))).includes(invoiceQuery)
-  ) : invoices).filter(entry => !invoiceDateFilter || entry.receipt.dateJalali?.includes(invoiceDateFilter))
+  ) : invoices).filter(entry => !parseJalali(invoiceDateFilter) || jalaliDateKey(entry.receipt.dateJalali ?? '') === jalaliDateKey(invoiceDateFilter))
     .sort((a, b) => invoiceSort === 'newest' ? b.receipt.number - a.receipt.number : a.receipt.number - b.receipt.number);
   const resetInvoicePreview = () => { setReceipt(null); setInvoiceNo(revisionBase ? String(revisionBase.number) : 'پیش‌نمایش'); };
   function newInvoice() {
     setReceipt(null); setRevisionBase(null); setInvoiceNo('پیش‌نمایش'); setCustomerFirst(''); setCustomerLast(''); setCustomerPhone(''); setInvoiceDate(''); setDraftLines([]); setCartOpen(false); setCustomerStepDone(false); changePage('sale');
     setQuantity('1'); setManualName(''); setManualPrice(''); setDiscountEnabled(false); setDiscountPercent(''); setInvoiceSelectedLines([]);
     setCustomerAddress(''); setPaymentMethod(''); setDueDate(''); setShipping(''); setPaid(''); setPaymentStatus(''); setInvoiceShowCard(preferences.showCardNumber);
+    setChequeSerial(''); setChequeBank(''); setChequeAmount(''); setChequeDue(''); setChequeSayad(''); setChequeIssuerId(''); setChequeBeneficiaryId(''); setChequeRegistration('unknown'); setChequePhoto(''); setChequeShowDetails(false); setChequeShowImage(false);
     requestId.current = crypto.randomUUID();
   }
   function addProductToCart(product: Product) {
@@ -352,13 +378,18 @@ function App() {
     setCustomerFirst(parts.shift() ?? ''); setCustomerLast(parts.join(' ')); setCustomerPhone(saved.customerPhone ?? ''); setCustomerAddress(saved.customerAddress ?? ''); setCustomerStepDone(true);
   }
   async function saveInvoiceFile(format: InvoiceExportFormat, action: 'share' | 'print' | 'gallery' = 'share') {
+    if (exportBusy) return;
+    setExportBusy(true);
     try {
       if (!invoicePreviewRef.current) throw new Error('پیش‌نمایش فاکتور آماده نیست.');
+      if (!chequeImageReady) throw new Error('تصویر چک هنوز برای خروجی آماده نشده است.');
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       const { exportInvoice } = await import('./invoice-export');
       const pageCount = await exportInvoice(receipt?.number ?? revisionBase?.number ?? 'preview', format, paperSize, invoicePreviewRef.current, action);
       setImageExportOpen(false);
       alert(action === 'print' ? `پنجرهٔ چاپ ${pageCount} صفحه باز شد.` : action === 'gallery' ? `${pageCount} تصویر در گالری ذخیره شد.` : `${pageCount} صفحهٔ فاکتور برای ذخیره یا اشتراک آماده شد.`);
     } catch (error) { alert(`خروجی فاکتور انجام نشد: ${(error as Error).message}`); }
+    finally { setExportBusy(false); }
   }
   async function takeProductPhoto() {
     try {
@@ -369,6 +400,16 @@ function App() {
       const blob = await response.blob();
       setCameraCandidate(await prepareProductPhoto(new File([blob], 'product-camera.jpg', { type: blob.type || 'image/jpeg' })));
     } catch (error) { const message = (error as Error).message; if (!/cancel|لغو/i.test(message)) alert(message); }
+  }
+  async function takeChequePhoto() {
+    try {
+      const photo = await Camera.takePhoto({ quality: 90, saveToGallery: false, correctOrientation: true });
+      if (!photo.webPath) throw new Error('تصویر دوربین دریافت نشد.');
+      const response = await fetch(photo.webPath);
+      if (!response.ok) throw new Error('تصویر چک قابل خواندن نیست.');
+      const blob = await response.blob();
+      setChequePhoto(await prepareChequePhoto(new File([blob], 'cheque.jpg', { type: blob.type || 'image/jpeg' })));
+    } catch (error) { if (!/cancel|لغو/i.test((error as Error).message)) alert((error as Error).message); }
   }
   async function setArchive(kind: 'product' | 'customer' | 'invoice', id: string, archived: boolean) {
     if (!repository) { alert('بایگانی در نسخهٔ نصب‌شده فعال است.'); return; }
@@ -417,6 +458,7 @@ function App() {
       `جمع کالا: ${formatRial(saved.subtotalRial ?? saved.totalRial)} ریال`, `تخفیف: ${formatRial(saved.discountRial ?? 0)} ریال`,
       `ارسال: ${formatRial(saved.shippingRial ?? 0)} ریال`, `مبلغ نهایی: ${formatRial(saved.totalRial)} ریال`,
       `پرداخت‌شده: ${formatRial(saved.paidRial ?? 0)} ریال`, `مانده: ${formatRial(saved.balanceRial ?? saved.totalRial)} ریال`,
+      saved.cheque ? `چک ${saved.cheque.serial} از بانک ${saved.cheque.bank} · مبلغ ${formatRial(saved.cheque.amountRial)} ریال · سررسید ${saved.cheque.dueJalali} · وضعیت: ${saved.cheque.status === 'cleared' ? 'وصول‌شده' : saved.cheque.status === 'returned' ? 'برگشتی' : 'در انتظار وصول'}` : '',
       (saved.showCardNumber ?? true) ? `شماره کارت: ${fields.card} به نام ${fields.cardHolder}` : '', fields.note
     ].filter(Boolean).join('\n');
   }
@@ -448,16 +490,29 @@ function App() {
   }
   async function issue() {
     if (issueLock.current) return;
-    if (!revisionBase && !paymentStatus) { alert('پیش از ثبت، یکی از چهار وضعیت پرداخت را انتخاب کنید.'); return; }
+    if (!revisionBase && !paymentStatus) { alert('پیش از ثبت، یکی از پنج وضعیت پرداخت را انتخاب کنید.'); return; }
     if (preferences.confirmIssue && !window.confirm(`${revisionBase ? 'ویرایش' : 'صدور'} فاکتور با ${draftLines.length} ردیف و مبلغ نهایی ${formatRial(draftGrand)} ریال تأیید شود؟`)) return;
     issueLock.current = true; setIssuing(true);
+    let createdChequePhoto = '';
+    let committed = false;
     try {
       if (!nativeDevice || !repository) throw new Error('صدور قطعی فقط در برنامهٔ نصب‌شده با پایگاه داده فعال است.');
       if (!draftLines.length) throw new Error('دست‌کم یک ردیف به فاکتور اضافه کنید.');
-      const details = { customerAddress, paymentMethod, dueDateJalali: dueDate,
+      if (!revisionBase && paymentStatus === 'cheque') {
+        if (!chequeSerial.trim() || !chequeBank.trim() || !parseJalali(chequeDue) || !chequeAmount.trim()) throw new Error('شماره، بانک، مبلغ و سررسید چک را کامل کنید.');
+        if (!/^\d{16}$/.test(latinDigits(chequeSayad).replace(/\D/g, ''))) throw new Error('شناسهٔ صیادی باید ۱۶ رقم باشد.');
+        if (!/^\d{10}$/.test(latinDigits(chequeIssuerId).replace(/\D/g, ''))) throw new Error('کد ملی صادرکننده باید ۱۰ رقم باشد.');
+        if (chequeShowImage && !chequePhoto) throw new Error('برای چاپ تصویر چک، ابتدا عکس آن را ثبت کنید.');
+        if (chequePhoto) createdChequePhoto = await storeChequePhoto(chequePhoto);
+      }
+      const details = { customerAddress, paymentMethod: paymentStatus === 'cheque' ? 'چک' : paymentMethod, dueDateJalali: paymentStatus === 'cheque' && !revisionBase ? chequeDue : dueDate,
         shippingRial: shipping.trim() ? parseRial(shipping) : 0,
         paidRial: paymentStatus === 'settled' && !revisionBase ? draftGrand : paid.trim() ? parseRial(paid) : 0,
-        showCardNumber: invoiceShowCard, paymentStatus: (revisionBase ? revisionBase.paymentStatus : paymentStatus) as PaymentStatus };
+        showCardNumber: invoiceShowCard, paymentStatus: (revisionBase ? revisionBase.paymentStatus : paymentStatus) as PaymentStatus,
+        cheque: !revisionBase && paymentStatus === 'cheque' ? { serial: chequeSerial, bank: chequeBank, amountRial: parseRial(chequeAmount), dueJalali: chequeDue,
+          sayadId: latinDigits(chequeSayad).replace(/\D/g, ''), issuerNationalId: latinDigits(chequeIssuerId).replace(/\D/g, ''),
+          beneficiaryNationalId: latinDigits(chequeBeneficiaryId).replace(/\D/g, ''), registrationStatus: chequeRegistration,
+          photoPath: createdChequePhoto, showDetails: chequeShowDetails, showImage: chequeShowImage } : undefined };
       if (details.paidRial > draftGrand) throw new Error('مبلغ پرداختی از مبلغ نهایی بیشتر است.');
       if (!revisionBase && paymentStatus === 'partial' && (details.paidRial <= 0 || details.paidRial >= draftGrand)) throw new Error('پیش‌پرداخت باید بیشتر از صفر و کمتر از مبلغ نهایی باشد.');
       if (!revisionBase && (paymentStatus === 'unpaid' || paymentStatus === 'proforma') && details.paidRial !== 0) throw new Error('برای این وضعیت، مبلغ پرداختی باید صفر باشد.');
@@ -465,13 +520,14 @@ function App() {
       const issued = revisionBase
         ? await repository.reviseInvoice(revisionBase.id, draftLines, customer, customerPhone, invoiceDate, revisionReason, details)
         : await repository.issueInvoice(requestId.current, customer, draftLines, customerPhone, invoiceDate, customerFirst, customerLast, invoiceShowCard, details);
+      committed = true;
       setReceipt(issued); setInvoiceNo(String(issued.number));
       setRevisionBase(null); await refreshRecords(repository);
       await refreshNative(repository);
       requestId.current = crypto.randomUUID();
       setDraftLines([]);
       alert(`فاکتور شمارهٔ ${issued.number} ${issued.revision && issued.revision > 1 ? 'ویرایش و نسخه‌برداری' : 'ثبت'} شد.`);
-    } catch (error) { alert((error as Error).message); }
+    } catch (error) { if (!committed && createdChequePhoto) await removeChequePhoto(createdChequePhoto).catch(() => undefined); alert((error as Error).message); }
     finally { issueLock.current = false; setIssuing(false); }
   }
   async function voidSelectedInvoice() {
@@ -571,7 +627,7 @@ function App() {
     { key: 'invoices', label: 'فاکتورها', icon: '▤' }, { key: 'customers', label: 'مشتریان', icon: '♧' }, { key: 'prices', label: 'افزایش قیمت', icon: '٪' },
     { key: 'finance', label: 'حساب‌ها و پرداخت‌ها', icon: '◈' }, { key: 'returns', label: 'مرجوعی‌ها', icon: '↶' },
     { key: 'search', label: 'جست‌وجوی همگانی', icon: '⌕' }, { key: 'archive', label: 'بایگانی', icon: '▣' },
-    { key: 'settings', label: 'تنظیمات', icon: '⚙' }, { key: 'support', label: 'پشتیبانی ماژورا', icon: '◉' }
+    { key: 'settings', label: 'تنظیمات', icon: '⚙' }, { key: 'help', label: 'راهنما و آموزش', icon: '؟' }, { key: 'support', label: 'پشتیبانی ماژورا', icon: '◉' }
   ];
   function changePage(next: Page) {
     if (next !== page) pageHistory.current.push(next);
@@ -580,6 +636,7 @@ function App() {
   useEffect(() => {
     const back = () => {
       if (imageExportOpen) return void setImageExportOpen(false);
+      if (textExportOpen) return void setTextExportOpen(false);
       if (cameraCandidate) return void setCameraCandidate('');
       if (productFormOpen) return void clearProductForm();
       if (inspectedProductId) return void setInspectedProductId(null);
@@ -597,7 +654,7 @@ function App() {
     window.addEventListener('majora-back', back);
     window.addEventListener('keydown', keyboard);
     return () => { window.removeEventListener('majora-back', back); window.removeEventListener('keydown', keyboard); };
-  }, [page, menuOpen, cartOpen, shortcutProductId, inspectedProductId, productFormOpen, cameraCandidate, imageExportOpen]);
+  }, [page, menuOpen, cartOpen, shortcutProductId, inspectedProductId, productFormOpen, cameraCandidate, imageExportOpen, textExportOpen]);
   useEffect(() => {
     if (!shortcutProductId) return;
     const close = (event: PointerEvent) => {
@@ -653,7 +710,7 @@ function App() {
            <div className="checks">{priceFiltered.map(p => <label key={p.id}><input type="checkbox" checked={selected.includes(p.id)} onChange={event => setSelected(current => event.target.checked ? [...new Set([...current, p.id])] : current.filter(id => id !== p.id))}/><span>{p.name} <small>{p.category.replaceAll('/', ' › ')}</small></span><small>{formatRial(p.priceRial)} ریال</small></label>)}{!priceFiltered.length && <p className="empty">کالایی پیدا نشد.</p>}</div></>}
          <p className="muted">{allPrices ? 'همهٔ کالاهای فعال' : `${formatRial(selected.length)} کالای یکتا`} انتخاب شده‌اند.</p><button className="primary" onClick={applyBatch} disabled={!active.length || (!allPrices && !selected.length)}>اعمال به {allPrices ? active.length : selected.length} کالا</button></section><section className="card"><h2>تاریخچهٔ گروهی</h2>{data.batches.length? data.batches.map(b=><article className="batch" key={b.id}><div><strong>{formatPercent(b.percentBasisPoints)}٪ افزایش</strong><small>{new Date(b.at).toLocaleString('fa-IR')} · {b.productIds.length} کالا {b.undoneAt?'· بازگردانی‌شده':''}</small></div><button onClick={()=>undo(b)} disabled={!!b.undoneAt}>{b.undoneAt?'بازگردانی شد':'بازگردانی'}</button></article>):<p className="empty">هنوز تغییری ثبت نشده است.</p>}<p className="muted">در صورت تغییر مستقل قیمت پس از این عملیات، بازگردانی آن کالا را دست‌نخورده نگه می‌دارد.</p></section></div></>}
       {page==='invoices' && <><div className="section-heading"><div><span className="eyebrow">سوابق فروش</span><h1>فاکتورها</h1></div><button className="primary" onClick={newInvoice}>+ فاکتور تازه</button></div>
-        <div className="record-filters"><label>جست‌وجوی فاکتور<input type="search" value={invoiceSearch} onChange={event => setInvoiceSearch(event.target.value)} placeholder="شماره، نام، کالا یا تاریخ"/></label><label>تاریخ شمسی<input value={invoiceDateFilter} onChange={event => setInvoiceDateFilter(event.target.value)} placeholder="۱۴۰۵/۰۷"/></label><label>ترتیب<select value={invoiceSort} onChange={event => setInvoiceSort(event.target.value as 'newest' | 'oldest')}><option value="newest">جدیدترین</option><option value="oldest">قدیمی‌ترین</option></select></label></div>
+        <div className="record-filters"><label>جست‌وجوی فاکتور<input type="search" value={invoiceSearch} onChange={event => setInvoiceSearch(event.target.value)} placeholder="شماره، نام، کالا یا تاریخ"/></label><JalaliDateField label="تاریخ شمسی" value={invoiceDateFilter} onChange={setInvoiceDateFilter} optional/><label>ترتیب<select value={invoiceSort} onChange={event => setInvoiceSort(event.target.value as 'newest' | 'oldest')}><option value="newest">جدیدترین</option><option value="oldest">قدیمی‌ترین</option></select></label></div>
         <div className="record-list">{visibleInvoices.map(entry => <article className={`record-card status-${entry.receipt.paymentStatus ?? 'unpaid'}`} key={entry.receipt.id}><div><strong>فاکتور {formatRial(entry.receipt.number)} · {entry.receipt.customerName || 'خریدار حضوری'}</strong><small>{entry.receipt.dateJalali} · {entry.status === 'void' ? 'باطل‌شده' : 'صادرشده'} · {entry.receipt.lines.length} ردیف</small><PaymentBadge status={entry.receipt.paymentStatus ?? 'unpaid'}/><b>{formatRial(entry.receipt.totalRial)} ریال</b></div><div className="record-actions"><button onClick={() => openInvoice(entry.receipt)}>مشاهده و خروجی</button>{entry.status === 'issued' && <button onClick={() => beginRevision(entry.receipt)}>ویرایش</button>}{entry.status === 'issued' && entry.receipt.paymentStatus !== 'proforma' && <button onClick={() => openReturn(entry.receipt)}>مرجوعی</button>}<button onClick={() => changePage('finance')}>وضعیت پرداخت</button>{entry.receipt.customerPhone && <a href={`tel:${latinDigits(entry.receipt.customerPhone).replace(/[^0-9+]/g, '')}`}>تماس با {entry.receipt.customerName || 'مشتری'}</a>}<button onClick={() => startSaleForInvoice(entry.receipt)}>فاکتور تازه برای مشتری</button><button onClick={() => setArchive('invoice', entry.receipt.id, true)}>بایگانی</button></div></article>)}{!visibleInvoices.length && <p className="empty-catalog">فاکتوری با این فیلتر پیدا نشد.</p>}</div>
       </>}
       {page==='archive' && <><div className="section-heading"><div><span className="eyebrow">سوابق کنارگذاشته‌شده</span><h1>بایگانی</h1></div><button className="danger" disabled={!archivedInvoices.length && !archivedProducts.length && !archivedCustomers.length} onClick={() => void deleteArchived()}>حذف تمام بایگانی</button></div><p className="muted">حذف دائمی فقط برای موارد بایگانی‌شده انجام می‌شود. اسناد مالی مرتبط برای حفظ سازگاری حساب‌ها نگهداری می‌شوند.</p><div className="archive-sections">
@@ -668,19 +725,23 @@ function App() {
       </div>}</>}
       {page==='invoice' && <>
          <div className="section-heading"><div><span className="eyebrow">بازبینی و خروجی</span><h1>{invoiceNo === 'پیش‌نمایش' ? 'پیش‌نمایش فاکتور' : `فاکتور شمارهٔ ${invoiceNo}`}</h1></div></div>
-         <div className="invoice-export-bar"><label><input type="checkbox" checked={mono} onChange={e=>setMono(e.target.checked)}/> سیاه‌وسفید</label><label>کاغذ<select value={paperSize} onChange={e => setPaperSize(e.target.value as PaperSize)}><option value="a4">A4</option><option value="a5">A5</option></select></label><button onClick={() => setFitPreview(value => !value)}>{fitPreview ? 'نمایش درشت' : 'نمایش کامل'}</button><button onClick={() => saveInvoiceFile('pdf')}>PDF {paperSize.toUpperCase()}</button><button onClick={() => setImageExportOpen(true)}>تصویر PNG</button><button onClick={() => saveInvoiceFile('pdf', 'print')}>چاپ {paperSize.toUpperCase()}</button></div>
+         <div className="invoice-export-bar"><label><input type="checkbox" checked={mono} onChange={e=>setMono(e.target.checked)}/> سیاه‌وسفید</label><label>کاغذ<select value={paperSize} onChange={e => setPaperSize(e.target.value as PaperSize)}><option value="a4">A4</option><option value="a5">A5</option></select></label><button onClick={() => setFitPreview(value => !value)}>{fitPreview ? 'نمایش درشت' : 'نمایش کامل'}</button><button disabled={exportBusy} onClick={() => saveInvoiceFile('pdf')}>PDF {paperSize.toUpperCase()}</button><button disabled={exportBusy} onClick={() => setImageExportOpen(true)}>تصویر PNG</button><button disabled={exportBusy} onClick={() => saveInvoiceFile('pdf', 'print')}>چاپ {paperSize.toUpperCase()}</button><button onClick={() => setTextExportOpen(true)}>اشتراک‌گذاری متنی فاکتور</button></div>
+         {textExportOpen && <div className="sheet-backdrop" onClick={() => setTextExportOpen(false)}><section className="image-export-choice card" onClick={event => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="اشتراک‌گذاری متنی فاکتور"><h2>متن فاکتور</h2><p>نام فروشگاه، اقلام، جمع و مانده در متن آماده می‌شود.</p><button className="primary" onClick={() => { void copyInvoiceText(displayReceipt); setTextExportOpen(false); }}>کپی متنی فاکتور در کلیپ‌بورد</button><button onClick={() => { void shareInvoiceText(displayReceipt); setTextExportOpen(false); }}>اشتراک‌گذاری متنی</button><button onClick={() => setTextExportOpen(false)}>انصراف</button></section></div>}
+         {exportBusy && <div className="invoice-busy" role="status" aria-live="polite"><div className="invoice-busy-card"><span className="invoice-busy-spinner" aria-hidden="true"/><strong>در حال ذخیره‌سازی فاکتور</strong><small>لطفاً تا آماده‌شدن خروجی صبر کنید.</small></div></div>}
          {imageExportOpen && <div className="sheet-backdrop" onClick={() => setImageExportOpen(false)}><section className="image-export-choice card" onClick={event => event.stopPropagation()} role="dialog" aria-label="خروجی تصویر فاکتور"><h2>خروجی تصویر فاکتور</h2><p>تصویر با همان رنگ و قالب پیش‌نمایش ساخته می‌شود.</p><button className="primary" onClick={() => void saveInvoiceFile('png', 'gallery')}>ذخیره در گالری</button><button onClick={() => void saveInvoiceFile('png', 'share')}>اشتراک‌گذاری</button><button onClick={() => setImageExportOpen(false)}>انصراف</button></section></div>}
         <div className="invoice-layout">
-          <div className="invoice-preview-scroll" ref={invoicePreviewRef}><div style={{ zoom: fitPreview ? Math.min(1, (previewWidth || window.innerWidth - 24) / (paperSize === 'a4' ? 794 : 560)) : 1 }}><InvoiceDocument brand={displayData} receipt={displayReceipt} mono={mono} paper={paperSize} logo={mono ? storeLogo : invoiceLogo}/></div></div>
+          <div className="invoice-preview-scroll" ref={invoicePreviewRef}><div style={{ zoom: fitPreview ? Math.min(1, (previewWidth || window.innerWidth - 24) / (paperSize === 'a4' ? 794 : 560)) : 1 }}><InvoiceDocument brand={displayData} receipt={displayReceipt} mono={mono} paper={paperSize} logo={mono ? storeLogo : invoiceLogo} chequePhoto={receipt || revisionBase ? receiptChequePhoto : chequePhoto}/></div></div>
            <section className="card controls invoice-editor">
              <h2>{receipt ? (selectedInvoiceStatus === 'void' ? 'سند باطل‌شده' : 'سند ثبت‌شده') : 'تنظیمات این فاکتور'}</h2>
              {receipt ? <><PaymentBadge status={receipt.paymentStatus ?? 'unpaid'}/><button onClick={newInvoice}>+ فاکتور تازه</button><button onClick={() => shareInvoiceText(receipt)}>اشتراک متن فاکتور / پیامک</button><button onClick={() => copyInvoiceText(receipt)}>کپی متن فاکتور</button>{receipt.customerPhone && <a className="call-customer" href={`tel:${latinDigits(receipt.customerPhone).replace(/[^0-9+]/g, '')}`}>تماس با {receipt.customerName || 'مشتری'}</a>}{nativeDevice && selectedInvoiceStatus === 'issued' && <><button onClick={() => openReturn(receipt)}>ثبت مرجوعی</button><button onClick={() => changePage('finance')}>مدیریت پرداخت</button></>}{nativeDevice && selectedInvoiceStatus === 'issued' && (receipt.revision ?? 1) === latestInvoiceRevision && <><button onClick={() => beginRevision(receipt)}>ویرایش همین فاکتور</button><button onClick={voidSelectedInvoice}>ابطال فاکتور و بازگردانی موجودی</button></>}{receiptRevisions.length > 1 && <details className="history-panel"><summary>نسخه‌های این فاکتور ({formatRial(receiptRevisions.length)})</summary>{receiptRevisions.map(item => <button key={item.receipt.revision} onClick={() => setReceipt(item.receipt)}>نسخهٔ {formatRial(item.receipt.revision ?? 1)} · {new Date(item.revisedAt).toLocaleString('fa-IR')} · {item.reason}</button>)}</details>}</> : <>
                <button className="text-button" onClick={() => changePage('sale')}>← بازگشت به انتخاب کالا</button>
                <div className="form-pair"><label>نام خریدار<input value={customerFirst} onChange={e => setCustomerFirst(e.target.value)}/></label><label>نام خانوادگی<input value={customerLast} onChange={e => setCustomerLast(e.target.value)}/></label></div>
                <label>شمارهٔ تماس<input value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} inputMode="tel" dir="ltr"/></label>
-               <label>تاریخ شمسی فاکتور<input value={invoiceDate} onChange={e => setInvoiceDate(e.target.value)} placeholder={jalaliToday()}/><small>خالی بماند تا هنگام ثبت از ساعت گوشی خوانده شود.</small></label>
+               <JalaliDateField label="تاریخ شمسی فاکتور" value={invoiceDate} onChange={setInvoiceDate} optional/>
+               <small className="muted">اگر خالی بماند، تاریخ لحظهٔ ثبت از ساعت گوشی خوانده می‌شود.</small>
                <label>نشانی خریدار<input value={customerAddress} onChange={event => setCustomerAddress(event.target.value)} placeholder="اختیاری"/></label>
-               <div className="form-pair"><label>نحوهٔ پرداخت<input value={paymentMethod} onChange={event => setPaymentMethod(event.target.value)} placeholder="نقد، کارت یا اعتباری"/></label><label>تاریخ سررسید شمسی<input value={dueDate} onChange={event => setDueDate(event.target.value)} placeholder="۱۴۰۵/۰۸/۳۰"/></label></div>
+               <label>نحوهٔ پرداخت<input value={paymentMethod} onChange={event => setPaymentMethod(event.target.value)} placeholder="نقد، کارت یا اعتباری"/></label>
+               <JalaliDateField label="تاریخ سررسید شمسی" value={dueDate} onChange={setDueDate} optional/>
                <label className="toggle-row"><span>نمایش شماره کارت در همین فاکتور</span><input type="checkbox" checked={invoiceShowCard} onChange={event => setInvoiceShowCard(event.target.checked)}/></label>
                <div className="draft-lines" aria-label="ردیف‌های فاکتور">{draftDisplayLines.map((line,index) => <div className="draft-edit-line" key={index}><label className="line-select"><input type="checkbox" checked={invoiceSelectedLines.includes(index)} onChange={event => setInvoiceSelectedLines(event.target.checked ? [...invoiceSelectedLines, index] : invoiceSelectedLines.filter(item => item !== index))}/>{line.name}</label><div className="line-inputs"><label>تعداد<input type="number" min="1" defaultValue={line.quantity} key={`${index}-${line.quantity}`} onBlur={event => updateCartQuantity(index, event.target.value)} inputMode="numeric"/></label><label>فی (ریال)<RialField key={`${index}-${line.unitPriceRial}`} amount={line.unitPriceRial} onCommit={value => updateCartPrice(index, value)}/></label><button aria-label={`حذف ${line.name}`} onClick={() => setDraftLines(current => current.filter((_, i) => i !== index))}>حذف</button></div><small>تخفیف: {formatRial(line.discountRial)} · جمع ردیف: {formatRial(line.totalRial)} ریال</small></div>)}</div>
                <details className="manual-entry"><summary>افزودن ردیف دستی</summary><label>شرح کالا یا خدمت<input value={manualName} onChange={e => setManualName(e.target.value)}/></label><div className="form-pair"><label>قیمت (ریال)<input inputMode="numeric" value={manualPrice} onChange={e => onGroupedRialChange(e, setManualPrice)}/></label><label>تعداد<input type="number" min="1" value={quantity} onChange={e => setQuantity(e.target.value)}/></label></div><button onClick={addInvoiceLine} disabled={!manualName.trim() || !manualPrice.trim()}>افزودن ردیف</button></details>
@@ -688,8 +749,21 @@ function App() {
                <div className="invoice-discount"><label className="toggle-row"><span>تخفیف این فاکتور</span><input type="checkbox" checked={discountEnabled} onChange={event => { setDiscountEnabled(event.target.checked); if (!event.target.checked) setDraftLines(lines => lines.map(line => ({ ...line, discountBasisPoints: 0 }))); }}/></label>{discountEnabled && <><label>درصد تخفیف<input inputMode="decimal" value={discountPercent} onChange={event => setDiscountPercent(event.target.value)} placeholder="مثلاً ۱۰"/></label><button onClick={applyInvoiceDiscount} disabled={!draftLines.length}>اعمال به {invoiceSelectedLines.length || draftLines.length} ردیف</button><small>برای انتخاب چند ردیف، تیک آن‌ها را در فهرست بالا بزنید؛ بدون تیک به همه اعمال می‌شود.</small></>}</div>
                {revisionBase && <label className="revision-reason">دلیل ویرایش نسخهٔ {formatRial(revisionBase.revision ?? 1)}<input value={revisionReason} onChange={event => setRevisionReason(event.target.value)} required/></label>}
                <div className="form-pair"><label>هزینه ارسال (ریال)<input inputMode="numeric" value={shipping} onChange={event => onGroupedRialChange(event, setShipping)} placeholder="۰"/></label></div>
-               {!revisionBase ? <fieldset className="payment-choice"><legend>وضعیت پرداخت پیش از ثبت فاکتور</legend>{([['settled','تسویه کامل شد'],['partial','پیش‌پرداخت داده شد'],['unpaid','تسویه نشده'],['proforma','پیش‌فاکتور؛ خرید هنوز قطعی نیست']] as const).map(([value,label]) => <label key={value}><input type="radio" name="invoice-payment-status" checked={paymentStatus === value} onChange={() => { setPaymentStatus(value); setPaid(''); }}/>{label}</label>)}</fieldset> : <p className="muted">وضعیت پرداخت فاکتور ثبت‌شده در بخش «حساب‌ها و پرداخت‌ها» تغییر می‌کند.</p>}
+               {!revisionBase ? <fieldset className="payment-choice"><legend>وضعیت پرداخت پیش از ثبت فاکتور</legend>{([['settled','تسویه کامل شد'],['partial','پیش‌پرداخت داده شد'],['unpaid','تسویه نشده'],['cheque','پرداخت با چک'],['proforma','پیش‌فاکتور؛ خرید هنوز قطعی نیست']] as const).map(([value,label]) => <label key={value}><input type="radio" name="invoice-payment-status" checked={paymentStatus === value} onChange={() => { setPaymentStatus(value); setPaid(''); }}/>{label}</label>)}</fieldset> : <p className="muted">وضعیت پرداخت فاکتور ثبت‌شده در بخش «حساب‌ها و پرداخت‌ها» تغییر می‌کند.</p>}
                {paymentStatus === 'partial' && !revisionBase && <label>مبلغ پیش‌پرداخت (ریال)<input inputMode="numeric" value={paid} onChange={event => onGroupedRialChange(event, setPaid)} placeholder="مبلغ دریافتی را وارد کنید"/></label>}
+               {paymentStatus === 'cheque' && !revisionBase && <section className="cheque-issue card"><h3>پروندهٔ چک این فاکتور</h3><p>تا زمان وصول، مبلغ چک دریافت نقدی محسوب نمی‌شود و فاکتور پیگیری خواهد شد.</p>
+                 <div className="form-pair"><label>شمارهٔ چک<input value={chequeSerial} onChange={event => setChequeSerial(event.target.value)} required/></label><label>بانک صادرکننده<input value={chequeBank} onChange={event => setChequeBank(event.target.value)} required/></label></div>
+                 <label>مبلغ چک (ریال)<input inputMode="numeric" value={chequeAmount} onChange={event => onGroupedRialChange(event, setChequeAmount)} placeholder="حداکثر تا ماندهٔ فاکتور" required/></label>
+                 <JalaliDateField label="تاریخ سررسید چک" value={chequeDue} onChange={setChequeDue}/>
+                 <div className="form-pair"><label>شناسهٔ صیادی ۱۶ رقمی<input inputMode="numeric" maxLength={16} dir="ltr" value={chequeSayad} onChange={event => setChequeSayad(latinDigits(event.target.value).replace(/\D/g, '').slice(0, 16))} required/></label><label>کد ملی صادرکننده<input inputMode="numeric" maxLength={10} dir="ltr" value={chequeIssuerId} onChange={event => setChequeIssuerId(latinDigits(event.target.value).replace(/\D/g, '').slice(0, 10))} required/></label></div>
+                 <label>کد ملی ذی‌نفع (در صورت نیاز)<input inputMode="numeric" maxLength={10} dir="ltr" value={chequeBeneficiaryId} onChange={event => setChequeBeneficiaryId(latinDigits(event.target.value).replace(/\D/g, '').slice(0, 10))}/></label>
+                 <label>وضعیت ثبت در صیاد<select value={chequeRegistration} onChange={event => setChequeRegistration(event.target.value as ChequeDetails['registrationStatus'])}><option value="unknown">هنوز بررسی نشده</option><option value="unregistered">ثبت نشده</option><option value="registered">صادرکننده ثبت کرده</option><option value="confirmed">گیرنده در صیاد تأیید کرده</option></select></label>
+                 <p className="cheque-legal-note">ثبت این اطلاعات در برنامه جای ثبت و تأیید واقعی در سامانهٔ صیاد را نمی‌گیرد؛ وضعیت را پس از استعلام بانکی تعیین کنید.</p>
+                 <div className="cheque-photo-actions"><button type="button" onClick={() => void takeChequePhoto()}>عکاسی از چک</button><label>انتخاب عکس از گوشی<input type="file" accept="image/*" onChange={event => { const file = event.target.files?.[0]; if (file) void prepareChequePhoto(file).then(setChequePhoto).catch(error => alert(error.message)); }}/></label></div>
+                 {chequePhoto && <img className="cheque-photo-preview" src={chequePhoto} alt="پیش‌نمایش تصویر چک"/>}
+                 <label className="toggle-row"><span>نمایش مشخصات ضروری چک در فاکتور چاپی</span><input type="checkbox" checked={chequeShowDetails} onChange={event => setChequeShowDetails(event.target.checked)}/></label>
+                 <label className="toggle-row"><span>افزودن تصویر چک به صفحهٔ ضمیمهٔ فاکتور</span><input type="checkbox" checked={chequeShowImage} onChange={event => setChequeShowImage(event.target.checked)}/></label>
+               </section>}
                <strong className="invoice-grand-total">مبلغ نهایی: {formatRial(draftGrand)} ریال · مانده: {formatRial(Math.max(0, draftGrand - (paymentStatus === 'settled' && !revisionBase ? draftGrand : rialOrZero(paid))))}</strong>
                {nativeDevice ? <><button className="primary" onClick={issue} disabled={!draftLines.length || issuing || (!revisionBase && !paymentStatus)}>{issuing ? 'در حال ثبت…' : revisionBase ? 'ثبت نسخهٔ اصلاح‌شده' : 'ثبت نهایی فاکتور'}</button><p className="muted">{revisionBase ? 'نسخهٔ قبلی فاکتور و شمارهٔ آن حفظ می‌شود.' : 'شمارهٔ فاکتور هنگام ثبت قطعی تخصیص می‌یابد.'}</p></> : <p className="muted">این مرورگر فقط پیش‌نمایش است. ثبت قطعی در برنامهٔ نصب‌شده انجام می‌شود.</p>}
              </>}
@@ -699,7 +773,8 @@ function App() {
       </>}
        {page==='settings' && <><div className="section-heading"><div><span className="eyebrow">شخصی‌سازی</span><h1>تنظیمات</h1></div></div><section className="card preference-card"><h2>نحوهٔ کار برنامه</h2>{([['compactCards','نمایش فشردهٔ کالاها'],['showStock','نمایش موجودی روی کارت کالا'],['showCardNumber','نمایش شماره کارت در فاکتور'],['confirmIssue','تأیید دوباره پیش از ثبت فاکتور']] as const).map(([key,label]) => <label className="toggle-row" key={key}><span>{label}</span><input type="checkbox" checked={preferences[key]} onChange={event => setPreference(key, event.target.checked)}/></label>)}</section><section className="card"><h2>اطلاعات فروشگاه و متن فاکتور</h2><p className="muted">هر تغییر در پیش‌نمایش دیده می‌شود. {nativeDevice ? 'برای حفظ آن، نسخهٔ جدید قالب را ذخیره کنید.' : 'قالب نسخه‌دار در برنامهٔ نصب‌شده ذخیره می‌شود.'}</p><div className="settings-grid">{([['storeName','نام فروشگاه'],['slogan','شعار'],['phone','تلفن‌ها'],['address','نشانی'],['card','شماره کارت'],['cardHolder','نام صاحب کارت'],['note','یادآوری پرداخت']] as const).map(([key,label]) => <label key={key}>{label}<input value={data[key]} onChange={e => changeField(key,e.target.value)}/></label>)}</div><details><summary>ویرایش شش بند شرایط فروش</summary>{data.conditions.map((c,i) => <label className="condition-field" key={i}>بند {i+1}<textarea value={c} rows={3} onChange={e => save({ ...data, conditions: data.conditions.map((x,j) => j === i ? e.target.value : x) })}/></label>)}</details>{nativeDevice && <button className="primary" onClick={persistTemplate}>ذخیرهٔ نسخهٔ جدید قالب {templateVersion ? `(فعلی: ${templateVersion})` : ''}</button>}</section></>}
        {page==='settings' && <section className="card"><h2>شناسه‌های پایین فاکتور</h2><div className="settings-grid"><label>تلگرام نخست<input value={data.socialTelegram} onChange={event => changeField('socialTelegram', event.target.value)}/></label><label>اینستاگرام<input value={data.socialInstagram} onChange={event => changeField('socialInstagram', event.target.value)}/></label><label>شناسهٔ تماس<input value={data.socialContact} onChange={event => changeField('socialContact', event.target.value)}/></label></div><p className="muted">پس از تغییر، دکمهٔ «ذخیرهٔ نسخهٔ جدید قالب» را بزنید.</p><label className="toggle-row"><span>صدای کوتاه خوشامد هنگام ورود</span><input type="checkbox" checked={preferences.welcomeSound} onChange={event => setPreference('welcomeSound', event.target.checked)}/></label></section>}
-       {page==='support' && <div className="majora-showcase"><div className="majora-glow"/><img src={majoraLogo} alt="لوگوی MAJORA"/><span>POWERED BY MAJORA</span><h1>ماژورا</h1><strong>با ماژورا کسب‌وکارت هوشمنده، کافیه مشکلتو بگی!!!</strong><div className="majora-contacts"><a href="tel:09105796971">تماس <bdi dir="ltr">0910-579-6971</bdi></a><a href="tel:09019990440">تماس <bdi dir="ltr">0901-999-0440</bdi></a><a href="https://www.instagram.com/majora_app/" target="_blank" rel="noreferrer">اینستاگرام <bdi dir="ltr">@majora_app</bdi></a></div></div>}
+       {page==='support' && <MajoraAbout onBack={() => changePage('home')}/>}
+       {page==='help' && <HelpCenter onNavigate={changePage}/>}
        {inspectedProduct && <div className="sheet-backdrop" onClick={() => setInspectedProductId(null)}><section className="product-detail-sheet" onClick={event => event.stopPropagation()} aria-label={`جزئیات ${inspectedProduct.name}`}><div className="sheet-header"><h2>جزئیات کالا</h2><button aria-label="بستن جزئیات" onClick={() => setInspectedProductId(null)}>×</button></div><div className="detail-photo"><ProductImage product={inspectedProduct}/></div><h2>{inspectedProduct.name}</h2><p>{[inspectedProduct.model, inspectedProduct.color, inspectedProduct.category.replaceAll('/', ' › ')].filter(Boolean).join(' · ')}</p><p><strong>{formatRial(inspectedProduct.priceRial)} ریال</strong> · موجودی {formatRial(inspectedProduct.stock)}</p>{page === 'sale' ? <button className="primary" onClick={() => { addProductToCart(inspectedProduct); setInspectedProductId(null); }}>+ افزودن به فاکتور</button> : <button className="primary" onClick={() => { startProductEdit(inspectedProduct); setInspectedProductId(null); }}>ویرایش کالا</button>}</section></div>}
      </main><footer className="mobile-nav">{nav.slice(0, 4).map(n => <button key={n.key} className={page===n.key?'active':''} onClick={() => changePage(n.key)}><span aria-hidden="true">{n.icon}</span>{n.label}</button>)}<button onClick={() => setMenuOpen(true)}><span aria-hidden="true">☰</span>بیشتر</button></footer></div>
   </div>;

@@ -20,6 +20,17 @@
 .invoice-export-bar label { display:flex;align-items:center;gap:6px;font-size:.8rem;font-weight:700; }
 .invoice-export-bar select { min-height:44px; }
 .invoice-export-bar button { min-height:44px;background:#0b3567;color:#fff;border:0;border-radius:9px;padding:6px 12px;font-weight:700; }
+.invoice-export-bar{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));align-items:stretch}
+.invoice-export-bar>button,.invoice-export-bar>label{min-width:0;min-height:48px;width:100%;display:flex;align-items:center;justify-content:center;text-align:center;border-radius:10px;padding:6px 8px;line-height:1.45;font-size:.78rem}
+.invoice-export-bar>label{background:#eef5fb;color:#0b3567;border:1px solid #cadce8}
+.invoice-export-bar>label select{width:auto;max-width:70px;border:0;background:transparent;padding:2px;min-height:38px}
+.invoice-export-bar>button:last-child{background:#087bba}
+.invoice-export-bar button:disabled{opacity:.55}
+.invoice-busy{position:fixed;inset:0;z-index:80;background:#04152cbc;display:grid;place-items:center;padding:22px;backdrop-filter:blur(7px)}
+.invoice-busy-card{width:min(100%,300px);display:grid;justify-items:center;gap:9px;background:#fff;color:#082c57;border:1px solid #d6e8f6;border-radius:21px;padding:28px 18px;text-align:center;box-shadow:0 25px 60px #02142e70}
+.invoice-busy-card strong{font-size:1.1rem}.invoice-busy-card small{color:#61748a}.invoice-busy-spinner{width:52px;height:52px;border:5px solid #dbeefa;border-top-color:#087ed8;border-radius:50%;animation:invoice-spin .8s linear infinite}
+@keyframes invoice-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.invoice-busy-spinner{animation-duration:2s}}
 .invoice-discount { border:1px solid #dfc182;border-radius:10px;background:#fffaf0;padding:8px;display:grid;gap:6px; }
 .invoice-discount label:not(.toggle-row),.revision-reason { display:grid;gap:4px;font-weight:700;font-size:.83rem; }
 .invoice-discount button { min-height:48px;background:#0b3567;color:#fff;border:0;border-radius:9px; }
@@ -89,5 +100,6 @@
 .majora-showcase{position:relative;isolation:isolate;overflow:hidden;max-width:720px;min-height:640px;margin:12px auto;border-radius:24px;padding:40px 26px;background:radial-gradient(circle at 50% 12%,#194c81 0,#09274f 40%,#061a36 100%);color:#fff;text-align:center;display:flex;align-items:center;flex-direction:column;box-shadow:0 22px 55px #061d3640}
 .majora-glow{position:absolute;z-index:-1;inset:5% 12% auto;height:280px;border-radius:50%;background:#cfaa62;filter:blur(85px);opacity:.2}.majora-showcase>img{width:min(100%,440px);height:175px;object-fit:cover;object-position:center;border-radius:16px;background:#fff;box-shadow:0 12px 30px #0005}.majora-showcase>span{font-size:.75rem;letter-spacing:.22em;color:#e6bb72;font-weight:800;margin-top:20px}.majora-showcase h1{font-size:2.3rem;margin:10px 0 16px}.majora-showcase>strong{font-size:clamp(1.25rem,4vw,1.8rem);line-height:1.8;max-width:540px;color:#f5d799}.majora-contacts{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;width:100%;margin-top:auto;padding-top:32px}.majora-contacts a{display:grid;place-content:center;gap:3px;min-height:65px;padding:9px;border:1px solid #d6b26b66;border-radius:12px;background:#ffffff14;color:#fff;text-decoration:none;font-size:.82rem}.majora-contacts a bdi{color:#f5d799;font-weight:800}
 @media(max-width:700px){.finance-home{align-items:stretch;flex-direction:column}.archive-row{flex-wrap:wrap}.archive-row>label{flex-basis:100%}.majora-showcase{min-height:calc(100dvh - 185px);padding:28px 18px}.majora-contacts{grid-template-columns:1fr}.majora-showcase>img{height:170px}}
+@media(max-width:700px){.invoice-export-bar{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.invoice-export-bar>button,.invoice-export-bar>label{font-size:.74rem;min-height:48px}}
 .due-notification{min-width:44px;min-height:44px;border:1px solid #e0b460;border-radius:11px;background:#fff8e8;color:#8b5b05;font-weight:900;white-space:nowrap}.due-notification span{font-size:.75rem;margin-inline-start:3px}
 @media(max-width:700px){.topbar{padding-inline:8px;gap:6px}.topbar-title{flex:1;min-width:0}.topbar-title strong{white-space:normal;overflow:visible;text-overflow:clip;font-size:.78rem;line-height:1.35}.topbar-title small,.offline{display:none}.topbar-search{flex:none}.due-notification{flex:none}}

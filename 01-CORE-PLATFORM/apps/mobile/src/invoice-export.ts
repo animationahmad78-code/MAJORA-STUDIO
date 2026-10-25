@@ -26,7 +26,8 @@ async function captureInvoice(root: HTMLElement, scale: number): Promise<HTMLCan
   const canvases: HTMLCanvasElement[] = [];
   for (const page of pages) {
     const host = document.createElement('div');
-    host.style.cssText = 'position:fixed;left:0;top:0;z-index:-1;pointer-events:none;background:#fff;';
+    // html2canvas needs a laid-out node; place it outside the viewport so it never flashes over the app.
+    host.style.cssText = 'position:fixed;left:-100000px;top:0;z-index:-1;pointer-events:none;background:#fff;overflow:visible;';
     const wrapper = document.createElement('div');
     wrapper.className = page.closest('.invoice-document')?.className || 'invoice-document a4';
     const copy = page.cloneNode(true) as HTMLElement;

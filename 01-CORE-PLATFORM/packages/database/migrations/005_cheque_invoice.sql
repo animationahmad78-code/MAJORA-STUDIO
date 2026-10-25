@@ -1,0 +1,11 @@
+ALTER TABLE cheque_entry ADD COLUMN invoice_id TEXT REFERENCES invoice(id);
+ALTER TABLE cheque_entry ADD COLUMN sayad_id TEXT;
+ALTER TABLE cheque_entry ADD COLUMN issuer_national_id TEXT;
+ALTER TABLE cheque_entry ADD COLUMN beneficiary_national_id TEXT;
+ALTER TABLE cheque_entry ADD COLUMN registration_status TEXT NOT NULL DEFAULT 'unknown' CHECK(registration_status IN ('unknown','unregistered','registered','confirmed'));
+ALTER TABLE cheque_entry ADD COLUMN photo_path TEXT;
+ALTER TABLE cheque_entry ADD COLUMN show_details INTEGER NOT NULL DEFAULT 0 CHECK(show_details IN (0,1));
+ALTER TABLE cheque_entry ADD COLUMN show_image INTEGER NOT NULL DEFAULT 0 CHECK(show_image IN (0,1));
+CREATE UNIQUE INDEX IF NOT EXISTS cheque_invoice_once ON cheque_entry(invoice_id) WHERE invoice_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS cheque_sayad_once ON cheque_entry(sayad_id) WHERE sayad_id IS NOT NULL AND sayad_id<>'';
+INSERT INTO schema_migrations(version,applied_at) VALUES(5,datetime('now'));

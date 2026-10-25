@@ -7,7 +7,7 @@ export type InvoiceBrand = {
   storeName: string; slogan: string; phone: string; address: string; card: string; cardHolder: string;
   note: string; conditions: string[]; socialTelegram: string; socialInstagram: string; socialContact: string;
 };
-type Props = { brand: InvoiceBrand; receipt: InvoiceReceipt; mono: boolean; paper: PaperSize; logo: string };
+type Props = { brand: InvoiceBrand; receipt: InvoiceReceipt; mono: boolean; paper: PaperSize; logo: string; chequePhoto?: string };
 
 export function pageLines<T extends { name: string }>(lines: T[], paper: PaperSize): T[][] {
   // Reserve the bottom of the last sheet for terms, totals and signatures.
@@ -38,8 +38,10 @@ export function pageLines<T extends { name: string }>(lines: T[], paper: PaperSi
   return pages;
 }
 
-export function InvoiceDocument({ brand, receipt, mono, paper, logo }: Props) {
+export function InvoiceDocument({ brand, receipt, mono, paper, logo, chequePhoto }: Props) {
   const chunks = pageLines(receipt.lines, paper);
+  const annex = !!receipt.cheque && (receipt.cheque.showDetails || receipt.cheque.showImage);
+  const pageTotal = chunks.length + Number(annex);
   const proforma = receipt.paymentStatus === 'proforma';
   const discount = receipt.discountRial ?? receipt.lines.reduce((sum, line) => sum + (line.discountRial ?? 0), 0);
   const subtotal = receipt.subtotalRial ?? receipt.totalRial + discount;
@@ -62,7 +64,7 @@ export function InvoiceDocument({ brand, receipt, mono, paper, logo }: Props) {
           <span>نام خریدار: <b>{receipt.customerName || 'خریدار حضوری'}</b></span>
           <span>شماره تماس: <b dir="ltr">{receipt.customerPhone || '—'}</b></span>
           <span>آدرس: <b>{receipt.customerAddress || '—'}</b></span><span>نحوه پرداخت: <b>{receipt.paymentMethod || '—'}</b></span>
-          <span>تاریخ سررسید: <b>{receipt.dueDateJalali || '—'}</b></span><span>صفحه: <b>{formatRial(pageIndex + 1)} از {formatRial(chunks.length)}</b></span>
+          <span>تاریخ سررسید: <b>{receipt.dueDateJalali || '—'}</b></span><span>صفحه: <b>{formatRial(pageIndex + 1)} از {formatRial(pageTotal)}</b></span>
         </div>
         {pageIndex > 0 && <div className="inv-continuation">ادامهٔ {proforma ? 'پیش‌فاکتور' : 'فاکتور'} شمارهٔ {formatRial(receipt.number)} · صفحهٔ {formatRial(pageIndex + 1)}</div>}
         <table className="inv-table"><thead><tr><th>ردیف</th><th>کد</th><th>شرح کالا / دسته‌بندی</th><th>رنگ</th><th>تعداد</th><th>فی</th><th>تخفیف</th><th>مبلغ کل</th></tr></thead>
@@ -74,5 +76,12 @@ export function InvoiceDocument({ brand, receipt, mono, paper, logo }: Props) {
         <footer className="inv-social"><span>➤ {brand.socialTelegram}</span><span>◎ {brand.socialInstagram}</span><span>➤ {brand.socialContact}</span></footer>
       </section>;
     })}
+    {annex && receipt.cheque && <section className="invoice-paper inv-cheque-annex" data-invoice-page aria-label={`ضمیمهٔ چک فاکتور ${receipt.number}`}>
+      <header><img src={logo} alt="نشان فروشگاه"/><div><h2>{brand.storeName}</h2><strong>ضمیمهٔ چک فاکتور شمارهٔ {formatRial(receipt.number)}</strong><p>صفحهٔ {formatRial(pageTotal)} از {formatRial(pageTotal)} · تاریخ فاکتور {receipt.dateJalali}</p></div></header>
+      {receipt.cheque.showDetails && <div className="inv-cheque-details"><h3>مشخصات چک ثبت‌شده</h3><dl><div><dt>شماره چک</dt><dd>{receipt.cheque.serial}</dd></div><div><dt>بانک</dt><dd>{receipt.cheque.bank}</dd></div><div><dt>مبلغ</dt><dd>{formatRial(receipt.cheque.amountRial)} ریال</dd></div><div><dt>سررسید</dt><dd>{receipt.cheque.dueJalali}</dd></div><div><dt>شناسه صیادی</dt><dd dir="ltr">{receipt.cheque.sayadId}</dd></div><div><dt>وضعیت ثبت اعلام‌شده</dt><dd>{receipt.cheque.registrationStatus === 'confirmed' ? 'تأییدشده توسط گیرنده' : receipt.cheque.registrationStatus === 'registered' ? 'ثبت‌شده توسط صادرکننده' : receipt.cheque.registrationStatus === 'unregistered' ? 'ثبت‌نشده' : 'بررسی‌نشده'}</dd></div></dl></div>}
+      {receipt.cheque.showImage && chequePhoto && <div className="inv-cheque-picture"><h3>تصویر ضمیمهٔ چک</h3><img src={chequePhoto} alt="تصویر چک این فاکتور"/></div>}
+      <p className="inv-cheque-disclaimer">این ضمیمه ثبت محلی اطلاعات است. وضعیت سامانهٔ صیاد و وصول نهایی فقط با استعلام بانکی تأیید می‌شود.</p>
+      <footer>ضمیمهٔ فاکتور {formatRial(receipt.number)} · {brand.storeName}</footer>
+    </section>}
   </div>;
 }
