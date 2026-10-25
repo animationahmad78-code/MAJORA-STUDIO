@@ -105,7 +105,7 @@ export function JalaliDateField({ label, value, onChange, optional = false, id }
   const years = Array.from({ length: 11 }, (_, index) => currentYear - 5 + index);
   return <div className="jalali-field" id={id}>
     <span className="jalali-label">{label}{optional && <small>اختیاری</small>}</span>
-    <div className="jalali-segments" dir="ltr">
+    <div className="jalali-segments" dir="ltr" onClick={event => { if (event.target === event.currentTarget) dayRef.current?.focus(); }}>
       <input ref={yearRef} aria-label={`${label}: سال`} inputMode="numeric" value={year} placeholder="۱۴۰۵" maxLength={4} onChange={event => handleSegment('year', event.target.value)}/>
       <span>/</span><input ref={monthRef} aria-label={`${label}: ماه`} inputMode="numeric" value={month} placeholder="ماه" maxLength={2} onChange={event => handleSegment('month', event.target.value)}/>
       <span>/</span><input ref={dayRef} aria-label={`${label}: روز`} inputMode="numeric" value={day} placeholder="روز" maxLength={2} onChange={event => handleSegment('day', event.target.value)}/>
