@@ -1,0 +1,65 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Design;
+
+namespace Majora.WebApi;
+
+public sealed class Tenant { public Guid Id { get; set; } = Guid.NewGuid(); public string Name { get; set; } = ""; public string Slug { get; set; } = ""; public string BrandColor { get; set; } = "#0B2B53"; public string? LogoUrl { get; set; } public bool Enabled { get; set; } = true; public long NextInvoiceNumber { get; set; } = 1; public DateTime CreatedAt { get; set; } = DateTime.UtcNow; }
+public sealed class AppUser { public Guid Id { get; set; } = Guid.NewGuid(); public Guid? TenantId { get; set; } public string Username { get; set; } = ""; public string PasswordHash { get; set; } = ""; public string DisplayName { get; set; } = ""; public string Role { get; set; } = "staff"; public bool Enabled { get; set; } = true; public int AuthVersion { get; set; } public DateTime CreatedAt { get; set; } = DateTime.UtcNow; }
+public sealed class Plan { public Guid Id { get; set; } = Guid.NewGuid(); public string Name { get; set; } = ""; public long MonthlyRial { get; set; } public int MaxUsers { get; set; } = 3; public bool Enabled { get; set; } = true; }
+public sealed class Subscription { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public Guid PlanId { get; set; } public DateTime StartsAt { get; set; } public DateTime EndsAt { get; set; } public string PaymentStatus { get; set; } = "pending"; public long PriceRialSnapshot { get; set; } public string Note { get; set; } = ""; }
+public sealed class Product { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public string Name { get; set; } = ""; public string Sku { get; set; } = ""; public string Category { get; set; } = ""; public long PriceRial { get; set; } public long AverageCostRial { get; set; } public bool CostKnown { get; set; } public long Stock { get; set; } public bool Archived { get; set; } public DateTime UpdatedAt { get; set; } = DateTime.UtcNow; }
+public sealed class Customer { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public string Name { get; set; } = ""; public string Phone { get; set; } = ""; public bool Archived { get; set; } public DateTime CreatedAt { get; set; } = DateTime.UtcNow; }
+public sealed class Invoice { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public long Number { get; set; } public Guid? CustomerId { get; set; } public string CustomerName { get; set; } = ""; public string CustomerPhone { get; set; } = ""; public DateTime IssuedAt { get; set; } = DateTime.UtcNow; public string Status { get; set; } = "issued"; public string PaymentStatus { get; set; } = "unpaid"; public long TotalRial { get; set; } public long PaidRial { get; set; } public bool Archived { get; set; } public string IdempotencyKey { get; set; } = ""; public List<InvoiceLine> Lines { get; set; } = []; }
+public sealed class InvoiceLine { public Guid Id { get; set; } = Guid.NewGuid(); public Guid InvoiceId { get; set; } public Guid? ProductId { get; set; } public string NameSnapshot { get; set; } = ""; public long UnitPriceRial { get; set; } public long Quantity { get; set; } public long TotalRial { get; set; } public long UnitCostRialSnapshot { get; set; } public bool CostKnown { get; set; } }
+public sealed class Payment { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public Guid InvoiceId { get; set; } public long AmountRial { get; set; } public string Method { get; set; } = "cash"; public string Reference { get; set; } = ""; public DateTime ReceivedAt { get; set; } = DateTime.UtcNow; }
+public sealed class StockMovement { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public Guid ProductId { get; set; } public Guid? InvoiceId { get; set; } public long Delta { get; set; } public string Reason { get; set; } = ""; public DateTime CreatedAt { get; set; } = DateTime.UtcNow; }
+public sealed class Reminder { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public string Title { get; set; } = ""; public DateTime DueAt { get; set; } public bool Done { get; set; } public Guid? InvoiceId { get; set; } }
+public sealed class AuditEntry { public Guid Id { get; set; } = Guid.NewGuid(); public Guid? TenantId { get; set; } public Guid ActorId { get; set; } public string Action { get; set; } = ""; public string EntityType { get; set; } = ""; public string EntityId { get; set; } = ""; public string Detail { get; set; } = ""; public DateTime At { get; set; } = DateTime.UtcNow; }
+public sealed class Purchase { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public string SupplierName { get; set; } = ""; public string SupplierInvoiceNumber { get; set; } = ""; public DateTime PurchasedAt { get; set; } = DateTime.UtcNow; public long TotalRial { get; set; } public long PaidRial { get; set; } public string IdempotencyKey { get; set; } = ""; public List<PurchaseLine> Lines { get; set; } = []; }
+public sealed class PurchaseLine { public Guid Id { get; set; } = Guid.NewGuid(); public Guid PurchaseId { get; set; } public Guid ProductId { get; set; } public string NameSnapshot { get; set; } = ""; public long Quantity { get; set; } public long UnitCostRial { get; set; } public long TotalRial { get; set; } }
+public sealed class PurchasePayment { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public Guid PurchaseId { get; set; } public long AmountRial { get; set; } public string Method { get; set; } = "cash"; public DateTime PaidAt { get; set; } = DateTime.UtcNow; }
+public sealed class Expense { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public string Category { get; set; } = ""; public string Description { get; set; } = ""; public long AmountRial { get; set; } public DateTime IncurredAt { get; set; } = DateTime.UtcNow; public bool Voided { get; set; } }
+
+public sealed class MajoraDb(DbContextOptions<MajoraDb> options) : DbContext(options)
+{
+    public DbSet<Tenant> Tenants => Set<Tenant>(); public DbSet<AppUser> Users => Set<AppUser>(); public DbSet<Plan> Plans => Set<Plan>(); public DbSet<Subscription> Subscriptions => Set<Subscription>(); public DbSet<Product> Products => Set<Product>(); public DbSet<Customer> Customers => Set<Customer>(); public DbSet<Invoice> Invoices => Set<Invoice>(); public DbSet<InvoiceLine> InvoiceLines => Set<InvoiceLine>(); public DbSet<Payment> Payments => Set<Payment>(); public DbSet<StockMovement> StockMovements => Set<StockMovement>(); public DbSet<Reminder> Reminders => Set<Reminder>(); public DbSet<AuditEntry> Audit => Set<AuditEntry>(); public DbSet<Purchase> Purchases => Set<Purchase>(); public DbSet<PurchaseLine> PurchaseLines => Set<PurchaseLine>(); public DbSet<PurchasePayment> PurchasePayments => Set<PurchasePayment>(); public DbSet<Expense> Expenses => Set<Expense>();
+    protected override void OnModelCreating(ModelBuilder b)
+    {
+        b.Entity<Tenant>().Property(x => x.Slug).HasMaxLength(40);
+        b.Entity<AppUser>().Property(x => x.Username).HasMaxLength(100);
+        b.Entity<Product>().Property(x => x.Sku).HasMaxLength(100);
+        b.Entity<Invoice>().Property(x => x.IdempotencyKey).HasMaxLength(100);
+        b.Entity<Purchase>().Property(x => x.IdempotencyKey).HasMaxLength(100);
+        b.Entity<Tenant>().Property(x => x.Name).HasMaxLength(200);
+        b.Entity<AppUser>().Property(x => x.DisplayName).HasMaxLength(200);
+        b.Entity<Product>().Property(x => x.Name).HasMaxLength(300);
+        b.Entity<Customer>().Property(x => x.Name).HasMaxLength(200);
+        b.Entity<Customer>().Property(x => x.Phone).HasMaxLength(30);
+        b.Entity<Invoice>().Property(x => x.CustomerName).HasMaxLength(200);
+        b.Entity<Invoice>().Property(x => x.CustomerPhone).HasMaxLength(30);
+        b.Entity<Tenant>().HasIndex(x => x.Slug).IsUnique();
+        b.Entity<AppUser>().HasIndex(x => x.Username).IsUnique();
+        b.Entity<Subscription>().HasIndex(x => new { x.TenantId, x.EndsAt });
+        b.Entity<Product>().HasIndex(x => new { x.TenantId, x.Sku }).IsUnique();
+        b.Entity<Customer>().HasIndex(x => new { x.TenantId, x.Phone });
+        b.Entity<Invoice>().HasIndex(x => new { x.TenantId, x.Number }).IsUnique();
+        b.Entity<Invoice>().HasIndex(x => new { x.TenantId, x.IdempotencyKey }).IsUnique();
+        b.Entity<InvoiceLine>().HasOne<Invoice>().WithMany(x => x.Lines).HasForeignKey(x => x.InvoiceId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<PurchaseLine>().HasOne<Purchase>().WithMany(x => x.Lines).HasForeignKey(x => x.PurchaseId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<Purchase>().HasIndex(x => new { x.TenantId, x.IdempotencyKey }).IsUnique();
+        b.Entity<Purchase>().HasIndex(x => new { x.TenantId, x.PurchasedAt });
+        b.Entity<PurchasePayment>().HasIndex(x => new { x.TenantId, x.PurchaseId });
+        b.Entity<Expense>().HasIndex(x => new { x.TenantId, x.IncurredAt });
+        b.Entity<Payment>().HasIndex(x => new { x.TenantId, x.InvoiceId });
+        b.Entity<AuditEntry>().HasIndex(x => new { x.TenantId, x.At });
+        b.Entity<Reminder>().HasIndex(x => new { x.TenantId, x.DueAt });
+    }
+}
+
+// Production migrations target SQL Server. Development SQLite uses EnsureCreated in Development only.
+public sealed class MajoraDesignFactory : IDesignTimeDbContextFactory<MajoraDb>
+{
+    public MajoraDb CreateDbContext(string[] args) => new(new DbContextOptionsBuilder<MajoraDb>()
+        .UseSqlServer("Server=(localdb)\\mssqllocaldb;Database=MajoraDesign;Trusted_Connection=True;")
+        .Options);
+}
