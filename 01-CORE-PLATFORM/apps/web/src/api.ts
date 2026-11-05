@@ -4,6 +4,7 @@ export type Customer = { id: string; name: string; phone: string };
 export type Invoice = { id: string; number: number; customerName: string; issuedAt: string; totalRial: number; paidRial: number; paymentStatus: string; status: string };
 export type Plan = { id: string; name: string; monthlyRial: number; maxUsers: number; enabled: boolean };
 export type Tenant = { id: string; name: string; slug: string; enabled: boolean; brandColor: string; logoUrl?: string; subscription?: { endsAt: string; paymentStatus: string; priceRialSnapshot: number } };
+export type InvoiceBrand = { revision: number; storeName: string; slogan: string; phone: string; address: string; card: string; cardHolder: string; note: string; conditions: string[]; socialTelegram: string; socialInstagram: string; socialContact: string; logoDataUrl: string | null };
 function csrf() { return document.cookie.split('; ').find(x => x.startsWith('majora.csrf='))?.split('=')[1] ?? ''; }
 export async function api<T>(path: string, method = 'GET', data?: unknown): Promise<T> {
   const response = await fetch(`/api${path}`, { method, credentials: 'same-origin', headers: { ...(data ? { 'Content-Type': 'application/json' } : {}), ...(method !== 'GET' ? { 'X-CSRF': csrf() } : {}) }, body: data ? JSON.stringify(data) : undefined });

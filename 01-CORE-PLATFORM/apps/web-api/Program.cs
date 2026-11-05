@@ -158,14 +158,16 @@ admin.MapPut("/plans/{id:guid}", async (Guid id, PlanRequest body, MajoraDb db, 
     Audit(db, c.User, null, "plan.update", "plan", id); await db.SaveChangesAsync(); return Results.Ok(plan);
 });
 admin.MapGet("/tenants", async (MajoraDb db) => Results.Ok(await db.Tenants.OrderBy(x => x.Name).Select(x => new { x.Id, x.Name, x.Slug, x.Enabled, x.BrandColor, x.LogoUrl, Subscription = db.Subscriptions.Where(s => s.TenantId == x.Id).OrderByDescending(s => s.EndsAt).Select(s => new { s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot }).FirstOrDefault() }).ToListAsync()));
-admin.MapPost("/tenants", async (TenantRequest body, MajoraDb db, IPasswordHasher<AppUser> hasher, HttpContext c) =>
+admin.MapPost("/tenants", async (TenantRequest body, MajoraDb db, IPasswordHasher<AppUser> hasher, IWebHostEnvironment host, HttpContext c) =>
 {
     if (string.IsNullOrWhiteSpace(body.Name) || string.IsNullOrWhiteSpace(body.Slug) || !System.Text.RegularExpressions.Regex.IsMatch(body.Slug, "^[a-z0-9-]{3,40}$") || body.OwnerPassword.Length < 12 || string.IsNullOrWhiteSpace(body.OwnerUsername)) return Fail("نام، شناسه یا رمز مالک نامعتبر است؛ رمز حداقل ۱۲ نویسه باشد.");
     if (await db.Tenants.AnyAsync(x => x.Slug == body.Slug) || await db.Users.AnyAsync(x => x.Username == body.OwnerUsername)) return Fail("شناسهٔ فروشگاه یا نام کاربری تکراری است.", 409);
     var tenant = new Tenant { Name = body.Name.Trim(), Slug = body.Slug, BrandColor = body.BrandColor ?? "#0B2B53" };
     var owner = new AppUser { TenantId = tenant.Id, Username = body.OwnerUsername.Trim(), DisplayName = body.OwnerName.Trim(), Role = "owner" };
     owner.PasswordHash = hasher.HashPassword(owner, body.OwnerPassword);
-    db.Tenants.Add(tenant); db.Users.Add(owner); Audit(db, c.User, tenant.Id, "tenant.create", "tenant", tenant.Id); await db.SaveChangesAsync(); return Results.Created($"/api/admin/tenants/{tenant.Id}", new { tenant.Id, tenant.Name, tenant.Slug });
+    db.Tenants.Add(tenant); db.Users.Add(owner);
+    db.InvoiceBrands.Add(InvoiceBrand.Create(tenant.Id, tenant.Name, body.ClassicPreset, host.WebRootPath));
+    Audit(db, c.User, tenant.Id, "tenant.create", "tenant", tenant.Id); await db.SaveChangesAsync(); return Results.Created($"/api/admin/tenants/{tenant.Id}", new { tenant.Id, tenant.Name, tenant.Slug });
 });
 admin.MapPut("/tenants/{id:guid}", async (Guid id, TenantUpdate body, MajoraDb db, HttpContext c) =>
 {
@@ -204,7 +206,33 @@ merchant.MapGet("/subscription", async (MajoraDb db, HttpContext c) =>
     var tid = TenantId(c.User);
     return Results.Ok(await db.Subscriptions.Where(s => s.TenantId == tid).Join(db.Plans, s => s.PlanId, p => p.Id, (s,p) => new { s.Id, Plan = p.Name, s.StartsAt, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot, p.MaxUsers }).OrderByDescending(s => s.EndsAt).ToListAsync());
 });
-merchant.MapGet("/workspace", async (MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Tenants.Where(t => t.Id == tid).Select(t => new { t.Name, t.Slug, t.LogoUrl, t.BrandColor }).SingleAsync()); });
+merchant.MapGet("/workspace", async (MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var tenant = await db.Tenants.SingleAsync(t => t.Id == tid); var profile = await db.InvoiceBrands.AsNoTracking().SingleOrDefaultAsync(x => x.TenantId == tid); return Results.Ok(new { tenant.Name, tenant.Slug, LogoUrl = profile?.LogoDataUrl ?? tenant.LogoUrl, tenant.BrandColor }); });
+merchant.MapGet("/invoice-brand", async (MajoraDb db, HttpContext c) =>
+{
+    var tid = TenantId(c.User);
+    var profile = await db.InvoiceBrands.AsNoTracking().SingleOrDefaultAsync(x => x.TenantId == tid);
+    if (profile is null) profile = InvoiceBrand.Create(tid, (await db.Tenants.SingleAsync(x => x.Id == tid)).Name, false, null);
+    return Results.Ok(InvoiceBrand.View(profile));
+});
+merchant.MapPut("/invoice-brand", async (InvoiceBrandUpdate body, MajoraDb db, HttpContext c) =>
+{
+    if (!CanWrite(c.User)) return Results.Forbid();
+    var invalid = InvoiceBrand.Validate(body); if (invalid is not null) return Fail(invalid);
+    var tid = TenantId(c.User);
+    var profile = await db.InvoiceBrands.SingleOrDefaultAsync(x => x.TenantId == tid);
+    if (profile is null)
+    {
+        profile = InvoiceBrand.Create(tid, (await db.Tenants.SingleAsync(x => x.Id == tid)).Name, false, null);
+        db.InvoiceBrands.Add(profile);
+    }
+    if (profile.Revision != body.Revision) return Fail("قالب در دستگاه دیگری تغییر کرده است؛ صفحه را تازه کنید.", 409);
+    InvoiceBrand.Apply(profile, body);
+    Audit(db, c.User, tid, "invoice-brand.update", "invoice-brand", tid, $"revision={profile.Revision}");
+    try { await db.SaveChangesAsync(); }
+    catch (DbUpdateConcurrencyException) { return Fail("قالب هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.", 409); }
+    catch (DbUpdateException) { return Fail("قالب هم‌زمان ثبت شده است؛ صفحه را تازه کنید.", 409); }
+    return Results.Ok(InvoiceBrand.View(profile));
+});
 merchant.MapGet("/dashboard", async (MajoraDb db, HttpContext c) =>
 {
     var tid = TenantId(c.User); var since = DateTime.UtcNow.AddDays(-30);
@@ -248,7 +276,9 @@ merchant.MapPost("/invoices", async (InvoiceRequest body, MajoraDb db, HttpConte
     if (existing is not null) return Results.Ok(new { existing.Id, existing.Number, existing.TotalRial });
     var tenant = await db.Tenants.SingleAsync(x => x.Id == tid); var customer = body.CustomerId is Guid cid ? await db.Customers.SingleOrDefaultAsync(x => x.Id == cid && x.TenantId == tid && !x.Archived) : null;
     if (body.CustomerId is not null && customer is null) return Fail("مشتری یافت نشد.");
-    var invoice = new Invoice { TenantId = tid, Number = tenant.NextInvoiceNumber++, CustomerId = customer?.Id, CustomerName = customer?.Name ?? body.CustomerName.Trim(), CustomerPhone = customer?.Phone ?? body.CustomerPhone.Trim(), PaymentStatus = body.PaymentStatus, IdempotencyKey = body.IdempotencyKey };
+    var brandProfile = await db.InvoiceBrands.AsNoTracking().SingleOrDefaultAsync(x => x.TenantId == tid)
+        ?? InvoiceBrand.Create(tid, tenant.Name, false, null);
+    var invoice = new Invoice { TenantId = tid, Number = tenant.NextInvoiceNumber++, CustomerId = customer?.Id, CustomerName = customer?.Name ?? body.CustomerName.Trim(), CustomerPhone = customer?.Phone ?? body.CustomerPhone.Trim(), PaymentStatus = body.PaymentStatus, IdempotencyKey = body.IdempotencyKey, BrandSnapshotJson = InvoiceBrand.Snapshot(brandProfile) };
     if (string.IsNullOrWhiteSpace(invoice.CustomerName)) return Fail("نام مشتری لازم است.");
     foreach (var item in body.Lines)
     {
@@ -417,7 +447,7 @@ app.Run();
 
 public sealed record LoginRequest(string Username, string Password);
 public sealed record PlanRequest(string Name, long MonthlyRial, int MaxUsers, bool Enabled = true);
-public sealed record TenantRequest(string Name, string Slug, string OwnerUsername, string OwnerName, string OwnerPassword, string? BrandColor);
+public sealed record TenantRequest(string Name, string Slug, string OwnerUsername, string OwnerName, string OwnerPassword, string? BrandColor, bool ClassicPreset = false);
 public sealed record TenantUpdate(string Name, bool Enabled, string? BrandColor, string? LogoUrl);
 public sealed record SubscriptionRequest(Guid PlanId, DateTime StartsAt, DateTime EndsAt, string PaymentStatus, long? PriceRial, string? Note);
 public sealed record ProductRequest(string Name, string Sku, string Category, long PriceRial, long Stock, long? AverageCostRial = null);

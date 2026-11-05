@@ -1,0 +1,31 @@
+.detailed-invoice-dialog { width: min(1120px, 100%); }
+.detailed-invoice-dialog .print-actions { align-items: end; flex-wrap: wrap; position: sticky; top: 0; z-index: 2; background: #f1f5f9; padding: 8px; border-radius: 12px; }
+.detailed-invoice-dialog .print-actions label { display: flex; align-items: center; gap: 7px; margin: 0; white-space: nowrap; }
+.detailed-invoice-dialog .print-actions select { width: 90px; min-height: 44px; }
+.detailed-invoice-dialog .print-checkbox input { width: 19px; min-height: 19px; height: 19px; }
+.detailed-invoice-dialog .invoice-preview-scroll { overflow: auto; max-width: 100%; }
+.brand-form-layout { display: grid; grid-template-columns: 180px 1fr; gap: 22px; }
+.brand-logo-control { display: grid; align-content: start; gap: 10px; }
+.brand-logo-control img, .brand-logo-empty { width: 160px; height: 160px; object-fit: contain; background: #edf5fb; border: 1px solid #cbd6e1; border-radius: 16px; }
+.brand-logo-empty { display: grid; place-items: center; color: #697c92; font-size: .8rem; }
+.brand-logo-control input[type=file] { font-size: .75rem; width: 100%; }
+.brand-settings textarea { width: 100%; min-height: 72px; padding: 10px 12px; border: 1px solid #cbd6e1; border-radius: 12px; font: inherit; resize: vertical; }
+.brand-settings textarea:focus { outline: 3px solid #1572c433; border-color: #1572c4; }
+.condition-field { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
+.condition-field button { margin-bottom: 13px; }
+.brand-save { position: sticky; bottom: 18px; width: min(340px, 100%); box-shadow: 0 8px 24px #0b2b5340; }
+@media (max-width: 700px) { .brand-form-layout { grid-template-columns: 1fr; } .brand-logo-control { grid-template-columns: 110px 1fr; align-items: center; } .brand-logo-control img, .brand-logo-empty { width: 105px; height: 105px; } .brand-logo-control button { grid-column: 2; } .condition-field { grid-template-columns: 1fr; } .condition-field button { margin: -7px 0 13px; justify-self: start; } }
+@media print {
+  @page { size: A4 portrait; margin: 0; }
+  body { background: #fff !important; }
+  body * { visibility: hidden !important; }
+  .invoice-document, .invoice-document * { visibility: visible !important; }
+  .print-backdrop { position: static !important; display: block !important; background: none !important; padding: 0 !important; }
+  .detailed-invoice-dialog { position: static !important; width: 100% !important; max-height: none !important; overflow: visible !important; padding: 0 !important; background: #fff !important; box-shadow: none !important; }
+  .detailed-invoice-dialog .print-actions { display: none !important; }
+  .invoice-document { position: absolute !important; inset: 0 auto auto 0; display: block !important; margin: 0 !important; padding: 0 !important; gap: 0 !important; }
+  .invoice-document .invoice-paper { box-shadow: none !important; border-radius: 0 !important; break-after: page; page-break-after: always; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .invoice-document .invoice-paper:last-child { break-after: auto !important; page-break-after: auto !important; }
+  .invoice-document.a4 .invoice-paper { width: 210mm; height: 297mm; }
+  .invoice-document.a5 .invoice-paper { width: 148mm; height: 210mm; }
+}
