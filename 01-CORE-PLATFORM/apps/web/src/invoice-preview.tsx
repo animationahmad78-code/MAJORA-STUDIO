@@ -6,7 +6,7 @@ import './invoice-print.css';
 
 type InvoiceRecord = {
   id: string; number: number; issuedAt: string; customerName: string; customerPhone: string;
-  paymentStatus: string; totalRial: number; paidRial: number; brandSnapshotJson: string;
+  paymentStatus: string; totalRial: number; paidRial: number; returnedRial: number; refundedRial: number; brandSnapshotJson: string;
   lines: { id: string; productId?: string; nameSnapshot: string; quantity: number; unitPriceRial: number; totalRial: number }[];
 };
 
@@ -57,7 +57,8 @@ export function InvoicePreview({ id, close }: { id: string; close: () => void })
     dateJalali: new Intl.DateTimeFormat('fa-IR-u-ca-persian', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(invoice.issuedAt)),
     customerName: invoice.customerName, customerPhone: invoice.customerPhone,
     paymentStatus: invoice.paymentStatus as InvoiceReceipt['paymentStatus'],
-    paidRial: invoice.paidRial, balanceRial: invoice.totalRial - invoice.paidRial,
+    paidRial: invoice.paidRial, returnedRial: invoice.returnedRial, refundedRial: invoice.refundedRial,
+    balanceRial: Math.max(0, invoice.totalRial - invoice.returnedRial - invoice.paidRial + invoice.refundedRial),
     totalRial: invoice.totalRial,
     lines: invoice.lines.map(line => ({ productId: line.productId, name: line.nameSnapshot, quantity: line.quantity,
       unitPriceRial: line.unitPriceRial, totalRial: line.totalRial }))
@@ -70,8 +71,12 @@ export function InvoicePreview({ id, close }: { id: string; close: () => void })
     receipt.customerPhone ? `تلفن: ${receipt.customerPhone}` : '',
     ...receipt.lines.map((x, index) => `${index + 1}. ${x.name} × ${x.quantity} × ${x.unitPriceRial.toLocaleString('fa-IR')} = ${x.totalRial.toLocaleString('fa-IR')} ریال`),
     `جمع: ${receipt.totalRial.toLocaleString('fa-IR')} ریال`,
+    receipt.returnedRial ? `مرجوعی: ${receipt.returnedRial.toLocaleString('fa-IR')} ریال` : '',
+    receipt.returnedRial ? `خالص فروش: ${(receipt.totalRial - receipt.returnedRial).toLocaleString('fa-IR')} ریال` : '',
     `پرداختی: ${(receipt.paidRial ?? 0).toLocaleString('fa-IR')} ریال`,
+    receipt.refundedRial ? `وجه بازپرداخت‌شده: ${receipt.refundedRial.toLocaleString('fa-IR')} ریال` : '',
     `مانده: ${(receipt.balanceRial ?? 0).toLocaleString('fa-IR')} ریال`,
+    receipt.returnedRial && (receipt.paidRial ?? 0) - (receipt.refundedRial ?? 0) > receipt.totalRial - receipt.returnedRial ? `طلب مشتری از فروشگاه: ${((receipt.paidRial ?? 0) - (receipt.refundedRial ?? 0) - receipt.totalRial + receipt.returnedRial).toLocaleString('fa-IR')} ریال` : '',
     brand.card ? `شماره کارت: ${brand.card}${brand.cardHolder ? ` به نام ${brand.cardHolder}` : ''}` : '',
     brand.phone ? `تلفن فروشگاه: ${brand.phone}` : ''
   ].filter(Boolean).join('\n') : '';

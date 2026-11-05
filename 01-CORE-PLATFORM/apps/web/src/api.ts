@@ -1,7 +1,11 @@
 export type User = { id: string; displayName: string; role: string; tenantId?: string };
 export type Product = { id: string; name: string; sku: string; category: string; priceRial: number; averageCostRial: number; costKnown: boolean; stock: number };
 export type Customer = { id: string; name: string; phone: string };
-export type Invoice = { id: string; number: number; customerName: string; issuedAt: string; totalRial: number; paidRial: number; paymentStatus: string; status: string };
+export type Invoice = { id: string; number: number; customerName: string; customerPhone: string; issuedAt: string; totalRial: number; paidRial: number; returnedRial: number; refundedRial: number; paymentStatus: string; status: string };
+export type InvoiceDetail = Invoice & { lines: { id: string; productId?: string; nameSnapshot: string; unitPriceRial: number; quantity: number; returnedQuantity: number; totalRial: number }[] };
+export type SalesReturn = { id: string; invoiceId: string; invoiceNumber: number; customerName: string; reason: string; amountRial: number; createdAt: string };
+export const receivable = (invoice: Invoice) => Math.max(0, invoice.totalRial - invoice.returnedRial - invoice.paidRial + invoice.refundedRial);
+export const refundDue = (invoice: Invoice) => Math.max(0, invoice.paidRial - invoice.refundedRial - invoice.totalRial + invoice.returnedRial);
 export type Plan = { id: string; name: string; monthlyRial: number; maxUsers: number; enabled: boolean };
 export type Tenant = { id: string; name: string; slug: string; enabled: boolean; brandColor: string; logoUrl?: string; subscription?: { endsAt: string; paymentStatus: string; priceRialSnapshot: number } };
 export type InvoiceBrand = { revision: number; storeName: string; slogan: string; phone: string; address: string; card: string; cardHolder: string; note: string; conditions: string[]; socialTelegram: string; socialInstagram: string; socialContact: string; logoDataUrl: string | null };

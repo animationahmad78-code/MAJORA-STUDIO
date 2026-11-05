@@ -9,10 +9,10 @@ export type InvoiceBrand = {
 };
 type Props = { brand: InvoiceBrand; receipt: InvoiceReceipt; mono: boolean; paper: PaperSize; logo: string; chequePhoto?: string };
 
-export function pageLines<T extends { name: string }>(lines: T[], paper: PaperSize): T[][] {
+export function pageLines<T extends { name: string }>(lines: T[], paper: PaperSize, extraSummaryRows = 0): T[][] {
   // Reserve the bottom of the last sheet for terms, totals and signatures.
   // Long names consume extra row height; a fixed row count would overlap that area.
-  const finalBudget = paper === 'a4' ? 300 : 165;
+  const finalBudget = Math.max(40, (paper === 'a4' ? 300 : 165) - extraSummaryRows * (paper === 'a4' ? 24 : 16));
   const continuationBudget = paper === 'a4' ? 690 : 465;
   const rowHeight = (line: T) => {
     const charactersPerLine = paper === 'a4' ? 38 : 30;
@@ -39,7 +39,13 @@ export function pageLines<T extends { name: string }>(lines: T[], paper: PaperSi
 }
 
 export function InvoiceDocument({ brand, receipt, mono, paper, logo, chequePhoto }: Props) {
-  const chunks = pageLines(receipt.lines, paper);
+  const returned = receipt.returnedRial ?? 0;
+  const refunded = receipt.refundedRial ?? 0;
+  const netTotal = receipt.totalRial - returned;
+  const netPaid = (receipt.paidRial ?? 0) - refunded;
+  const refundDue = Math.max(0, netPaid - netTotal);
+  const extraSummaryRows = returned > 0 ? 2 + Number(refunded > 0) + Number(refundDue > 0) : 0;
+  const chunks = pageLines(receipt.lines, paper, extraSummaryRows);
   const annex = !!receipt.cheque && (receipt.cheque.showDetails || receipt.cheque.showImage);
   const pageTotal = chunks.length + Number(annex);
   const proforma = receipt.paymentStatus === 'proforma';
@@ -70,7 +76,7 @@ export function InvoiceDocument({ brand, receipt, mono, paper, logo, chequePhoto
         <table className="inv-table"><thead><tr><th>ردیف</th><th>کد</th><th>شرح کالا / دسته‌بندی</th><th>رنگ</th><th>تعداد</th><th>فی</th><th>تخفیف</th><th>مبلغ کل</th></tr></thead>
           <tbody>{lines.length ? lines.map((line, index) => <tr key={`${line.productId || line.name}-${index}`}><td>{formatRial(before + index + 1)}</td><td>—</td><td>{line.name}</td><td>{line.color || '—'}</td><td>{formatRial(line.quantity)}</td><td>{formatRial(line.unitPriceRial)}</td><td>{formatRial(line.discountRial ?? 0)}</td><td>{formatRial(line.totalRial)}</td></tr>) : <tr><td colSpan={8}>هنوز کالایی انتخاب نشده است.</td></tr>}</tbody></table>
         {last && <div className="inv-final">
-          <div className="inv-summary"><div><span>جمع کل</span><b>{formatRial(subtotal)}</b></div><div><span>تخفیف</span><b>{formatRial(discount)}</b></div><div><span>هزینه ارسال</span><b>{formatRial(receipt.shippingRial ?? 0)}</b></div><div className="inv-grand"><span>مبلغ نهایی</span><b>{formatRial(receipt.totalRial)}</b></div><div><span>مبلغ پرداختی</span><b>{formatRial(receipt.paidRial ?? 0)}</b></div><div><span>مانده</span><b>{formatRial(receipt.balanceRial ?? receipt.totalRial)}</b></div><div className="inv-sign">امضای خریدار</div><div className="inv-sign">امضای فروشنده</div></div>
+          <div className="inv-summary"><div><span>جمع کل</span><b>{formatRial(subtotal)}</b></div><div><span>تخفیف</span><b>{formatRial(discount)}</b></div><div><span>هزینه ارسال</span><b>{formatRial(receipt.shippingRial ?? 0)}</b></div><div className="inv-grand"><span>مبلغ نهایی</span><b>{formatRial(receipt.totalRial)}</b></div>{returned > 0 && <><div><span>مرجوعی ثبت‌شده</span><b>{formatRial(returned)}</b></div><div><span>خالص پس از مرجوعی</span><b>{formatRial(netTotal)}</b></div></>}<div><span>مبلغ پرداختی</span><b>{formatRial(receipt.paidRial ?? 0)}</b></div>{refunded > 0 && <div><span>بازپرداخت‌شده</span><b>{formatRial(refunded)}</b></div>}<div><span>مانده</span><b>{formatRial(receipt.balanceRial ?? Math.max(0, netTotal - netPaid))}</b></div>{refundDue > 0 && <div><span>بازپرداخت باز</span><b>{formatRial(refundDue)}</b></div>}<div className="inv-sign">امضای خریدار</div><div className="inv-sign">امضای فروشنده</div></div>
           <div className="inv-conditions">{proforma ? <><h3>پیش‌فاکتور</h3><p>این سند پیشنهاد فروش است. کالا تحویل نشده و پرداختی ثبت نشده است. فروش و کسر موجودی پس از تأیید و تبدیل این سند به فاکتور قطعی انجام می‌شود.</p></> : <><h3>شرایط فروش و تحویل کالا</h3><ol>{brand.conditions.map((text, index) => <li key={index}>{text}</li>)}</ol><strong>لطفاً پیش از تأیید سفارش، مشخصات و تعداد کالاها را بررسی فرمایید.</strong><p>با تشکر از اعتماد و همکاری شما.</p></>}</div>
         </div>}
         <footer className="inv-social"><span>➤ {brand.socialTelegram}</span><span>◎ {brand.socialInstagram}</span><span>➤ {brand.socialContact}</span></footer>
