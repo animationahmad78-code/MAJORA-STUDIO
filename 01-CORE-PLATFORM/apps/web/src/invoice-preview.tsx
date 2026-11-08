@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import JSZip from 'jszip';
 import type { InvoiceReceipt } from '@majora/database';
 import { InvoiceDocument, type InvoiceBrand, type PaperSize } from '../../mobile/src/invoice-document';
@@ -47,13 +47,16 @@ export function InvoicePreview({ id, close }: { id: string; close: () => void })
     const handler = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) close(); };
     window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler);
   }, [close, busy]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const node = previewRef.current;
     if (!node) return;
+    const measure = () => setAvailableWidth(node.clientWidth);
+    measure();
     const observer = new ResizeObserver(entries => setAvailableWidth(entries[0].contentRect.width));
     observer.observe(node);
-    return () => observer.disconnect();
-  }, [invoice]);
+    window.addEventListener('resize', measure);
+    return () => { observer.disconnect(); window.removeEventListener('resize', measure); };
+  }, [invoice, fallbackBrand]);
 
   let brandView = fallbackBrand;
   if (invoice?.brandSnapshotJson) {
