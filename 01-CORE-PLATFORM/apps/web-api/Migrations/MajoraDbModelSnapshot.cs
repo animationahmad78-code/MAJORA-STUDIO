@@ -451,6 +451,68 @@ namespace Majora.WebApi.Migrations
                     b.ToTable("Plans");
                 });
 
+            modelBuilder.Entity("Majora.WebApi.PriceBatch", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<decimal>("Percent")
+                        .HasPrecision(8, 3)
+                        .HasColumnType("decimal(8,3)");
+
+                    b.Property<DateTime?>("RevertedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.ToTable("PriceBatches");
+                });
+
+            modelBuilder.Entity("Majora.WebApi.PriceBatchLine", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("NameSnapshot")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<long>("NewPriceRial")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("OldPriceRial")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("PriceBatchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PriceBatchId", "ProductId")
+                        .IsUnique();
+
+                    b.ToTable("PriceBatchLines");
+                });
+
             modelBuilder.Entity("Majora.WebApi.Product", b =>
                 {
                     b.Property<Guid>("Id")
@@ -468,6 +530,9 @@ namespace Majora.WebApi.Migrations
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<bool>("CostKnown")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("HasPhoto")
                         .HasColumnType("bit");
 
                     b.Property<string>("Name")
@@ -498,6 +563,28 @@ namespace Majora.WebApi.Migrations
                         .IsUnique();
 
                     b.ToTable("Products");
+                });
+
+            modelBuilder.Entity("Majora.WebApi.ProductPhoto", b =>
+                {
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<byte[]>("Bytes")
+                        .IsRequired()
+                        .HasColumnType("varbinary(max)");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("ProductId");
+
+                    b.ToTable("ProductPhotos");
                 });
 
             modelBuilder.Entity("Majora.WebApi.Purchase", b =>
@@ -869,6 +956,24 @@ namespace Majora.WebApi.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("Majora.WebApi.PriceBatchLine", b =>
+                {
+                    b.HasOne("Majora.WebApi.PriceBatch", null)
+                        .WithMany("Lines")
+                        .HasForeignKey("PriceBatchId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Majora.WebApi.ProductPhoto", b =>
+                {
+                    b.HasOne("Majora.WebApi.Product", null)
+                        .WithOne()
+                        .HasForeignKey("Majora.WebApi.ProductPhoto", "ProductId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("Majora.WebApi.PurchaseLine", b =>
                 {
                     b.HasOne("Majora.WebApi.Purchase", null)
@@ -888,6 +993,11 @@ namespace Majora.WebApi.Migrations
                 });
 
             modelBuilder.Entity("Majora.WebApi.Invoice", b =>
+                {
+                    b.Navigation("Lines");
+                });
+
+            modelBuilder.Entity("Majora.WebApi.PriceBatch", b =>
                 {
                     b.Navigation("Lines");
                 });
