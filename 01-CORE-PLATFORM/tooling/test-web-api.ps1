@@ -69,6 +69,9 @@ try {
   $products = Invoke-RestMethod "$base/api/merchant/products" -WebSession $ownerSession
   if ($products[0].stock -ne 3) { throw 'Stock was deducted more than once or not at all' }
   $proforma = PostJson '/merchant/invoices' @{idempotencyKey="proforma-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='proforma';paidRial=0;lines=@(@{productId=$product.id;quantity=99})} $ownerSession
+  $insufficientConversionBlocked = $false
+  try { $null = PostJson "/merchant/invoices/$($proforma.id)/convert" @{} $ownerSession } catch { $insufficientConversionBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $insufficientConversionBlocked) { throw 'Proforma conversion ignored current stock' }
   $dashboard = Invoke-RestMethod "$base/api/merchant/dashboard" -WebSession $ownerSession
   if ($dashboard.sales30Rial -ne 1000000 -or $dashboard.invoiceCount30 -ne 1) { throw 'Proforma was counted as realized sale' }
   $overstockBlocked = $false
@@ -203,6 +206,14 @@ try {
   if ($discountReturn1.amountRial -ne 667 -or $discountReturn2.amountRial -ne 1335 -or ($discountReturn1.amountRial + $discountReturn2.amountRial) -ne 2002) { throw 'Discounted partial returns did not sum to the paid net amount' }
   $discountAfterReturns = Invoke-RestMethod "$base/api/merchant/invoices/$($discountInvoice.id)" -WebSession $ownerSession
   if ($discountAfterReturns.returnedRial -ne 2002 -or $discountAfterReturns.lines[0].returnedQuantity -ne 3) { throw 'Discounted return ledger mismatch' }
+  $convertible = PostJson '/merchant/invoices' @{idempotencyKey="convertible-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='proforma';paidRial=0;lines=@(@{productId=$discountProduct.id;quantity=2;discountPercent=10})} $ownerSession
+  $beforeConversion = Invoke-RestMethod "$base/api/merchant/products?q=کالای تخفیف آزمون" -WebSession $ownerSession
+  $converted = PostJson "/merchant/invoices/$($convertible.id)/convert" @{} $ownerSession
+  $afterConversion = Invoke-RestMethod "$base/api/merchant/products?q=کالای تخفیف آزمون" -WebSession $ownerSession
+  if ($beforeConversion[0].stock -ne 3 -or $afterConversion[0].stock -ne 1 -or $converted.paymentStatus -ne 'unpaid' -or $converted.totalRial -ne 1802 -or $converted.number -ne $convertible.number) { throw 'Proforma conversion stock, price or identity mismatch' }
+  $secondConversionBlocked = $false
+  try { $null = PostJson "/merchant/invoices/$($convertible.id)/convert" @{} $ownerSession } catch { $secondConversionBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $secondConversionBlocked) { throw 'Proforma was converted twice' }
   $invalidDiscountBlocked = $false
   try { $null = PostJson '/merchant/invoices' @{idempotencyKey="invalid-discount-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='proforma';paidRial=0;lines=@(@{productId=$discountProduct.id;quantity=1;discountPercent=101})} $ownerSession } catch { $invalidDiscountBlocked = $_.Exception.Response.StatusCode -eq 400 }
   if (-not $invalidDiscountBlocked) { throw 'Discount over 100 percent was accepted' }
@@ -219,7 +230,7 @@ try {
   $suspended = $false
   try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession } catch { $suspended = $_.Exception.Response.StatusCode -eq 403 }
   if (-not $suspended) { throw 'Suspended tenant still has access' }
-  Write-Output 'PASS: login, subscription, AI key/role/endpoint/fallback, product/photo, customer/CSV, invoice/stock/payment/price-quote/selective discount, discounted partial returns/refund/idempotency/accounting, price batch/revert/isolation, archive/restore/open balance guard, purchase/expense/cost estimate, staff role, CSRF, suspension'
+  Write-Output 'PASS: login, subscription, AI key/role/endpoint/fallback, product/photo, customer/CSV, invoice/stock/payment/price-quote/selective discount/proforma conversion, discounted partial returns/refund/idempotency/accounting, price batch/revert/isolation, archive/restore/open balance guard, purchase/expense/cost estimate, staff role, CSRF, suspension'
 } finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
   Write-Output "Test log: $log"

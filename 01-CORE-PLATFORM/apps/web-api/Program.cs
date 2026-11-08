@@ -536,6 +536,30 @@ merchant.MapPost("/invoices", async (InvoiceRequest body, MajoraDb db, HttpConte
     catch (DbUpdateException) { return Fail("هم‌زمانی در ثبت رخ داد؛ درخواست را دوباره بررسی کنید.", 409); }
     return Results.Created($"/api/merchant/invoices/{invoice.Id}", new { invoice.Id, invoice.Number, invoice.TotalRial, invoice.PaidRial });
 });
+merchant.MapPost("/invoices/{id:guid}/convert", async (Guid id, MajoraDb db, HttpContext c) =>
+{
+    if (!CanSell(c.User)) return Results.Forbid();
+    var tid = TenantId(c.User);
+    await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    var invoice = await db.Invoices.Include(x => x.Lines).SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && !x.Archived && x.Status == "issued");
+    if (invoice is null) return Results.NotFound();
+    if (invoice.PaymentStatus != "proforma") return Fail("این سند دیگر پیش‌فاکتور فعال نیست.", 409);
+    foreach (var line in invoice.Lines)
+    {
+        if (line.ProductId is not Guid productId) return Fail("کالای این پیش‌فاکتور دیگر در دسترس نیست.", 409);
+        var product = await db.Products.SingleOrDefaultAsync(x => x.Id == productId && x.TenantId == tid && !x.Archived);
+        if (product is null || product.Stock < line.Quantity) return Fail($"موجودی «{line.NameSnapshot}» برای تبدیل پیش‌فاکتور کافی نیست.", 409);
+        product.Stock = checked(product.Stock - line.Quantity);
+        line.UnitCostRialSnapshot = product.AverageCostRial;
+        line.CostKnown = product.CostKnown;
+        db.StockMovements.Add(new StockMovement { TenantId = tid, ProductId = productId, InvoiceId = invoice.Id, Delta = -line.Quantity, Reason = "proforma-converted" });
+    }
+    invoice.PaymentStatus = invoice.TotalRial == 0 ? "paid" : "unpaid";
+    Audit(db, c.User, tid, "invoice.convert-proforma", "invoice", invoice.Id, $"number={invoice.Number}");
+    try { await db.SaveChangesAsync(); await tx.CommitAsync(); }
+    catch (DbUpdateException) { return Fail("هم‌زمانی در تبدیل رخ داد؛ موجودی را بررسی کنید.", 409); }
+    return Results.Ok(new { invoice.Id, invoice.Number, invoice.TotalRial, invoice.PaymentStatus });
+});
 merchant.MapPost("/invoices/{id:guid}/payments", async (Guid id, PaymentRequest body, MajoraDb db, HttpContext c) =>
 {
     if (!CanSell(c.User)) return Results.Forbid();
