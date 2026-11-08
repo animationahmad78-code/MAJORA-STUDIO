@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { discountedLineRial, percentThousandths } from '../apps/web/src/invoice-quote';
+import { discountedLineRial, percentThousandths, rialDigits } from '../apps/web/src/invoice-quote';
 
 describe('invoice selective discount', () => {
   it('accepts Persian digits and at most three decimal places', () => {
@@ -15,5 +15,10 @@ describe('invoice selective discount', () => {
     expect(discountedLineRial(1001, 1, 12500)).toBe(876);
     expect(discountedLineRial(1001, 1, 0)).toBe(1001);
     expect(discountedLineRial(1001, 1, 100000)).toBe(0);
+  });
+
+  it('reads grouped Persian Rial input for a manual invoice line', () => {
+    expect(rialDigits('۱٬۲۳۴٬۵۶۷')).toBe('1234567');
+    expect(rialDigits('٠٠١,٢٣٤')).toBe('1234');
   });
 });

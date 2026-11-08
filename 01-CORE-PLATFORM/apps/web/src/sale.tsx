@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, rial, type Customer, type Product } from './api';
 import { JalaliDateField, jalaliToIsoDate } from '../../mobile/src/jalali-date';
-import { discountedLineRial, percentThousandths } from './invoice-quote';
+import { discountedLineRial, percentThousandths, rialDigits } from './invoice-quote';
 import './sale.css';
 
 type Stage = 'customer' | 'products' | 'review';
-type CartLine = { product: Product; quantity: number };
+type CartLine = { product: Product; quantity: number; manual?: boolean };
 type ProductMeta = { categories: string[] };
 
 export function SaleWorkspace({ onDone }: { onDone: () => void }) {
@@ -21,6 +21,9 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
   const [category, setCategory] = useState('');
   const [page, setPage] = useState(1);
   const [cart, setCart] = useState<Record<string, CartLine>>({});
+  const [manualName, setManualName] = useState('');
+  const [manualPrice, setManualPrice] = useState('');
+  const [manualQuantity, setManualQuantity] = useState('1');
   const [paymentStatus, setPaymentStatus] = useState('');
   const [paid, setPaid] = useState('');
   const [due, setDue] = useState('');
@@ -53,12 +56,24 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
   const count = selected.reduce((sum, x) => sum + x.quantity, 0);
   const quantity = (product: Product, next: number) => {
     if (!Number.isSafeInteger(next) || next < 0) return;
+    if (!Number.isSafeInteger(product.priceRial * next)) { setError('مبلغ این ردیف از حد محاسبهٔ دقیق مرورگر فراتر است.'); return; }
     setCart(previous => {
       const updated = { ...previous };
       if (next === 0) delete updated[product.id];
-      else updated[product.id] = { product, quantity: Math.min(next, product.stock) };
+      else updated[product.id] = { product, quantity: Math.min(next, product.stock), manual: previous[product.id]?.manual };
       return updated;
     });
+  };
+  const addManual = () => {
+    const price = Number(manualPrice);
+    const count = Number(manualQuantity);
+    if (!manualName.trim() || manualName.trim().length > 200 || !Number.isSafeInteger(price) || price < 0 || !Number.isSafeInteger(count) || count < 1 || count > 1_000_000 || !Number.isSafeInteger(price * count)) {
+      setError('نام، قیمت ریالی و تعداد قلم دستی را درست وارد کنید.'); return;
+    }
+    const id = `manual-${crypto.randomUUID()}`;
+    const product: Product = { id, name: manualName.trim(), sku: '', category: 'قلم دستی', priceRial: price, averageCostRial: 0, costKnown: false, stock: 1_000_000, hasPhoto: false, updatedAt: '' };
+    setCart(previous => ({ ...previous, [id]: { product, quantity: count, manual: true } }));
+    setManualName(''); setManualPrice(''); setManualQuantity('1'); setError('');
   };
   const issue = async () => {
     if (!paymentStatus || !selected.length || busy) return;
@@ -74,7 +89,9 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
         customerName: customer ? '' : customerName.trim(), customerPhone: customer ? '' : customerPhone.trim(),
         paymentStatus, paidRial, dueAt: dueIso ? new Date(`${dueIso}T12:00:00`).toISOString() : null,
         expectedTotalRial: total,
-        lines: selected.map(x => ({ productId: x.product.id, quantity: x.quantity, expectedUnitPriceRial: x.product.priceRial, discountPercent: lineBasis(x.product.id) / 1000 })),
+        lines: selected.map(x => x.manual
+          ? { productId: null, name: x.product.name, unitPriceRial: x.product.priceRial, quantity: x.quantity, discountPercent: lineBasis(x.product.id) / 1000 }
+          : { productId: x.product.id, quantity: x.quantity, expectedUnitPriceRial: x.product.priceRial, discountPercent: lineBasis(x.product.id) / 1000 }),
       });
       requestKey.current = crypto.randomUUID();
       onDone();
@@ -88,7 +105,9 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
       <section className="card"><h2>مشتری جدید</h2><p className="hint">اگر مشتری قبلی را انتخاب نکردید، نام مشتری تازه را وارد کنید؛ همراه فاکتور به باشگاه مشتریان افزوده می‌شود.</p><label>نام و نام خانوادگی<input value={customerName} onChange={e => { setCustomerName(e.target.value); setCustomer(null); }} maxLength={200}/></label><label>شمارهٔ تماس<input value={customerPhone} onChange={e => { setCustomerPhone(e.target.value); setCustomer(null); }} inputMode="tel" dir="ltr" maxLength={30}/></label><button className="primary full" disabled={!customer && !customerName.trim()} onClick={() => { setError(''); setStage('products'); }}>ادامه به انتخاب کالا</button></section></div>}
     {stage === 'products' && <div className="sale-layout"><section className="card"><div className="card-head"><h2>انتخاب کالا</h2></div><div className="price-filters"><label>جست‌وجوی نام یا کد<input value={query} onChange={e => { setQuery(e.target.value); setPage(1); }} placeholder="نام یا کد کالا"/></label><label>دسته<select value={category} onChange={e => { setCategory(e.target.value); setPage(1); }}><option value="">همهٔ دسته‌ها</option>{categories.filter(Boolean).map(x => <option key={x} value={x}>{x}</option>)}</select></label></div>
       {items.length ? <div className="product-grid sale-product-grid">{items.map(p => <article className="product-tile" key={p.id}><div className="tile-icon">{p.hasPhoto ? <img loading="lazy" src={`/api/merchant/products/${p.id}/photo?v=${encodeURIComponent(p.updatedAt)}`} alt={`تصویر ${p.name}`}/> : <span>بدون عکس</span>}</div><strong>{p.name}</strong><small>{p.category || 'بدون دسته'} · موجودی {p.stock}</small><b>{rial(p.priceRial)}</b><div className="quantity"><button aria-label={`کم کردن ${p.name}`} disabled={!cart[p.id]} onClick={() => quantity(p, (cart[p.id]?.quantity ?? 0) - 1)}>−</button><input aria-label={`تعداد ${p.name}`} type="number" inputMode="numeric" min="0" max={p.stock} value={cart[p.id]?.quantity ?? 0} onChange={e => quantity(p, Number(e.target.value))}/><button aria-label={`افزودن ${p.name}`} disabled={(cart[p.id]?.quantity ?? 0) >= p.stock} onClick={() => quantity(p, (cart[p.id]?.quantity ?? 0) + 1)}>＋</button></div></article>)}</div> : <div className="empty">کالایی با این جست‌وجو پیدا نشد.</div>}
-      <div className="price-pager"><button disabled={page === 1} onClick={() => setPage(page - 1)}>صفحهٔ قبل</button><span>صفحهٔ {page}</span><button disabled={items.length < 50} onClick={() => setPage(page + 1)}>صفحهٔ بعد</button></div></section><section className="card sale-cart"><h2>سبد فاکتور</h2>{selected.length ? <div className="receipt">{selected.map(x => <div key={x.product.id}><span>{x.product.name} × {x.quantity}</span><b>{rial(x.product.priceRial * x.quantity)}</b></div>)}</div> : <div className="empty">هنوز کالایی انتخاب نشده است.</div>}<p className="receipt-total">{count} عدد · {rial(total)}</p><div className="form-actions"><button onClick={() => setStage('customer')}>بازگشت</button><button className="primary" disabled={!selected.length} onClick={() => { setError(''); setStage('review'); }}>بررسی فاکتور</button></div></section></div>}
+      <div className="price-pager"><button disabled={page === 1} onClick={() => setPage(page - 1)}>صفحهٔ قبل</button><span>صفحهٔ {page}</span><button disabled={items.length < 50} onClick={() => setPage(page + 1)}>صفحهٔ بعد</button></div>
+      <details className="sale-manual"><summary>＋ افزودن قلم دستی بدون ثبت در کالاها</summary><div className="sale-manual-fields"><label>نام قلم<input value={manualName} maxLength={200} onChange={e => setManualName(e.target.value)} placeholder="نام کالا یا خدمت"/></label><label>قیمت هر واحد (ریال)<input inputMode="numeric" dir="ltr" value={manualPrice ? BigInt(manualPrice).toLocaleString('en-US') : ''} onChange={e => setManualPrice(rialDigits(e.target.value))} placeholder="0"/></label><label>تعداد<input inputMode="numeric" type="number" min="1" max="1000000" value={manualQuantity} onChange={e => setManualQuantity(e.target.value)}/></label><button className="primary" onClick={addManual}>افزودن به سبد</button></div><small>قلم دستی در فهرست کالا و موجودی انبار ثبت یا کسر نمی‌شود.</small></details></section>
+      <section className="card sale-cart"><h2>سبد فاکتور</h2>{selected.length ? <div className="receipt sale-cart-lines">{selected.map(x => <div className="sale-cart-line" key={x.product.id}><span>{x.product.name}{x.manual ? ' · دستی' : ''}</span><div className="quantity"><button aria-label={`کم کردن ${x.product.name}`} onClick={() => quantity(x.product, x.quantity - 1)}>−</button><input aria-label={`تعداد سبد ${x.product.name}`} type="number" inputMode="numeric" min="0" max={x.product.stock} value={x.quantity} onChange={e => quantity(x.product, Number(e.target.value))}/><button aria-label={`افزودن ${x.product.name}`} disabled={x.quantity >= x.product.stock} onClick={() => quantity(x.product, x.quantity + 1)}>＋</button></div><b>{rial(x.product.priceRial * x.quantity)}</b></div>)}</div> : <div className="empty">هنوز کالایی انتخاب نشده است.</div>}<p className="receipt-total">{count} عدد · {rial(total)}</p><div className="form-actions"><button onClick={() => setStage('customer')}>بازگشت</button><button className="primary" disabled={!selected.length} onClick={() => { setError(''); setStage('review'); }}>بررسی فاکتور</button></div></section></div>}
     {stage === 'review' && <section className="card sale-review"><h2>بررسی نهایی</h2><p><strong>مشتری:</strong> {customer?.name ?? customerName} · {customer?.phone ?? customerPhone}</p><div className="receipt">{selected.map(x => <div key={x.product.id}><span>{x.product.name} × {x.quantity}</span><b>{rial(lineTotal(x))}</b></div>)}</div>
       <div className="sale-discount"><label className="sale-discount-toggle"><input type="checkbox" checked={discountEnabled} onChange={e => setDiscountEnabled(e.target.checked)}/> اعمال تخفیف در همین فاکتور</label>{discountEnabled && <><div className="sale-discount-controls"><label>درصد تخفیف<input type="text" inputMode="decimal" value={discountPercent} onChange={e => setDiscountPercent(e.target.value)} placeholder="مثلاً ۱۰ یا ۲٫۵"/></label><label>روی کالاها<select value={discountScope} onChange={e => setDiscountScope(e.target.value as 'all' | 'selected')}><option value="all">همهٔ اقلام</option><option value="selected">اقلام انتخابی</option></select></label></div>{discountBasis === null && <small className="field-error">درصد بین ۰ تا ۱۰۰ با حداکثر سه رقم اعشار وارد کنید.</small>}{discountScope === 'selected' && <div className="sale-discount-items">{selected.map(x => <label key={x.product.id}><input type="checkbox" checked={discountProducts.includes(x.product.id)} onChange={e => setDiscountProducts(previous => e.target.checked ? [...previous, x.product.id] : previous.filter(id => id !== x.product.id))}/>{x.product.name}</label>)}</div>}</>}</div>
       <p className="receipt-total">{discountEnabled && <><span>جمع پیش از تخفیف: {rial(subtotal)}</span><span>تخفیف: {rial(discountRial)}</span></>}<strong>مبلغ نهایی: {rial(total)}</strong></p>

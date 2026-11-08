@@ -214,6 +214,18 @@ try {
   $secondConversionBlocked = $false
   try { $null = PostJson "/merchant/invoices/$($convertible.id)/convert" @{} $ownerSession } catch { $secondConversionBlocked = $_.Exception.Response.StatusCode -eq 409 }
   if (-not $secondConversionBlocked) { throw 'Proforma was converted twice' }
+  $manualBody = @{idempotencyKey="manual-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='paid';paidRial=1752;expectedTotalRial=1752;lines=@(@{productId=$null;name='قلم آزاد آزمون';unitPriceRial=1001;quantity=2;discountPercent=12.5})}
+  $manualInvoice = PostJson '/merchant/invoices' $manualBody $ownerSession
+  $manualDetail = Invoke-RestMethod "$base/api/merchant/invoices/$($manualInvoice.id)" -WebSession $ownerSession
+  if ($manualDetail.totalRial -ne 1752 -or $manualDetail.lines[0].productId -ne $null -or $manualDetail.lines[0].nameSnapshot -ne 'قلم آزاد آزمون' -or $manualDetail.lines[0].totalRial -ne 1752) { throw 'Manual invoice line amount or snapshot mismatch' }
+  $manualReturn = PostJson "/merchant/invoices/$($manualInvoice.id)/returns" @{idempotencyKey="manual-return-$id";reason='مرجوعی قلم آزاد';lines=@(@{invoiceLineId=$manualDetail.lines[0].id;quantity=1;restock=$false})} $ownerSession
+  if ($manualReturn.amountRial -ne 876) { throw 'Manual discounted line return amount mismatch' }
+  $manualRestockBlocked = $false
+  try { $null = PostJson "/merchant/invoices/$($manualInvoice.id)/returns" @{idempotencyKey="manual-restock-$id";reason='نباید به انبار برگردد';lines=@(@{invoiceLineId=$manualDetail.lines[0].id;quantity=1;restock=$true})} $ownerSession } catch { $manualRestockBlocked = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $manualRestockBlocked) { throw 'Manual line was allowed to restock' }
+  $manualProforma = PostJson '/merchant/invoices' @{idempotencyKey="manual-proforma-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='proforma';paidRial=0;lines=@(@{productId=$null;name='خدمت آزاد';unitPriceRial=1000;quantity=1})} $ownerSession
+  $manualConverted = PostJson "/merchant/invoices/$($manualProforma.id)/convert" @{} $ownerSession
+  if ($manualConverted.paymentStatus -ne 'unpaid' -or $manualConverted.totalRial -ne 1000) { throw 'Manual-only proforma conversion failed' }
   $invalidDiscountBlocked = $false
   try { $null = PostJson '/merchant/invoices' @{idempotencyKey="invalid-discount-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='proforma';paidRial=0;lines=@(@{productId=$discountProduct.id;quantity=1;discountPercent=101})} $ownerSession } catch { $invalidDiscountBlocked = $_.Exception.Response.StatusCode -eq 400 }
   if (-not $invalidDiscountBlocked) { throw 'Discount over 100 percent was accepted' }
@@ -230,7 +242,7 @@ try {
   $suspended = $false
   try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession } catch { $suspended = $_.Exception.Response.StatusCode -eq 403 }
   if (-not $suspended) { throw 'Suspended tenant still has access' }
-  Write-Output 'PASS: login, subscription, AI key/role/endpoint/fallback, product/photo, customer/CSV, invoice/stock/payment/price-quote/selective discount/proforma conversion, discounted partial returns/refund/idempotency/accounting, price batch/revert/isolation, archive/restore/open balance guard, purchase/expense/cost estimate, staff role, CSRF, suspension'
+  Write-Output 'PASS: login, subscription, AI key/role/endpoint/fallback, product/photo, customer/CSV, invoice/stock/payment/price-quote/selective discount/manual lines/proforma conversion, discounted partial returns/refund/idempotency/accounting, price batch/revert/isolation, archive/restore/open balance guard, purchase/expense/cost estimate, staff role, CSRF, suspension'
 } finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
   Write-Output "Test log: $log"

@@ -1,5 +1,13 @@
+function latinDigits(input: string): string {
+  return input.replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 1776)).replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 1632));
+}
+
+export function rialDigits(input: string): string {
+  return latinDigits(input).replace(/[^0-9]/g, '').replace(/^0+(?=\d)/, '');
+}
+
 export function percentThousandths(input: string): number | null {
-  const normalized = input.replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 1776)).replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 1632)).replace('٫', '.').trim();
+  const normalized = latinDigits(input).replace('٫', '.').trim();
   if (!/^\d+(?:\.\d{1,3})?$/.test(normalized)) return null;
   const percent = Number(normalized);
   return percent >= 0 && percent <= 100 ? Math.round(percent * 1000) : null;

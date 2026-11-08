@@ -497,7 +497,8 @@ merchant.MapPost("/invoices", async (InvoiceRequest body, MajoraDb db, HttpConte
     if (!CanSell(c.User)) return Results.Forbid();
     var tid = TenantId(c.User);
     if (string.IsNullOrWhiteSpace(body.IdempotencyKey) || body.IdempotencyKey.Length > 100 || body.Lines.Count is < 1 or > 200) return Fail("شناسهٔ درخواست یا اقلام نامعتبر است.");
-    if (body.Lines.Select(x => x.ProductId).Distinct().Count() != body.Lines.Count) return Fail("یک کالا بیش از یک بار در فاکتور انتخاب شده است.");
+    var catalogIds = body.Lines.Where(x => x.ProductId is not null).Select(x => x.ProductId).ToList();
+    if (catalogIds.Distinct().Count() != catalogIds.Count) return Fail("یک کالا بیش از یک بار در فاکتور انتخاب شده است.");
     if (body.PaymentStatus is not ("paid" or "partial" or "unpaid" or "proforma")) return Fail("وضعیت پرداخت لازم است.");
     await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
     var existing = await db.Invoices.SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == body.IdempotencyKey);
@@ -518,14 +519,30 @@ merchant.MapPost("/invoices", async (InvoiceRequest body, MajoraDb db, HttpConte
     {
         if (item.Quantity < 1 || item.Quantity > 1_000_000) return Fail("تعداد کالا نامعتبر است.");
         if (item.DiscountPercent < 0 || item.DiscountPercent > 100 || decimal.Round(item.DiscountPercent, 3) != item.DiscountPercent) return Fail("درصد تخفیف باید بین صفر تا صد و حداکثر سه رقم اعشار باشد.");
-        var p = await db.Products.SingleOrDefaultAsync(x => x.Id == item.ProductId && x.TenantId == tid && !x.Archived); if (p is null) return Fail("کالا یافت نشد.");
-        if (item.ExpectedUnitPriceRial is long expectedPrice && p.PriceRial != expectedPrice) return Fail($"قیمت «{p.Name}» تغییر کرده است؛ فهرست کالا را تازه کنید.", 409);
-        if (body.PaymentStatus != "proforma" && p.Stock < item.Quantity) return Fail($"موجودی «{p.Name}» کافی نیست.", 409);
-        var gross = checked(p.PriceRial * item.Quantity);
+        Product? p = null;
+        long unitPrice;
+        string name;
+        if (item.ProductId is Guid productId)
+        {
+            p = await db.Products.SingleOrDefaultAsync(x => x.Id == productId && x.TenantId == tid && !x.Archived);
+            if (p is null) return Fail("کالا یافت نشد.");
+            if (item.ExpectedUnitPriceRial is long expectedPrice && p.PriceRial != expectedPrice) return Fail($"قیمت «{p.Name}» تغییر کرده است؛ فهرست کالا را تازه کنید.", 409);
+            if (body.PaymentStatus != "proforma" && p.Stock < item.Quantity) return Fail($"موجودی «{p.Name}» کافی نیست.", 409);
+            unitPrice = p.PriceRial;
+            name = p.Name;
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(item.Name) || item.Name.Trim().Length > 200 || item.UnitPriceRial is not long manualPrice || manualPrice < 0)
+                return Fail("نام و قیمت قلم دستی نامعتبر است.");
+            unitPrice = manualPrice;
+            name = item.Name.Trim();
+        }
+        var gross = checked(unitPrice * item.Quantity);
         var discount = checked((long)decimal.Round(gross * item.DiscountPercent / 100m, 0, MidpointRounding.AwayFromZero));
         var total = checked(gross - discount); invoice.TotalRial = checked(invoice.TotalRial + total);
-        invoice.Lines.Add(new InvoiceLine { ProductId = p.Id, NameSnapshot = p.Name, UnitPriceRial = p.PriceRial, Quantity = item.Quantity, TotalRial = total, UnitCostRialSnapshot = p.AverageCostRial, CostKnown = p.CostKnown });
-        if (body.PaymentStatus != "proforma") { p.Stock -= item.Quantity; db.StockMovements.Add(new StockMovement { TenantId = tid, ProductId = p.Id, InvoiceId = invoice.Id, Delta = -item.Quantity, Reason = "invoice-issued" }); }
+        invoice.Lines.Add(new InvoiceLine { ProductId = p?.Id, NameSnapshot = name, UnitPriceRial = unitPrice, Quantity = item.Quantity, TotalRial = total, UnitCostRialSnapshot = p?.AverageCostRial ?? 0, CostKnown = p?.CostKnown ?? false });
+        if (body.PaymentStatus != "proforma" && p is not null) { p.Stock -= item.Quantity; db.StockMovements.Add(new StockMovement { TenantId = tid, ProductId = p.Id, InvoiceId = invoice.Id, Delta = -item.Quantity, Reason = "invoice-issued" }); }
     }
     if (body.ExpectedTotalRial is long expectedTotal && expectedTotal != invoice.TotalRial) return Fail("جمع فاکتور با قیمت فعلی کالاها سازگار نیست؛ فهرست را تازه کنید.", 409);
     if (body.PaidRial < 0 || body.PaidRial > invoice.TotalRial || (body.PaymentStatus == "paid" && body.PaidRial != invoice.TotalRial) || (body.PaymentStatus == "partial" && (body.PaidRial <= 0 || body.PaidRial == invoice.TotalRial)) || (body.PaymentStatus is "unpaid" or "proforma" && body.PaidRial != 0)) return Fail("مبلغ پرداخت با وضعیت فاکتور سازگار نیست.");
@@ -546,7 +563,7 @@ merchant.MapPost("/invoices/{id:guid}/convert", async (Guid id, MajoraDb db, Htt
     if (invoice.PaymentStatus != "proforma") return Fail("این سند دیگر پیش‌فاکتور فعال نیست.", 409);
     foreach (var line in invoice.Lines)
     {
-        if (line.ProductId is not Guid productId) return Fail("کالای این پیش‌فاکتور دیگر در دسترس نیست.", 409);
+        if (line.ProductId is not Guid productId) continue;
         var product = await db.Products.SingleOrDefaultAsync(x => x.Id == productId && x.TenantId == tid && !x.Archived);
         if (product is null || product.Stock < line.Quantity) return Fail($"موجودی «{line.NameSnapshot}» برای تبدیل پیش‌فاکتور کافی نیست.", 409);
         product.Stock = checked(product.Stock - line.Quantity);
@@ -818,7 +835,7 @@ public sealed record ProductPhotoRequest(string DataUrl);
 public sealed record PriceBatchRequest(string IdempotencyKey, decimal Percent, bool AllProducts, List<Guid>? ProductIds);
 public sealed record CustomerRequest(string Name, string Phone);
 public sealed record InvoiceRequest(string IdempotencyKey, Guid? CustomerId, string CustomerName, string CustomerPhone, string PaymentStatus, long PaidRial, DateTime? DueAt, List<InvoiceLineRequest> Lines, long? ExpectedTotalRial = null);
-public sealed record InvoiceLineRequest(Guid ProductId, long Quantity, long? ExpectedUnitPriceRial = null, decimal DiscountPercent = 0);
+public sealed record InvoiceLineRequest(Guid? ProductId, long Quantity, long? ExpectedUnitPriceRial = null, decimal DiscountPercent = 0, string? Name = null, long? UnitPriceRial = null);
 public sealed record PaymentRequest(string IdempotencyKey, long AmountRial, string Method, string? Reference);
 public sealed record SalesReturnRequest(string IdempotencyKey, string Reason, List<SalesReturnLineRequest> Lines);
 public sealed record SalesReturnLineRequest(Guid InvoiceLineId, long Quantity, bool Restock);
