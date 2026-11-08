@@ -23,12 +23,12 @@ export function Invoices({ run, onReturn }: { run: (action: () => Promise<unknow
     <section className="card"><div className="card-head"><h2>فهرست فاکتورها</h2><input className="search" value={query} onChange={e => setQuery(e.target.value)} placeholder="شماره، نام یا تلفن" aria-label="جست‌وجوی فاکتور"/></div>
       {items.length ? <div className="list">{items.map(invoice => <div className="list-row invoice-list-row" key={invoice.id}>
         <div className={'status-dot ' + invoice.paymentStatus} aria-hidden="true"/>
-        <div><strong>فاکتور {invoice.number} · {invoice.customerName}</strong><small>{dateFa(invoice.issuedAt)} · {statusLabel[invoice.paymentStatus] ?? invoice.paymentStatus}</small></div>
-        <div className="money"><b>{rial(invoice.totalRial - invoice.returnedRial)}</b><small>مانده: {rial(receivable(invoice))}{refundDue(invoice) > 0 ? ` · بازپرداخت: ${rial(refundDue(invoice))}` : ''}</small></div>
+        <div><strong>{invoice.paymentStatus === 'proforma' ? 'پیش‌فاکتور' : 'فاکتور'} {invoice.number} · {invoice.customerName}</strong><small>{dateFa(invoice.issuedAt)} · {statusLabel[invoice.paymentStatus] ?? invoice.paymentStatus}</small></div>
+        <div className="money"><b>{rial(invoice.totalRial - invoice.returnedRial)}</b><small>{invoice.paymentStatus === 'proforma' ? 'بدون بدهی؛ هنوز فروش قطعی نشده است' : `مانده: ${rial(receivable(invoice))}${refundDue(invoice) > 0 ? ` · بازپرداخت: ${rial(refundDue(invoice))}` : ''}`}</small></div>
         <div className="invoice-row-actions"><button onClick={() => setPreview(invoice.id)}>نمایش / چاپ</button>
           {invoice.status === 'issued' && (invoice.paymentStatus === 'proforma' || (receivable(invoice) === 0 && refundDue(invoice) === 0)) && <button onClick={() => { if (!window.confirm(`فاکتور ${invoice.number} بایگانی شود؟ سابقهٔ مالی حفظ می‌شود.`)) return; void run(async () => { await api(`/merchant/archive/invoices/${invoice.id}`, 'POST'); await load(); }, 'فاکتور بایگانی شد.'); }}>بایگانی</button>}
           {invoice.status === 'issued' && invoice.paymentStatus !== 'proforma' && <button onClick={() => onReturn(invoice.id)}>مرجوعی / بازپرداخت</button>}
-          {invoice.status === 'issued' && receivable(invoice) > 0 && <button onClick={() => { paymentKey.current = crypto.randomUUID(); setSelected(invoice); setAmount(0); }}>ثبت دریافت</button>}
+          {invoice.status === 'issued' && invoice.paymentStatus !== 'proforma' && receivable(invoice) > 0 && <button onClick={() => { paymentKey.current = crypto.randomUUID(); setSelected(invoice); setAmount(0); }}>ثبت دریافت</button>}
           {invoice.customerPhone && <a href={`tel:${invoice.customerPhone.replace(/[^+\d]/g, '')}`}>تماس با مشتری</a>}
         </div>
       </div>)}</div> : <div className="empty">فاکتوری پیدا نشد.</div>}</section>

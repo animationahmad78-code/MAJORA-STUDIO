@@ -44,6 +44,19 @@ export function parseJalali(value: string): [number, number, number] | null {
   const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
   return year >= 1300 && year <= 1500 && day >= 1 && day <= daysInJalaliMonth(year, month) ? [year, month, day] : null;
 }
+export function jalaliToIsoDate(value: string): string | null {
+  const parsed = parseJalali(value);
+  if (!parsed) return null;
+  const [year, month, day] = parsed;
+  const offset = Array.from({ length: month - 1 }, (_, index) => daysInJalaliMonth(year, index + 1)).reduce((a, b) => a + b, 0) + day - 1;
+  return new Date(firstDay(year).getTime() + offset * 86400000).toISOString().slice(0, 10);
+}
+export function isoToJalaliDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const [year, month, day] = persianParts(date);
+  return `${year}/${pad(month)}/${pad(day)}`;
+}
 export function dateNotice(value: string): string {
   const date = parseJalali(value);
   if (!date) return '';

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, rial, type Customer, type Product } from './api';
+import { JalaliDateField, jalaliToIsoDate } from '../../mobile/src/jalali-date';
 import './sale.css';
 
 type Stage = 'customer' | 'products' | 'review';
@@ -53,12 +54,14 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
     if (!paymentStatus || !selected.length || busy) return;
     const paidRial = paymentStatus === 'paid' ? total : paymentStatus === 'partial' ? Number(paid) : 0;
     if (paymentStatus === 'partial' && (!Number.isSafeInteger(paidRial) || paidRial < 1 || paidRial >= total)) { setError('پیش‌پرداخت باید بیشتر از صفر و کمتر از جمع فاکتور باشد.'); return; }
+    const dueIso = due ? jalaliToIsoDate(due) : null;
+    if (due && !dueIso) { setError('تاریخ پیگیری شمسی را کامل و معتبر وارد کنید.'); return; }
     setBusy(true); setError('');
     try {
       await api('/merchant/invoices', 'POST', {
         idempotencyKey: requestKey.current, customerId: customer?.id ?? null,
         customerName: customer ? '' : customerName.trim(), customerPhone: customer ? '' : customerPhone.trim(),
-        paymentStatus, paidRial, dueAt: due ? new Date(`${due}T12:00:00`).toISOString() : null,
+        paymentStatus, paidRial, dueAt: dueIso ? new Date(`${dueIso}T12:00:00`).toISOString() : null,
         expectedTotalRial: total,
         lines: selected.map(x => ({ productId: x.product.id, quantity: x.quantity, expectedUnitPriceRial: x.product.priceRial })),
       });
@@ -78,7 +81,7 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
     {stage === 'review' && <section className="card sale-review"><h2>بررسی نهایی</h2><p><strong>مشتری:</strong> {customer?.name ?? customerName} · {customer?.phone ?? customerPhone}</p><div className="receipt">{selected.map(x => <div key={x.product.id}><span>{x.product.name} × {x.quantity}</span><b>{rial(x.product.priceRial * x.quantity)}</b></div>)}</div><p className="receipt-total">جمع فاکتور: {rial(total)}</p>
       <label>وضعیت پرداخت<select value={paymentStatus} onChange={e => { setPaymentStatus(e.target.value); setPaid(''); }} required><option value="">انتخاب وضعیت الزامی است</option><option value="paid">تسویه کامل</option><option value="partial">پیش‌پرداخت داده شد</option><option value="unpaid">تسویه نشده</option><option value="proforma">پیش‌فاکتور</option></select></label>
       {paymentStatus === 'partial' && <label>مبلغ پیش‌پرداخت (ریال)<input type="number" inputMode="numeric" min="1" max={total - 1} value={paid} onChange={e => setPaid(e.target.value)}/></label>}
-      {(paymentStatus === 'partial' || paymentStatus === 'unpaid') && <label>تاریخ پیگیری مانده<input type="date" value={due} onChange={e => setDue(e.target.value)}/></label>}
+      {(paymentStatus === 'partial' || paymentStatus === 'unpaid') && <JalaliDateField label="تاریخ پیگیری مانده (شمسی)" value={due} onChange={setDue} optional/>}
       <p className="hint">قیمت و موجودی هنگام ثبت دوباره در سرور بررسی می‌شوند. شمارهٔ فاکتور در ثبت نهایی تخصیص می‌یابد.</p><div className="form-actions"><button disabled={busy} onClick={() => setStage('products')}>بازگشت به کالاها</button><button className="primary" disabled={busy || !paymentStatus} onClick={() => void issue()}>{busy ? 'در حال ثبت فاکتور…' : 'ثبت نهایی فاکتور'}</button></div></section>}
   </>;
 }

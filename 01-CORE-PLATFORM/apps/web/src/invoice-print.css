@@ -1,9 +1,27 @@
 .detailed-invoice-dialog { width: min(1120px, 100%); }
-.detailed-invoice-dialog .print-actions { align-items: end; flex-wrap: wrap; position: sticky; top: 0; z-index: 2; background: #f1f5f9; padding: 8px; border-radius: 12px; }
+.detailed-invoice-dialog { position: relative; max-height: min(94dvh, 920px); overflow: auto; }
+.detailed-invoice-dialog .print-actions { display: grid; justify-content: stretch; gap: 8px; position: sticky; top: 0; z-index: 2; background: #f1f5f9; padding: 10px; border-radius: 12px; box-shadow: 0 3px 12px #0a2d4c1a; }
+.detailed-invoice-dialog .print-actions button { min-height: 44px; white-space: nowrap; }
+.print-heading, .print-settings, .print-main-actions, .print-more > div { display: flex; align-items: center; gap: 8px; }
+.print-heading { justify-content: space-between; color: #082d60; }
+.print-heading strong { font-size: 1rem; }
+.print-heading button { min-width: 76px; }
+.print-settings { flex-wrap: wrap; }
+.print-settings > button { margin-inline-start: auto; }
+.print-main-actions > button, .print-more > div > button { flex: 1 1 0; }
+.print-more { border-top: 1px solid #d5e3f0; padding-top: 6px; }
+.print-more summary { cursor: pointer; color: #0a3a75; font-weight: 750; min-height: 36px; }
+.print-more > div { flex-wrap: wrap; padding-top: 6px; }
+.print-more > div > button { min-width: 120px; }
+.invoice-preview-fit { width: fit-content; margin-inline: auto; }
 .detailed-invoice-dialog .print-actions label { display: flex; align-items: center; gap: 7px; margin: 0; white-space: nowrap; }
 .detailed-invoice-dialog .print-actions select { width: 90px; min-height: 44px; }
 .detailed-invoice-dialog .print-checkbox input { width: 19px; min-height: 19px; height: 19px; }
 .detailed-invoice-dialog .invoice-preview-scroll { overflow: auto; max-width: 100%; }
+.invoice-export-progress { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; background: #082d60e8; color: #fff; font-weight: 800; font-size: 1.05rem; text-align: center; border-radius: 18px; }
+.invoice-export-spinner { width: 54px; height: 54px; border-radius: 50%; border: 5px solid #ffffff50; border-top-color: #f2c76c; animation: invoice-export-spin .8s linear infinite; }
+@keyframes invoice-export-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .invoice-export-spinner { animation: none; border-top-color: #f2c76c; } }
 .brand-form-layout { display: grid; grid-template-columns: 180px 1fr; gap: 22px; }
 .brand-logo-control { display: grid; align-content: start; gap: 10px; }
 .brand-logo-control img, .brand-logo-empty { width: 160px; height: 160px; object-fit: contain; background: #edf5fb; border: 1px solid #cbd6e1; border-radius: 16px; }
@@ -15,6 +33,7 @@
 .condition-field button { margin-bottom: 13px; }
 .brand-save { position: sticky; bottom: 18px; width: min(340px, 100%); box-shadow: 0 8px 24px #0b2b5340; }
 @media (max-width: 700px) { .brand-form-layout { grid-template-columns: 1fr; } .brand-logo-control { grid-template-columns: 110px 1fr; align-items: center; } .brand-logo-control img, .brand-logo-empty { width: 105px; height: 105px; } .brand-logo-control button { grid-column: 2; } .condition-field { grid-template-columns: 1fr; } .condition-field button { margin: -7px 0 13px; justify-self: start; } }
+@media (max-width: 700px) { .detailed-invoice-dialog { width: 100%; padding: 8px; max-height: 100dvh; border-radius: 0; } .detailed-invoice-dialog .print-actions { top: 0; } .print-settings > button { margin-inline-start: 0; } .print-main-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); } .print-main-actions > button { min-width: 0; padding-inline: 3px; font-size: .76rem; } }
 @media print {
   @page { size: A4 portrait; margin: 0; }
   body { background: #fff !important; }
@@ -23,6 +42,9 @@
   .print-backdrop { position: static !important; display: block !important; background: none !important; padding: 0 !important; }
   .detailed-invoice-dialog { position: static !important; width: 100% !important; max-height: none !important; overflow: visible !important; padding: 0 !important; background: #fff !important; box-shadow: none !important; }
   .detailed-invoice-dialog .print-actions { display: none !important; }
+  .invoice-export-progress { display: none !important; }
+  .invoice-preview-scroll { overflow: visible !important; max-width: none !important; padding: 0 !important; }
+  .invoice-preview-fit { zoom: 1 !important; margin: 0 !important; }
   .invoice-document { position: absolute !important; inset: 0 auto auto 0; display: block !important; margin: 0 !important; padding: 0 !important; gap: 0 !important; }
   .invoice-document .invoice-paper { box-shadow: none !important; border-radius: 0 !important; break-after: page; page-break-after: always; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
   .invoice-document .invoice-paper:last-child { break-after: auto !important; page-break-after: auto !important; }
