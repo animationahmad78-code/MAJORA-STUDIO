@@ -517,10 +517,13 @@ merchant.MapPost("/invoices", async (InvoiceRequest body, MajoraDb db, HttpConte
     foreach (var item in body.Lines)
     {
         if (item.Quantity < 1 || item.Quantity > 1_000_000) return Fail("تعداد کالا نامعتبر است.");
+        if (item.DiscountPercent < 0 || item.DiscountPercent > 100 || decimal.Round(item.DiscountPercent, 3) != item.DiscountPercent) return Fail("درصد تخفیف باید بین صفر تا صد و حداکثر سه رقم اعشار باشد.");
         var p = await db.Products.SingleOrDefaultAsync(x => x.Id == item.ProductId && x.TenantId == tid && !x.Archived); if (p is null) return Fail("کالا یافت نشد.");
         if (item.ExpectedUnitPriceRial is long expectedPrice && p.PriceRial != expectedPrice) return Fail($"قیمت «{p.Name}» تغییر کرده است؛ فهرست کالا را تازه کنید.", 409);
         if (body.PaymentStatus != "proforma" && p.Stock < item.Quantity) return Fail($"موجودی «{p.Name}» کافی نیست.", 409);
-        var total = checked(p.PriceRial * item.Quantity); invoice.TotalRial = checked(invoice.TotalRial + total);
+        var gross = checked(p.PriceRial * item.Quantity);
+        var discount = checked((long)decimal.Round(gross * item.DiscountPercent / 100m, 0, MidpointRounding.AwayFromZero));
+        var total = checked(gross - discount); invoice.TotalRial = checked(invoice.TotalRial + total);
         invoice.Lines.Add(new InvoiceLine { ProductId = p.Id, NameSnapshot = p.Name, UnitPriceRial = p.PriceRial, Quantity = item.Quantity, TotalRial = total, UnitCostRialSnapshot = p.AverageCostRial, CostKnown = p.CostKnown });
         if (body.PaymentStatus != "proforma") { p.Stock -= item.Quantity; db.StockMovements.Add(new StockMovement { TenantId = tid, ProductId = p.Id, InvoiceId = invoice.Id, Delta = -item.Quantity, Reason = "invoice-issued" }); }
     }
@@ -581,7 +584,11 @@ merchant.MapPost("/invoices/{id:guid}/returns", async (Guid id, SalesReturnReque
         var line = invoice.Lines.SingleOrDefault(x => x.Id == item.InvoiceLineId);
         if (line is null || item.Quantity < 1 || item.Quantity > line.Quantity - line.ReturnedQuantity)
             return Fail("تعداد مرجوعی از مقدار باقی‌مانده بیشتر است یا ردیف معتبر نیست.");
-        var amount = checked(line.UnitPriceRial * item.Quantity);
+        // Allocate the frozen net line amount across partial returns. The last return
+        // receives the rounding remainder, so all returns sum to exactly the sale amount.
+        static long ReturnedValue(InvoiceLine saleLine, long quantity) =>
+            checked((long)decimal.Round((decimal)saleLine.TotalRial * quantity / saleLine.Quantity, 0, MidpointRounding.AwayFromZero));
+        var amount = checked(ReturnedValue(line, line.ReturnedQuantity + item.Quantity) - ReturnedValue(line, line.ReturnedQuantity));
         line.ReturnedQuantity = checked(line.ReturnedQuantity + item.Quantity);
         salesReturn.AmountRial = checked(salesReturn.AmountRial + amount);
         salesReturn.Lines.Add(new SalesReturnLine { InvoiceLineId = line.Id, ProductId = line.ProductId,
@@ -787,7 +794,7 @@ public sealed record ProductPhotoRequest(string DataUrl);
 public sealed record PriceBatchRequest(string IdempotencyKey, decimal Percent, bool AllProducts, List<Guid>? ProductIds);
 public sealed record CustomerRequest(string Name, string Phone);
 public sealed record InvoiceRequest(string IdempotencyKey, Guid? CustomerId, string CustomerName, string CustomerPhone, string PaymentStatus, long PaidRial, DateTime? DueAt, List<InvoiceLineRequest> Lines, long? ExpectedTotalRial = null);
-public sealed record InvoiceLineRequest(Guid ProductId, long Quantity, long? ExpectedUnitPriceRial = null);
+public sealed record InvoiceLineRequest(Guid ProductId, long Quantity, long? ExpectedUnitPriceRial = null, decimal DiscountPercent = 0);
 public sealed record PaymentRequest(string IdempotencyKey, long AmountRial, string Method, string? Reference);
 public sealed record SalesReturnRequest(string IdempotencyKey, string Reason, List<SalesReturnLineRequest> Lines);
 public sealed record SalesReturnLineRequest(Guid InvoiceLineId, long Quantity, bool Restock);

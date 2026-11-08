@@ -191,6 +191,24 @@ try {
   $archiveCustomers = Invoke-RestMethod "$base/api/merchant/archive/customers" -WebSession $ownerSession
   if (@($archiveCustomers).Count -ne 1) { throw 'Customer archive failed' }
   $null = PostJson "/merchant/archive/customers/$($customer.id)/restore" @{} $ownerSession
+  $discountProduct = PostJson '/merchant/products' @{name='کالای تخفیف آزمون';sku="DISCOUNT-$id";category='آزمون';priceRial=1001;stock=3} $ownerSession
+  $discountBody = @{idempotencyKey="discount-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='paid';paidRial=2002;expectedTotalRial=2002;lines=@(@{productId=$discountProduct.id;quantity=3;expectedUnitPriceRial=1001;discountPercent=33.333})}
+  $discountInvoice = PostJson '/merchant/invoices' $discountBody $ownerSession
+  $discountDetail = Invoke-RestMethod "$base/api/merchant/invoices/$($discountInvoice.id)" -WebSession $ownerSession
+  if ($discountInvoice.totalRial -ne 2002 -or $discountDetail.lines[0].unitPriceRial -ne 1001 -or $discountDetail.lines[0].totalRial -ne 2002) { throw 'Selective discount amount or immutable line snapshot mismatch' }
+  $discountAgain = PostJson '/merchant/invoices' $discountBody $ownerSession
+  if ($discountAgain.id -ne $discountInvoice.id) { throw 'Discounted invoice idempotency failed' }
+  $discountReturn1 = PostJson "/merchant/invoices/$($discountInvoice.id)/returns" @{idempotencyKey="discount-return-1-$id";reason='آزمون مرجوعی تخفیف';lines=@(@{invoiceLineId=$discountDetail.lines[0].id;quantity=1;restock=$true})} $ownerSession
+  $discountReturn2 = PostJson "/merchant/invoices/$($discountInvoice.id)/returns" @{idempotencyKey="discount-return-2-$id";reason='تکمیل مرجوعی تخفیف';lines=@(@{invoiceLineId=$discountDetail.lines[0].id;quantity=2;restock=$true})} $ownerSession
+  if ($discountReturn1.amountRial -ne 667 -or $discountReturn2.amountRial -ne 1335 -or ($discountReturn1.amountRial + $discountReturn2.amountRial) -ne 2002) { throw 'Discounted partial returns did not sum to the paid net amount' }
+  $discountAfterReturns = Invoke-RestMethod "$base/api/merchant/invoices/$($discountInvoice.id)" -WebSession $ownerSession
+  if ($discountAfterReturns.returnedRial -ne 2002 -or $discountAfterReturns.lines[0].returnedQuantity -ne 3) { throw 'Discounted return ledger mismatch' }
+  $invalidDiscountBlocked = $false
+  try { $null = PostJson '/merchant/invoices' @{idempotencyKey="invalid-discount-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='proforma';paidRial=0;lines=@(@{productId=$discountProduct.id;quantity=1;discountPercent=101})} $ownerSession } catch { $invalidDiscountBlocked = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $invalidDiscountBlocked) { throw 'Discount over 100 percent was accepted' }
+  $staleDiscountTotalBlocked = $false
+  try { $null = PostJson '/merchant/invoices' @{idempotencyKey="stale-discount-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='proforma';paidRial=0;expectedTotalRial=1001;lines=@(@{productId=$discountProduct.id;quantity=1;discountPercent=10})} $ownerSession } catch { $staleDiscountTotalBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $staleDiscountTotalBlocked) { throw 'Stale discounted invoice total was accepted' }
   $staffProductBlocked = $false
   try { $null = PostJson '/merchant/products' @{name='نباید ثبت شود';sku="DENIED-$id";category='';priceRial=1;stock=1} $staffSession } catch { $staffProductBlocked = $_.Exception.Response.StatusCode -eq 403 }
   if (-not $staffProductBlocked) { throw 'Staff could edit catalog' }
@@ -201,7 +219,7 @@ try {
   $suspended = $false
   try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession } catch { $suspended = $_.Exception.Response.StatusCode -eq 403 }
   if (-not $suspended) { throw 'Suspended tenant still has access' }
-  Write-Output 'PASS: login, subscription, AI key/role/endpoint/fallback, product/photo, customer/CSV, invoice/stock/payment/price-quote, return/refund/idempotency/accounting, price batch/revert/isolation, archive/restore/open balance guard, purchase/expense/cost estimate, staff role, CSRF, suspension'
+  Write-Output 'PASS: login, subscription, AI key/role/endpoint/fallback, product/photo, customer/CSV, invoice/stock/payment/price-quote/selective discount, discounted partial returns/refund/idempotency/accounting, price batch/revert/isolation, archive/restore/open balance guard, purchase/expense/cost estimate, staff role, CSRF, suspension'
 } finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
   Write-Output "Test log: $log"

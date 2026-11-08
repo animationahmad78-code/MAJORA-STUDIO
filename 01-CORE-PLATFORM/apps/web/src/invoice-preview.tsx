@@ -76,8 +76,10 @@ export function InvoicePreview({ id, close }: { id: string; close: () => void })
     paidRial: invoice.paidRial, returnedRial: invoice.returnedRial, refundedRial: invoice.refundedRial,
     balanceRial: invoice.paymentStatus === 'proforma' ? 0 : Math.max(0, invoice.totalRial - invoice.returnedRial - invoice.paidRial + invoice.refundedRial),
     totalRial: invoice.totalRial,
+    discountRial: invoice.lines.reduce((sum, line) => sum + line.unitPriceRial * line.quantity - line.totalRial, 0),
+    subtotalRial: invoice.lines.reduce((sum, line) => sum + line.unitPriceRial * line.quantity, 0),
     lines: invoice.lines.map(line => ({ productId: line.productId, name: line.nameSnapshot, quantity: line.quantity,
-      unitPriceRial: line.unitPriceRial, totalRial: line.totalRial }))
+      unitPriceRial: line.unitPriceRial, discountRial: line.unitPriceRial * line.quantity - line.totalRial, totalRial: line.totalRial }))
   } : null;
   const text = receipt && brand ? [
     brand.storeName,
@@ -86,6 +88,7 @@ export function InvoicePreview({ id, close }: { id: string; close: () => void })
     `خریدار: ${receipt.customerName}`,
     receipt.customerPhone ? `تلفن: ${receipt.customerPhone}` : '',
     ...receipt.lines.map((x, index) => `${index + 1}. ${x.name} × ${x.quantity} × ${x.unitPriceRial.toLocaleString('fa-IR')} = ${x.totalRial.toLocaleString('fa-IR')} ریال`),
+    receipt.discountRial ? `تخفیف: ${receipt.discountRial.toLocaleString('fa-IR')} ریال` : '',
     `جمع: ${receipt.totalRial.toLocaleString('fa-IR')} ریال`,
     receipt.returnedRial ? `مرجوعی: ${receipt.returnedRial.toLocaleString('fa-IR')} ریال` : '',
     receipt.returnedRial ? `خالص فروش: ${(receipt.totalRial - receipt.returnedRial).toLocaleString('fa-IR')} ریال` : '',

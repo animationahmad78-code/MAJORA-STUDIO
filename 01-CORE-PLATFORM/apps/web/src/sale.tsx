@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, rial, type Customer, type Product } from './api';
 import { JalaliDateField, jalaliToIsoDate } from '../../mobile/src/jalali-date';
+import { discountedLineRial, percentThousandths } from './invoice-quote';
 import './sale.css';
 
 type Stage = 'customer' | 'products' | 'review';
@@ -23,6 +24,10 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
   const [paymentStatus, setPaymentStatus] = useState('');
   const [paid, setPaid] = useState('');
   const [due, setDue] = useState('');
+  const [discountEnabled, setDiscountEnabled] = useState(false);
+  const [discountPercent, setDiscountPercent] = useState('0');
+  const [discountScope, setDiscountScope] = useState<'all' | 'selected'>('all');
+  const [discountProducts, setDiscountProducts] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const requestKey = useRef(crypto.randomUUID());
@@ -39,7 +44,12 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
     return () => { active = false; };
   }, [stage, query, category, page]);
   const selected = Object.values(cart).filter(x => x.quantity > 0);
-  const total = selected.reduce((sum, x) => sum + x.quantity * x.product.priceRial, 0);
+  const discountBasis = percentThousandths(discountPercent);
+  const lineBasis = (productId: string) => discountEnabled && discountBasis !== null && (discountScope === 'all' || discountProducts.includes(productId)) ? discountBasis : 0;
+  const lineTotal = (line: CartLine) => discountedLineRial(line.product.priceRial, line.quantity, lineBasis(line.product.id));
+  const subtotal = selected.reduce((sum, x) => sum + x.quantity * x.product.priceRial, 0);
+  const total = selected.reduce((sum, x) => sum + lineTotal(x), 0);
+  const discountRial = subtotal - total;
   const count = selected.reduce((sum, x) => sum + x.quantity, 0);
   const quantity = (product: Product, next: number) => {
     if (!Number.isSafeInteger(next) || next < 0) return;
@@ -52,6 +62,7 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
   };
   const issue = async () => {
     if (!paymentStatus || !selected.length || busy) return;
+    if (discountEnabled && (discountBasis === null || (discountScope === 'selected' && !discountProducts.some(id => selected.some(line => line.product.id === id))))) { setError('درصد و کالاهای مشمول تخفیف را مشخص کنید.'); return; }
     const paidRial = paymentStatus === 'paid' ? total : paymentStatus === 'partial' ? Number(paid) : 0;
     if (paymentStatus === 'partial' && (!Number.isSafeInteger(paidRial) || paidRial < 1 || paidRial >= total)) { setError('پیش‌پرداخت باید بیشتر از صفر و کمتر از جمع فاکتور باشد.'); return; }
     const dueIso = due ? jalaliToIsoDate(due) : null;
@@ -63,7 +74,7 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
         customerName: customer ? '' : customerName.trim(), customerPhone: customer ? '' : customerPhone.trim(),
         paymentStatus, paidRial, dueAt: dueIso ? new Date(`${dueIso}T12:00:00`).toISOString() : null,
         expectedTotalRial: total,
-        lines: selected.map(x => ({ productId: x.product.id, quantity: x.quantity, expectedUnitPriceRial: x.product.priceRial })),
+        lines: selected.map(x => ({ productId: x.product.id, quantity: x.quantity, expectedUnitPriceRial: x.product.priceRial, discountPercent: lineBasis(x.product.id) / 1000 })),
       });
       requestKey.current = crypto.randomUUID();
       onDone();
@@ -78,7 +89,9 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
     {stage === 'products' && <div className="sale-layout"><section className="card"><div className="card-head"><h2>انتخاب کالا</h2></div><div className="price-filters"><label>جست‌وجوی نام یا کد<input value={query} onChange={e => { setQuery(e.target.value); setPage(1); }} placeholder="نام یا کد کالا"/></label><label>دسته<select value={category} onChange={e => { setCategory(e.target.value); setPage(1); }}><option value="">همهٔ دسته‌ها</option>{categories.filter(Boolean).map(x => <option key={x} value={x}>{x}</option>)}</select></label></div>
       {items.length ? <div className="product-grid sale-product-grid">{items.map(p => <article className="product-tile" key={p.id}><div className="tile-icon">{p.hasPhoto ? <img loading="lazy" src={`/api/merchant/products/${p.id}/photo?v=${encodeURIComponent(p.updatedAt)}`} alt={`تصویر ${p.name}`}/> : <span>بدون عکس</span>}</div><strong>{p.name}</strong><small>{p.category || 'بدون دسته'} · موجودی {p.stock}</small><b>{rial(p.priceRial)}</b><div className="quantity"><button aria-label={`کم کردن ${p.name}`} disabled={!cart[p.id]} onClick={() => quantity(p, (cart[p.id]?.quantity ?? 0) - 1)}>−</button><input aria-label={`تعداد ${p.name}`} type="number" inputMode="numeric" min="0" max={p.stock} value={cart[p.id]?.quantity ?? 0} onChange={e => quantity(p, Number(e.target.value))}/><button aria-label={`افزودن ${p.name}`} disabled={(cart[p.id]?.quantity ?? 0) >= p.stock} onClick={() => quantity(p, (cart[p.id]?.quantity ?? 0) + 1)}>＋</button></div></article>)}</div> : <div className="empty">کالایی با این جست‌وجو پیدا نشد.</div>}
       <div className="price-pager"><button disabled={page === 1} onClick={() => setPage(page - 1)}>صفحهٔ قبل</button><span>صفحهٔ {page}</span><button disabled={items.length < 50} onClick={() => setPage(page + 1)}>صفحهٔ بعد</button></div></section><section className="card sale-cart"><h2>سبد فاکتور</h2>{selected.length ? <div className="receipt">{selected.map(x => <div key={x.product.id}><span>{x.product.name} × {x.quantity}</span><b>{rial(x.product.priceRial * x.quantity)}</b></div>)}</div> : <div className="empty">هنوز کالایی انتخاب نشده است.</div>}<p className="receipt-total">{count} عدد · {rial(total)}</p><div className="form-actions"><button onClick={() => setStage('customer')}>بازگشت</button><button className="primary" disabled={!selected.length} onClick={() => { setError(''); setStage('review'); }}>بررسی فاکتور</button></div></section></div>}
-    {stage === 'review' && <section className="card sale-review"><h2>بررسی نهایی</h2><p><strong>مشتری:</strong> {customer?.name ?? customerName} · {customer?.phone ?? customerPhone}</p><div className="receipt">{selected.map(x => <div key={x.product.id}><span>{x.product.name} × {x.quantity}</span><b>{rial(x.product.priceRial * x.quantity)}</b></div>)}</div><p className="receipt-total">جمع فاکتور: {rial(total)}</p>
+    {stage === 'review' && <section className="card sale-review"><h2>بررسی نهایی</h2><p><strong>مشتری:</strong> {customer?.name ?? customerName} · {customer?.phone ?? customerPhone}</p><div className="receipt">{selected.map(x => <div key={x.product.id}><span>{x.product.name} × {x.quantity}</span><b>{rial(lineTotal(x))}</b></div>)}</div>
+      <div className="sale-discount"><label className="sale-discount-toggle"><input type="checkbox" checked={discountEnabled} onChange={e => setDiscountEnabled(e.target.checked)}/> اعمال تخفیف در همین فاکتور</label>{discountEnabled && <><div className="sale-discount-controls"><label>درصد تخفیف<input type="text" inputMode="decimal" value={discountPercent} onChange={e => setDiscountPercent(e.target.value)} placeholder="مثلاً ۱۰ یا ۲٫۵"/></label><label>روی کالاها<select value={discountScope} onChange={e => setDiscountScope(e.target.value as 'all' | 'selected')}><option value="all">همهٔ اقلام</option><option value="selected">اقلام انتخابی</option></select></label></div>{discountBasis === null && <small className="field-error">درصد بین ۰ تا ۱۰۰ با حداکثر سه رقم اعشار وارد کنید.</small>}{discountScope === 'selected' && <div className="sale-discount-items">{selected.map(x => <label key={x.product.id}><input type="checkbox" checked={discountProducts.includes(x.product.id)} onChange={e => setDiscountProducts(previous => e.target.checked ? [...previous, x.product.id] : previous.filter(id => id !== x.product.id))}/>{x.product.name}</label>)}</div>}</>}</div>
+      <p className="receipt-total">{discountEnabled && <><span>جمع پیش از تخفیف: {rial(subtotal)}</span><span>تخفیف: {rial(discountRial)}</span></>}<strong>مبلغ نهایی: {rial(total)}</strong></p>
       <label>وضعیت پرداخت<select value={paymentStatus} onChange={e => { setPaymentStatus(e.target.value); setPaid(''); }} required><option value="">انتخاب وضعیت الزامی است</option><option value="paid">تسویه کامل</option><option value="partial">پیش‌پرداخت داده شد</option><option value="unpaid">تسویه نشده</option><option value="proforma">پیش‌فاکتور</option></select></label>
       {paymentStatus === 'partial' && <label>مبلغ پیش‌پرداخت (ریال)<input type="number" inputMode="numeric" min="1" max={total - 1} value={paid} onChange={e => setPaid(e.target.value)}/></label>}
       {(paymentStatus === 'partial' || paymentStatus === 'unpaid') && <JalaliDateField label="تاریخ پیگیری مانده (شمسی)" value={due} onChange={setDue} optional/>}
