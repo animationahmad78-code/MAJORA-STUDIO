@@ -27,12 +27,13 @@ public sealed class Purchase { public Guid Id { get; set; } = Guid.NewGuid(); pu
 public sealed class PurchaseLine { public Guid Id { get; set; } = Guid.NewGuid(); public Guid PurchaseId { get; set; } public Guid ProductId { get; set; } public string NameSnapshot { get; set; } = ""; public long Quantity { get; set; } public long UnitCostRial { get; set; } public long TotalRial { get; set; } }
 public sealed class PurchasePayment { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public Guid PurchaseId { get; set; } public long AmountRial { get; set; } public string Method { get; set; } = "cash"; public DateTime PaidAt { get; set; } = DateTime.UtcNow; }
 public sealed class Expense { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public string Category { get; set; } = ""; public string Description { get; set; } = ""; public long AmountRial { get; set; } public DateTime IncurredAt { get; set; } = DateTime.UtcNow; public bool Voided { get; set; } }
+public sealed class Cheque { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public Guid? InvoiceId { get; set; } public string Direction { get; set; } = "received"; public string Party { get; set; } = ""; public string Serial { get; set; } = ""; public string Bank { get; set; } = ""; public long AmountRial { get; set; } public DateTime DueAt { get; set; } public string SayadId { get; set; } = ""; public string IssuerNationalId { get; set; } = ""; public string BeneficiaryNationalId { get; set; } = ""; public string RegistrationStatus { get; set; } = "unknown"; public string Status { get; set; } = "open"; public string Note { get; set; } = ""; public bool ShowDetails { get; set; } public bool ShowImage { get; set; } public string? PhotoContentType { get; set; } public byte[]? PhotoBytes { get; set; } public DateTime CreatedAt { get; set; } = DateTime.UtcNow; public DateTime UpdatedAt { get; set; } = DateTime.UtcNow; }
 public sealed class AiProviderProfile { public int Id { get; set; } = 1; public string Endpoint { get; set; } = ""; public string Model { get; set; } = ""; public string ProtectedApiKey { get; set; } = ""; public bool Enabled { get; set; } public DateTime UpdatedAt { get; set; } = DateTime.UtcNow; }
 
 public sealed class MajoraDb(DbContextOptions<MajoraDb> options) : DbContext(options)
 {
     public DbSet<AiProviderProfile> AiProviderProfiles => Set<AiProviderProfile>();
-    public DbSet<Tenant> Tenants => Set<Tenant>(); public DbSet<InvoiceBrandProfile> InvoiceBrands => Set<InvoiceBrandProfile>(); public DbSet<AppUser> Users => Set<AppUser>(); public DbSet<Plan> Plans => Set<Plan>(); public DbSet<Subscription> Subscriptions => Set<Subscription>(); public DbSet<Product> Products => Set<Product>(); public DbSet<ProductPhoto> ProductPhotos => Set<ProductPhoto>(); public DbSet<PriceBatch> PriceBatches => Set<PriceBatch>(); public DbSet<PriceBatchLine> PriceBatchLines => Set<PriceBatchLine>(); public DbSet<Customer> Customers => Set<Customer>(); public DbSet<Invoice> Invoices => Set<Invoice>(); public DbSet<InvoiceRevision> InvoiceRevisions => Set<InvoiceRevision>(); public DbSet<InvoiceLine> InvoiceLines => Set<InvoiceLine>(); public DbSet<Payment> Payments => Set<Payment>(); public DbSet<SalesReturn> SalesReturns => Set<SalesReturn>(); public DbSet<SalesReturnLine> SalesReturnLines => Set<SalesReturnLine>(); public DbSet<Refund> Refunds => Set<Refund>(); public DbSet<StockMovement> StockMovements => Set<StockMovement>(); public DbSet<Reminder> Reminders => Set<Reminder>(); public DbSet<AuditEntry> Audit => Set<AuditEntry>(); public DbSet<Purchase> Purchases => Set<Purchase>(); public DbSet<PurchaseLine> PurchaseLines => Set<PurchaseLine>(); public DbSet<PurchasePayment> PurchasePayments => Set<PurchasePayment>(); public DbSet<Expense> Expenses => Set<Expense>();
+    public DbSet<Tenant> Tenants => Set<Tenant>(); public DbSet<InvoiceBrandProfile> InvoiceBrands => Set<InvoiceBrandProfile>(); public DbSet<AppUser> Users => Set<AppUser>(); public DbSet<Plan> Plans => Set<Plan>(); public DbSet<Subscription> Subscriptions => Set<Subscription>(); public DbSet<Product> Products => Set<Product>(); public DbSet<ProductPhoto> ProductPhotos => Set<ProductPhoto>(); public DbSet<PriceBatch> PriceBatches => Set<PriceBatch>(); public DbSet<PriceBatchLine> PriceBatchLines => Set<PriceBatchLine>(); public DbSet<Customer> Customers => Set<Customer>(); public DbSet<Invoice> Invoices => Set<Invoice>(); public DbSet<InvoiceRevision> InvoiceRevisions => Set<InvoiceRevision>(); public DbSet<InvoiceLine> InvoiceLines => Set<InvoiceLine>(); public DbSet<Payment> Payments => Set<Payment>(); public DbSet<SalesReturn> SalesReturns => Set<SalesReturn>(); public DbSet<SalesReturnLine> SalesReturnLines => Set<SalesReturnLine>(); public DbSet<Refund> Refunds => Set<Refund>(); public DbSet<StockMovement> StockMovements => Set<StockMovement>(); public DbSet<Reminder> Reminders => Set<Reminder>(); public DbSet<AuditEntry> Audit => Set<AuditEntry>(); public DbSet<Purchase> Purchases => Set<Purchase>(); public DbSet<PurchaseLine> PurchaseLines => Set<PurchaseLine>(); public DbSet<PurchasePayment> PurchasePayments => Set<PurchasePayment>(); public DbSet<Expense> Expenses => Set<Expense>(); public DbSet<Cheque> Cheques => Set<Cheque>();
     protected override void OnModelCreating(ModelBuilder b)
     {
         b.Entity<AiProviderProfile>().Property(x => x.Endpoint).HasMaxLength(500);
@@ -91,6 +92,21 @@ public sealed class MajoraDb(DbContextOptions<MajoraDb> options) : DbContext(opt
         b.Entity<Purchase>().HasIndex(x => new { x.TenantId, x.PurchasedAt });
         b.Entity<PurchasePayment>().HasIndex(x => new { x.TenantId, x.PurchaseId });
         b.Entity<Expense>().HasIndex(x => new { x.TenantId, x.IncurredAt });
+        b.Entity<Cheque>().HasIndex(x => new { x.TenantId, x.DueAt, x.Status });
+        b.Entity<Cheque>().HasIndex(x => new { x.TenantId, x.InvoiceId }).IsUnique().HasFilter("[InvoiceId] IS NOT NULL");
+        b.Entity<Cheque>().HasIndex(x => new { x.TenantId, x.SayadId }).IsUnique().HasFilter("[SayadId] <> ''");
+        b.Entity<Cheque>().HasOne<Invoice>().WithMany().HasForeignKey(x => x.InvoiceId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<Cheque>().Property(x => x.Party).HasMaxLength(200);
+        b.Entity<Cheque>().Property(x => x.Serial).HasMaxLength(80);
+        b.Entity<Cheque>().Property(x => x.Bank).HasMaxLength(120);
+        b.Entity<Cheque>().Property(x => x.SayadId).HasMaxLength(16);
+        b.Entity<Cheque>().Property(x => x.IssuerNationalId).HasMaxLength(10);
+        b.Entity<Cheque>().Property(x => x.BeneficiaryNationalId).HasMaxLength(10);
+        b.Entity<Cheque>().Property(x => x.RegistrationStatus).HasMaxLength(20);
+        b.Entity<Cheque>().Property(x => x.Status).HasMaxLength(20);
+        b.Entity<Cheque>().Property(x => x.Direction).HasMaxLength(20);
+        b.Entity<Cheque>().Property(x => x.Note).HasMaxLength(500);
+        b.Entity<Cheque>().Property(x => x.PhotoContentType).HasMaxLength(30);
         b.Entity<Payment>().HasIndex(x => new { x.TenantId, x.InvoiceId });
         b.Entity<Payment>().Property(x => x.IdempotencyKey).HasMaxLength(100);
         b.Entity<Payment>().HasIndex(x => new { x.TenantId, x.IdempotencyKey }).IsUnique();

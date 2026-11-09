@@ -30,7 +30,7 @@ async function renderPages(root: HTMLElement): Promise<HTMLCanvasElement[]> {
     host.append(wrapper);
     document.body.append(host);
     try {
-      await Promise.all(Array.from(copy.querySelectorAll('img')).map(image => image.decode().catch(() => undefined)));
+      await Promise.all(Array.from(copy.querySelectorAll('img')).map(image => image.decode()));
       canvases.push(await html2canvas(copy, {
         backgroundColor: '#ffffff', scale: 2, useCORS: false, logging: false,
         width: copy.offsetWidth, height: copy.offsetHeight, scrollX: 0, scrollY: 0

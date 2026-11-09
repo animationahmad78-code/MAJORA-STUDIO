@@ -86,7 +86,7 @@ export function InvoiceDocument({ brand, receipt, mono, paper, logo, chequePhoto
       <header><img src={logo} alt="نشان فروشگاه"/><div><h2>{brand.storeName}</h2><strong>ضمیمهٔ چک فاکتور شمارهٔ {formatRial(receipt.number)}</strong><p>صفحهٔ {formatRial(pageTotal)} از {formatRial(pageTotal)} · تاریخ فاکتور {receipt.dateJalali}</p></div></header>
       {receipt.cheque.showDetails && <div className="inv-cheque-details"><h3>مشخصات چک ثبت‌شده</h3><dl><div><dt>شماره چک</dt><dd>{receipt.cheque.serial}</dd></div><div><dt>بانک</dt><dd>{receipt.cheque.bank}</dd></div><div><dt>مبلغ</dt><dd>{formatRial(receipt.cheque.amountRial)} ریال</dd></div><div><dt>سررسید</dt><dd>{receipt.cheque.dueJalali}</dd></div><div><dt>شناسه صیادی</dt><dd dir="ltr">{receipt.cheque.sayadId}</dd></div><div><dt>وضعیت ثبت اعلام‌شده</dt><dd>{receipt.cheque.registrationStatus === 'confirmed' ? 'تأییدشده توسط گیرنده' : receipt.cheque.registrationStatus === 'registered' ? 'ثبت‌شده توسط صادرکننده' : receipt.cheque.registrationStatus === 'unregistered' ? 'ثبت‌نشده' : 'بررسی‌نشده'}</dd></div></dl></div>}
       {receipt.cheque.showImage && chequePhoto && <div className="inv-cheque-picture"><h3>تصویر ضمیمهٔ چک</h3><img src={chequePhoto} alt="تصویر چک این فاکتور"/></div>}
-      <p className="inv-cheque-disclaimer">این ضمیمه ثبت محلی اطلاعات است. وضعیت سامانهٔ صیاد و وصول نهایی فقط با استعلام بانکی تأیید می‌شود.</p>
+      <p className="inv-cheque-disclaimer">این ضمیمه ثبت اطلاعات در نرم‌افزار است. وضعیت سامانهٔ صیاد و وصول نهایی فقط با استعلام بانکی تأیید می‌شود.</p>
       <footer>ضمیمهٔ فاکتور {formatRial(receipt.number)} · {brand.storeName}</footer>
     </section>}
   </div>;

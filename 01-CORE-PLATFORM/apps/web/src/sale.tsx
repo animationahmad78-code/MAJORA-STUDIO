@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, rial, type Customer, type Product } from './api';
 import { JalaliDateField, jalaliToIsoDate } from '../../mobile/src/jalali-date';
 import { discountedLineRial, percentThousandths, rialDigits } from './invoice-quote';
+import { blankCheque, ChequeFields, chequePayload, type ChequeDraft } from './cheques';
 import './sale.css';
 
 type Stage = 'customer' | 'products' | 'review';
@@ -25,6 +26,7 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
   const [manualPrice, setManualPrice] = useState('');
   const [manualQuantity, setManualQuantity] = useState('1');
   const [paymentStatus, setPaymentStatus] = useState('');
+  const [cheque, setCheque] = useState<ChequeDraft>(blankCheque);
   const [paid, setPaid] = useState('');
   const [due, setDue] = useState('');
   const [discountEnabled, setDiscountEnabled] = useState(false);
@@ -82,12 +84,16 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
     if (paymentStatus === 'partial' && (!Number.isSafeInteger(paidRial) || paidRial < 1 || paidRial >= total)) { setError('پیش‌پرداخت باید بیشتر از صفر و کمتر از جمع فاکتور باشد.'); return; }
     const dueIso = due ? jalaliToIsoDate(due) : null;
     if (due && !dueIso) { setError('تاریخ پیگیری شمسی را کامل و معتبر وارد کنید.'); return; }
+    let chequeData: ReturnType<typeof chequePayload> | null = null;
+    try { if (paymentStatus === 'cheque') chequeData = chequePayload(cheque, total); }
+    catch (e) { setError(e instanceof Error ? e.message : 'مشخصات چک نامعتبر است.'); return; }
     setBusy(true); setError('');
     try {
       await api('/merchant/invoices', 'POST', {
         idempotencyKey: requestKey.current, customerId: customer?.id ?? null,
         customerName: customer ? '' : customerName.trim(), customerPhone: customer ? '' : customerPhone.trim(),
         paymentStatus, paidRial, dueAt: dueIso ? new Date(`${dueIso}T12:00:00`).toISOString() : null,
+        cheque: chequeData,
         expectedTotalRial: total,
         lines: selected.map(x => x.manual
           ? { productId: null, name: x.product.name, unitPriceRial: x.product.priceRial, quantity: x.quantity, discountPercent: lineBasis(x.product.id) / 1000 }
@@ -111,8 +117,9 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
     {stage === 'review' && <section className="card sale-review"><h2>بررسی نهایی</h2><p><strong>مشتری:</strong> {customer?.name ?? customerName} · {customer?.phone ?? customerPhone}</p><div className="receipt">{selected.map(x => <div key={x.product.id}><span>{x.product.name} × {x.quantity}</span><b>{rial(lineTotal(x))}</b></div>)}</div>
       <div className="sale-discount"><label className="sale-discount-toggle"><input type="checkbox" checked={discountEnabled} onChange={e => setDiscountEnabled(e.target.checked)}/> اعمال تخفیف در همین فاکتور</label>{discountEnabled && <><div className="sale-discount-controls"><label>درصد تخفیف<input type="text" inputMode="decimal" value={discountPercent} onChange={e => setDiscountPercent(e.target.value)} placeholder="مثلاً ۱۰ یا ۲٫۵"/></label><label>روی کالاها<select value={discountScope} onChange={e => setDiscountScope(e.target.value as 'all' | 'selected')}><option value="all">همهٔ اقلام</option><option value="selected">اقلام انتخابی</option></select></label></div>{discountBasis === null && <small className="field-error">درصد بین ۰ تا ۱۰۰ با حداکثر سه رقم اعشار وارد کنید.</small>}{discountScope === 'selected' && <div className="sale-discount-items">{selected.map(x => <label key={x.product.id}><input type="checkbox" checked={discountProducts.includes(x.product.id)} onChange={e => setDiscountProducts(previous => e.target.checked ? [...previous, x.product.id] : previous.filter(id => id !== x.product.id))}/>{x.product.name}</label>)}</div>}</>}</div>
       <p className="receipt-total">{discountEnabled && <><span>جمع پیش از تخفیف: {rial(subtotal)}</span><span>تخفیف: {rial(discountRial)}</span></>}<strong>مبلغ نهایی: {rial(total)}</strong></p>
-      <label>وضعیت پرداخت<select value={paymentStatus} onChange={e => { setPaymentStatus(e.target.value); setPaid(''); }} required><option value="">انتخاب وضعیت الزامی است</option><option value="paid">تسویه کامل</option><option value="partial">پیش‌پرداخت داده شد</option><option value="unpaid">تسویه نشده</option><option value="proforma">پیش‌فاکتور</option></select></label>
+      <label>وضعیت پرداخت<select value={paymentStatus} onChange={e => { setPaymentStatus(e.target.value); setPaid(''); if (e.target.value === 'cheque') setCheque(blankCheque(customer?.name ?? customerName)); }} required><option value="">انتخاب وضعیت الزامی است</option><option value="paid">تسویه کامل</option><option value="partial">پیش‌پرداخت داده شد</option><option value="unpaid">تسویه نشده</option><option value="cheque">چکی · در انتظار وصول</option><option value="proforma">پیش‌فاکتور</option></select></label>
       {paymentStatus === 'partial' && <label>مبلغ پیش‌پرداخت (ریال)<input type="number" inputMode="numeric" min="1" max={total - 1} value={paid} onChange={e => setPaid(e.target.value)}/></label>}
+      {paymentStatus === 'cheque' && <ChequeFields draft={cheque} setDraft={setCheque}/>}
       {(paymentStatus === 'partial' || paymentStatus === 'unpaid') && <JalaliDateField label="تاریخ پیگیری مانده (شمسی)" value={due} onChange={setDue} optional/>}
       <p className="hint">قیمت و موجودی هنگام ثبت دوباره در سرور بررسی می‌شوند. شمارهٔ فاکتور در ثبت نهایی تخصیص می‌یابد.</p><div className="form-actions"><button disabled={busy} onClick={() => setStage('products')}>بازگشت به کالاها</button><button className="primary" disabled={busy || !paymentStatus} onClick={() => void issue()}>{busy ? 'در حال ثبت فاکتور…' : 'ثبت نهایی فاکتور'}</button></div></section>}
   </>;

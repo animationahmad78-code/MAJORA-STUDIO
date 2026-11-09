@@ -6,10 +6,10 @@ import './invoices.css';
 
 const statusLabel: Record<string, string> = {
   paid: 'تسویه', partial: 'دارای مانده', unpaid: 'تسویه نشده', proforma: 'پیش‌فاکتور',
-  refund_due: 'بازپرداخت باز', returned: 'تماماً مرجوع'
+  refund_due: 'بازپرداخت باز', returned: 'تماماً مرجوع', cheque: 'چک در انتظار وصول'
 };
 
-export function Invoices({ run, onReturn }: { run: (action: () => Promise<unknown>, success?: string) => Promise<void>; onReturn: (id: string) => void }) {
+export function Invoices({ run, onReturn, onCheque }: { run: (action: () => Promise<unknown>, success?: string) => Promise<void>; onReturn: (id: string) => void; onCheque: () => void }) {
   const [items, setItems] = useState<Invoice[]>([]);
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<Invoice | null>(null);
@@ -28,11 +28,12 @@ export function Invoices({ run, onReturn }: { run: (action: () => Promise<unknow
         <div><strong>{invoice.paymentStatus === 'proforma' ? 'پیش‌فاکتور' : 'فاکتور'} {invoice.number} · {invoice.customerName}</strong><small>{dateFa(invoice.issuedAt)} · {statusLabel[invoice.paymentStatus] ?? invoice.paymentStatus}{invoice.revision > 1 ? ` · نسخهٔ ${invoice.revision}` : ''}</small></div>
         <div className="money"><b>{rial(invoice.totalRial - invoice.returnedRial)}</b><small>{invoice.paymentStatus === 'proforma' ? 'بدون بدهی؛ هنوز فروش قطعی نشده است' : `مانده: ${rial(receivable(invoice))}${refundDue(invoice) > 0 ? ` · بازپرداخت: ${rial(refundDue(invoice))}` : ''}`}</small></div>
         <div className="invoice-row-actions"><button onClick={() => setPreview(invoice.id)}>نمایش / چاپ</button>
-          {invoice.status === 'issued' && invoice.returnedRial === 0 && invoice.refundedRial === 0 && <button onClick={() => setRevising(invoice.id)}>ویرایش فاکتور</button>}
+          {invoice.status === 'issued' && invoice.paymentStatus !== 'cheque' && invoice.returnedRial === 0 && invoice.refundedRial === 0 && <button onClick={() => setRevising(invoice.id)}>ویرایش فاکتور</button>}
           {invoice.status === 'issued' && invoice.paymentStatus === 'proforma' && <button onClick={() => { if (!window.confirm(`پیش‌فاکتور ${invoice.number} با همان قیمت‌ها به فروش قطعیِ تسویه‌نشده تبدیل شود؟ موجودی کالاها اکنون بررسی و کسر می‌شود.`)) return; void run(async () => { await api(`/merchant/invoices/${invoice.id}/convert`, 'POST'); await load(); }, 'پیش‌فاکتور به فروش قطعی تبدیل شد.'); }}>تبدیل به فروش</button>}
           {invoice.status === 'issued' && (invoice.paymentStatus === 'proforma' || (receivable(invoice) === 0 && refundDue(invoice) === 0)) && <button onClick={() => { if (!window.confirm(`فاکتور ${invoice.number} بایگانی شود؟ سابقهٔ مالی حفظ می‌شود.`)) return; void run(async () => { await api(`/merchant/archive/invoices/${invoice.id}`, 'POST'); await load(); }, 'فاکتور بایگانی شد.'); }}>بایگانی</button>}
-          {invoice.status === 'issued' && invoice.paymentStatus !== 'proforma' && <button onClick={() => onReturn(invoice.id)}>مرجوعی / بازپرداخت</button>}
-          {invoice.status === 'issued' && invoice.paymentStatus !== 'proforma' && receivable(invoice) > 0 && <button onClick={() => { paymentKey.current = crypto.randomUUID(); setSelected(invoice); setAmount(0); }}>ثبت دریافت</button>}
+          {invoice.status === 'issued' && invoice.paymentStatus !== 'proforma' && invoice.paymentStatus !== 'cheque' && <button onClick={() => onReturn(invoice.id)}>مرجوعی / بازپرداخت</button>}
+          {invoice.paymentStatus === 'cheque' && <button onClick={onCheque}>پیگیری چک</button>}
+          {invoice.status === 'issued' && invoice.paymentStatus !== 'proforma' && invoice.paymentStatus !== 'cheque' && receivable(invoice) > 0 && <button onClick={() => { paymentKey.current = crypto.randomUUID(); setSelected(invoice); setAmount(0); }}>ثبت دریافت</button>}
           {invoice.customerPhone && <a href={`tel:${invoice.customerPhone.replace(/[^+\d]/g, '')}`}>تماس با مشتری</a>}
         </div>
       </div>)}</div> : <div className="empty">فاکتوری پیدا نشد.</div>}</section>

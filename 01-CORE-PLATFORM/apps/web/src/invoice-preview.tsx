@@ -11,6 +11,9 @@ export type InvoiceRecord = {
   paymentStatus: string; totalRial: number; paidRial: number; returnedRial: number; refundedRial: number; brandSnapshotJson: string;
   lines: { id: string; productId?: string; nameSnapshot: string; quantity: number; unitPriceRial: number; totalRial: number }[];
 };
+type InvoiceCheque = { id: string; serial: string; bank: string; amountRial: number; dueAt: string; sayadId: string;
+  issuerNationalId: string; beneficiaryNationalId: string; registrationStatus: 'unknown' | 'unregistered' | 'registered' | 'confirmed';
+  status: 'open' | 'cleared' | 'returned' | 'cancelled'; showDetails: boolean; showImage: boolean; hasPhoto: boolean };
 
 function placeholderLogo(name: string) {
   const label = (name.trim().slice(0, 1) || 'ک').replace(/[&<>"']/g, '');
@@ -33,6 +36,8 @@ export function InvoicePreview({ id, close, snapshot }: { id: string; close: () 
   const previewRef = useRef<HTMLDivElement>(null);
   const [invoice, setInvoice] = useState<InvoiceRecord | null>(null);
   const [fallbackBrand, setFallbackBrand] = useState<BrandView | null>(null);
+  const [cheque, setCheque] = useState<InvoiceCheque | null>(null);
+  const [chequeReady, setChequeReady] = useState(!!snapshot);
   const [paper, setPaper] = useState<PaperSize>('a4');
   const [mono, setMono] = useState(false);
   const [fit, setFit] = useState(true);
@@ -40,8 +45,12 @@ export function InvoicePreview({ id, close, snapshot }: { id: string; close: () 
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   useEffect(() => {
-    if (snapshot) setInvoice(snapshot);
-    else api<InvoiceRecord>(`/merchant/invoices/${id}`).then(setInvoice).catch(e => setError(e.message));
+    if (snapshot) { setInvoice(snapshot); setCheque(null); setChequeReady(true); }
+    else {
+      setChequeReady(false); setCheque(null);
+      api<InvoiceRecord>(`/merchant/invoices/${id}`).then(setInvoice).catch(e => setError(e.message));
+      api<InvoiceCheque | null>(`/merchant/invoices/${id}/cheque`).then(value => { setCheque(value); setChequeReady(true); }).catch(() => setError('مشخصات چک فاکتور دریافت نشد؛ خروجی تا بررسی دوباره آماده نیست.'));
+    }
     api<BrandView>('/merchant/invoice-brand').then(setFallbackBrand).catch(() => {});
   }, [id, snapshot]);
   useEffect(() => {
@@ -69,11 +78,17 @@ export function InvoicePreview({ id, close, snapshot }: { id: string; close: () 
     card: brandView.card, cardHolder: brandView.cardHolder, note: brandView.note, conditions: brandView.conditions,
     socialTelegram: brandView.socialTelegram, socialInstagram: brandView.socialInstagram, socialContact: brandView.socialContact
   } : null;
-  const receipt: InvoiceReceipt | null = invoice ? {
+  const receipt: InvoiceReceipt | null = invoice && chequeReady ? {
     id: invoice.id, number: invoice.number, at: invoice.issuedAt,
     dateJalali: new Intl.DateTimeFormat('fa-IR-u-ca-persian', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(invoice.issuedAt)),
     customerName: invoice.customerName, customerPhone: invoice.customerPhone,
     paymentStatus: invoice.paymentStatus as InvoiceReceipt['paymentStatus'],
+    paymentMethod: cheque ? 'چک' : invoice.paymentStatus === 'paid' ? 'تسویه‌شده' : invoice.paymentStatus === 'partial' ? 'پیش‌پرداخت' : '—',
+    dueDateJalali: cheque ? new Intl.DateTimeFormat('fa-IR-u-ca-persian', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(cheque.dueAt)) : undefined,
+    cheque: cheque ? { serial: cheque.serial, bank: cheque.bank, amountRial: cheque.amountRial,
+      dueJalali: new Intl.DateTimeFormat('fa-IR-u-ca-persian', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(cheque.dueAt)),
+      sayadId: cheque.sayadId, issuerNationalId: cheque.issuerNationalId, beneficiaryNationalId: cheque.beneficiaryNationalId,
+      registrationStatus: cheque.registrationStatus, showDetails: cheque.showDetails, showImage: cheque.showImage && cheque.hasPhoto, status: cheque.status } : undefined,
     paidRial: invoice.paidRial, returnedRial: invoice.returnedRial, refundedRial: invoice.refundedRial,
     balanceRial: invoice.paymentStatus === 'proforma' ? 0 : Math.max(0, invoice.totalRial - invoice.returnedRial - invoice.paidRial + invoice.refundedRial),
     totalRial: invoice.totalRial,
@@ -97,6 +112,7 @@ export function InvoicePreview({ id, close, snapshot }: { id: string; close: () 
     receipt.refundedRial ? `وجه بازپرداخت‌شده: ${receipt.refundedRial.toLocaleString('fa-IR')} ریال` : '',
     invoice?.paymentStatus === 'proforma' ? 'این سند پیش‌فاکتور است و بدهی ایجاد نمی‌کند.' : `مانده: ${(receipt.balanceRial ?? 0).toLocaleString('fa-IR')} ریال`,
     receipt.returnedRial && (receipt.paidRial ?? 0) - (receipt.refundedRial ?? 0) > receipt.totalRial - receipt.returnedRial ? `طلب مشتری از فروشگاه: ${((receipt.paidRial ?? 0) - (receipt.refundedRial ?? 0) - receipt.totalRial + receipt.returnedRial).toLocaleString('fa-IR')} ریال` : '',
+    cheque ? `چک ${cheque.serial} · ${cheque.bank} · ${cheque.amountRial.toLocaleString('fa-IR')} ریال · سررسید ${receipt.dueDateJalali}` : '',
     brand.card ? `شماره کارت: ${brand.card}${brand.cardHolder ? ` به نام ${brand.cardHolder}` : ''}` : '',
     brand.phone ? `تلفن فروشگاه: ${brand.phone}` : ''
   ].filter(Boolean).join('\n') : '';
@@ -122,6 +138,15 @@ export function InvoicePreview({ id, close, snapshot }: { id: string; close: () 
       if (!(e instanceof DOMException && e.name === 'AbortError')) setError(e instanceof Error ? e.message : 'خروجی فاکتور آماده نشد.');
     } finally { setBusy(''); }
   }
+  async function printInvoice() {
+    if (!previewRef.current) return;
+    setBusy('در حال آماده‌سازی چاپ فاکتور…'); setError('');
+    try {
+      await document.fonts.ready;
+      await Promise.all(Array.from(previewRef.current.querySelectorAll('img')).map(image => image.decode()));
+      setBusy(''); print(paper);
+    } catch { setError('تصویر فاکتور کامل بارگذاری نشد؛ چاپ را دوباره امتحان کنید.'); setBusy(''); }
+  }
 
   async function shareText() {
     if (!text) return;
@@ -137,12 +162,12 @@ export function InvoicePreview({ id, close, snapshot }: { id: string; close: () 
       <div className="print-actions">
         <div className="print-heading"><strong>{invoice?.paymentStatus === 'proforma' ? 'پیش‌فاکتور' : 'فاکتور'} {invoice?.number ?? ''}{snapshot ? ` · نسخهٔ ${invoice?.revision ?? 'قدیمی'}` : ''}</strong><button onClick={close} disabled={!!busy}>بستن</button></div>
         <div className="print-settings"><label>کاغذ<select value={paper} onChange={e => setPaper(e.target.value as PaperSize)} disabled={!!busy}><option value="a4">A4</option><option value="a5">A5</option></select></label><label className="print-checkbox"><input type="checkbox" checked={mono} onChange={e => setMono(e.target.checked)} disabled={!!busy}/>سیاه و سفید</label><button onClick={() => setFit(value => !value)} disabled={!!busy}>{fit ? 'نمایش درشت' : 'نمایش کامل'}</button></div>
-        <div className="print-main-actions"><button onClick={() => void exportFile('pdf', 'save')} disabled={!receipt || !brand || !!busy}>دریافت PDF</button><button onClick={() => void exportFile('png', 'save')} disabled={!receipt || !brand || !!busy}>ذخیره تصویر</button><button className="primary" onClick={() => print(paper)} disabled={!receipt || !brand || !!busy}>چاپ {paper.toUpperCase()}</button></div>
+        <div className="print-main-actions"><button onClick={() => void exportFile('pdf', 'save')} disabled={!receipt || !brand || !!busy}>دریافت PDF</button><button onClick={() => void exportFile('png', 'save')} disabled={!receipt || !brand || !!busy}>ذخیره تصویر</button><button className="primary" onClick={() => void printInvoice()} disabled={!receipt || !brand || !!busy}>چاپ {paper.toUpperCase()}</button></div>
         <details className="print-more"><summary>اشتراک‌گذاری و متن فاکتور</summary><div><button onClick={() => void exportFile('pdf', 'share')} disabled={!receipt || !brand || !!busy}>اشتراک PDF</button><button onClick={() => void exportFile('png', 'share')} disabled={!receipt || !brand || !!busy}>اشتراک تصویر</button><button onClick={() => void navigator.clipboard.writeText(text).catch(() => setError('کپی متن انجام نشد.'))} disabled={!text || !!busy}>کپی متن</button><button onClick={() => void shareText()} disabled={!text || !!busy}>اشتراک متن</button></div></details>
       </div>
       {error && <div role="alert" className="field-error">{error}</div>}
       {busy && <div className="invoice-export-progress" role="status" aria-live="polite"><span className="invoice-export-spinner" aria-hidden="true"/>{busy}</div>}
-      {receipt && brand ? <div ref={previewRef} className="invoice-preview-scroll"><div className="invoice-preview-fit" style={{ zoom: previewScale }}><InvoiceDocument brand={brand} receipt={receipt} mono={mono} paper={paper} logo={brandView?.logoDataUrl || placeholderLogo(brand.storeName)} revisionLabel={snapshot ? `نسخهٔ ${invoice?.revision ?? 'قدیمی'}` : undefined}/></div></div> : <div className="empty">در حال دریافت فاکتور…</div>}
+      {receipt && brand ? <div ref={previewRef} className="invoice-preview-scroll"><div className="invoice-preview-fit" style={{ zoom: previewScale }}><InvoiceDocument brand={brand} receipt={receipt} mono={mono} paper={paper} logo={brandView?.logoDataUrl || placeholderLogo(brand.storeName)} chequePhoto={cheque?.hasPhoto ? `/api/merchant/accounting/cheques/${cheque.id}/photo` : undefined} revisionLabel={snapshot ? `نسخهٔ ${invoice?.revision ?? 'قدیمی'}` : undefined}/></div></div> : <div className="empty">در حال دریافت فاکتور…</div>}
     </div>
   </div>;
 }

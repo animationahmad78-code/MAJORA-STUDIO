@@ -144,6 +144,42 @@ try {
   $staleBrandBlocked = $false
   try { $null = PutJson '/merchant/invoice-brand' @{revision=1;storeName='ناسازگار';slogan='';phone='';address='';card='';cardHolder='';note='';conditions=@();socialTelegram='';socialInstagram='';socialContact=''} $ownerSession } catch { $staleBrandBlocked = $_.Exception.Response.StatusCode -eq 409 }
   if (-not $staleBrandBlocked) { throw 'Stale invoice brand edit was accepted' }
+  $chequeDetails = @{direction='received';party='مشتری آزمون';serial='CHK-100';bank='بانک آزمون';amountRial=600000;dueAt=[datetime]::UtcNow.AddDays(5).ToString('o');sayadId='1234567890123456';issuerNationalId='';beneficiaryNationalId='';registrationStatus='unknown';note='آزمون چک';showDetails=$true;showImage=$true;photoDataUrl=$png}
+  $chequeInvoiceBody = @{idempotencyKey="cheque-invoice-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='cheque';paidRial=0;lines=@(@{productId=$null;name='قلم چکی';unitPriceRial=1000000;quantity=1});cheque=$chequeDetails}
+  $chequeInvoice = PostJson '/merchant/invoices' $chequeInvoiceBody $ownerSession
+  $chequeInvoiceAgain = PostJson '/merchant/invoices' $chequeInvoiceBody $ownerSession
+  if ($chequeInvoiceAgain.id -ne $chequeInvoice.id) { throw 'Cheque invoice idempotency failed' }
+  $chequeList = Invoke-RestMethod "$base/api/merchant/accounting/cheques" -WebSession $ownerSession
+  $linkedCheque = @($chequeList | Where-Object invoiceId -eq $chequeInvoice.id)[0]
+  if (-not $linkedCheque -or $linkedCheque.amountRial -ne 600000 -or $linkedCheque.status -ne 'open' -or -not $linkedCheque.hasPhoto) { throw 'Cheque invoice did not create a linked cheque record' }
+  $duplicateSayadBlocked = $false
+  try { $null = PostJson '/merchant/accounting/cheques' @{direction='received';party='مشتری دیگر';serial='CHK-DUP';bank='بانک آزمون';amountRial=100000;dueAt=[datetime]::UtcNow.AddDays(6).ToString('o');sayadId='1234567890123456';registrationStatus='unknown'} $ownerSession } catch { $duplicateSayadBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $duplicateSayadBlocked) { throw 'Duplicate Sayad identifier was accepted in same tenant' }
+  $chequePhoto = Invoke-WebRequest "$base/api/merchant/accounting/cheques/$($linkedCheque.id)/photo" -WebSession $ownerSession
+  if ($chequePhoto.Headers['Content-Type'] -notlike 'image/png*') { throw 'Cheque photo could not be read' }
+  $chequePaymentBlocked = $false
+  try { $null = PostJson "/merchant/invoices/$($chequeInvoice.id)/payments" @{idempotencyKey="cheque-payment-$id";amountRial=500000;method='cash'} $ownerSession } catch { $chequePaymentBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $chequePaymentBlocked) { throw 'Open cheque allowed untracked invoice payment' }
+  $chequeReturnBlocked = $false
+  $chequeDetail = Invoke-RestMethod "$base/api/merchant/invoices/$($chequeInvoice.id)" -WebSession $ownerSession
+  try { $null = PostJson "/merchant/invoices/$($chequeInvoice.id)/returns" @{idempotencyKey="cheque-return-$id";reason='آزمون';lines=@(@{invoiceLineId=$chequeDetail.lines[0].id;quantity=1;restock=$false})} $ownerSession } catch { $chequeReturnBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $chequeReturnBlocked) { throw 'Open cheque allowed invoice return' }
+  $chequeOverview = Invoke-RestMethod "$base/api/merchant/accounting/cheques/overview" -WebSession $ownerSession
+  if (@($chequeOverview.groups | Where-Object { $_.status -eq 'open' -and $_.direction -eq 'received' })[0].amountRial -ne 600000) { throw 'Cheque overview mismatch' }
+  $null = PostJson "/merchant/accounting/cheques/$($linkedCheque.id)/status" @{status='cleared'} $ownerSession
+  $chequeSettled = Invoke-RestMethod "$base/api/merchant/invoices/$($chequeInvoice.id)" -WebSession $ownerSession
+  if ($chequeSettled.paidRial -ne 600000 -or $chequeSettled.paymentStatus -ne 'partial') { throw 'Cleared cheque did not post exactly one invoice payment' }
+  $doubleClearingBlocked = $false
+  try { $null = PostJson "/merchant/accounting/cheques/$($linkedCheque.id)/status" @{status='cleared'} $ownerSession } catch { $doubleClearingBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $doubleClearingBlocked) { throw 'Cheque cleared twice' }
+  $returnedCheque = PostJson '/merchant/invoices' @{idempotencyKey="cheque-returned-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='cheque';paidRial=0;lines=@(@{productId=$null;name='قلم چکی دوم';unitPriceRial=200000;quantity=1});cheque=@{direction='received';party='مشتری آزمون';serial='CHK-200';bank='بانک آزمون';amountRial=200000;dueAt=[datetime]::UtcNow.AddDays(7).ToString('o');registrationStatus='unknown'}} $ownerSession
+  $allCheques = Invoke-RestMethod "$base/api/merchant/accounting/cheques" -WebSession $ownerSession
+  $returnedRecord = @($allCheques | Where-Object { $_.invoiceId -eq $returnedCheque.id })[0]
+  $null = PostJson "/merchant/accounting/cheques/$($returnedRecord.id)/status" @{status='returned'} $ownerSession
+  $returnedInvoice = Invoke-RestMethod "$base/api/merchant/invoices/$($returnedCheque.id)" -WebSession $ownerSession
+  if ($returnedInvoice.paymentStatus -ne 'unpaid' -or $returnedInvoice.paidRial -ne 0) { throw 'Returned cheque was treated as paid' }
+  $independentCheque = PostJson '/merchant/accounting/cheques' @{direction='issued';party='تأمین‌کننده آزمون';serial='OUT-1';bank='بانک آزمون';amountRial=100000;dueAt=[datetime]::UtcNow.AddDays(9).ToString('o');registrationStatus='unknown'} $ownerSession
+  if (-not $independentCheque.id) { throw 'Independent issued cheque was not registered' }
   $otherPass = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(20))
   $other = PostJson '/admin/tenants' @{name='فروشگاه دوم';slug="other-$($id.Substring(0,8))";ownerUsername="other_$id";ownerName='مالک دوم';ownerPassword=$otherPass} $adminSession
   $null = PostJson "/admin/tenants/$($other.id)/subscription" @{planId=$plan.id;startsAt=[datetime]::UtcNow.AddDays(-1).ToString('o');endsAt=[datetime]::UtcNow.AddDays(30).ToString('o');paymentStatus='paid'} $adminSession
@@ -173,6 +209,12 @@ try {
   $crossRevisionBlocked = $false
   try { $null = Invoke-RestMethod "$base/api/merchant/invoices/$($invoice.id)/revisions" -WebSession $otherSession } catch { $crossRevisionBlocked = $_.Exception.Response.StatusCode -eq 404 }
   if (-not $crossRevisionBlocked) { throw 'Cross-tenant invoice revision history was readable' }
+  $crossChequeBlocked = $false
+  try { $null = Invoke-WebRequest "$base/api/merchant/accounting/cheques/$($linkedCheque.id)/photo" -WebSession $otherSession } catch { $crossChequeBlocked = $_.Exception.Response.StatusCode -eq 404 }
+  if (-not $crossChequeBlocked) { throw 'Cross-tenant cheque photo was readable' }
+  $crossChequeStatusBlocked = $false
+  try { $null = PostJson "/merchant/accounting/cheques/$($independentCheque.id)/status" @{status='cleared'} $otherSession } catch { $crossChequeStatusBlocked = $_.Exception.Response.StatusCode -eq 404 }
+  if (-not $crossChequeStatusBlocked) { throw 'Cross-tenant cheque status changed' }
   $crossReturnBlocked = $false
   try { $null = PostJson "/merchant/invoices/$($invoice.id)/returns" @{idempotencyKey="cross-return-$id";reason='نباید ثبت شود';lines=@(@{invoiceLineId=$returnLineId;quantity=1;restock=$true})} $otherSession } catch { $crossReturnBlocked = $_.Exception.Response.StatusCode -eq 404 }
   if (-not $crossReturnBlocked) { throw 'Cross-tenant return was not blocked' }
@@ -278,7 +320,7 @@ try {
   $suspended = $false
   try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession } catch { $suspended = $_.Exception.Response.StatusCode -eq 403 }
   if (-not $suspended) { throw 'Suspended tenant still has access' }
-  Write-Output 'PASS: login, subscription, AI fallback, product/photo, customer/CSV, invoice revision/history/stock/payment guard/isolation, price-quote/selective discount/manual lines/proforma conversion, returns/refund/idempotency/accounting, price batch/revert/isolation, archive/restore/open balance guard, purchase/expense/cost estimate, staff role, CSRF, suspension'
+  Write-Output 'PASS: login, subscription, AI fallback, product/photo, customer/CSV, invoice revision/history/stock/payment guard/isolation, cheque issue/photo/clear/return/overview/tenant isolation, price-quote/selective discount/manual lines/proforma conversion, returns/refund/idempotency/accounting, price batch/revert/isolation, archive/restore/open balance guard, purchase/expense/cost estimate, staff role, CSRF, suspension'
 } finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
   Write-Output "Test log: $log"

@@ -114,6 +114,24 @@ static bool CanWrite(ClaimsPrincipal p) => Role(p) is "owner" or "manager";
 static bool CanSell(ClaimsPrincipal p) => Role(p) is "owner" or "manager" or "staff";
 static IResult Fail(string message, int status = 400) => Results.Json(new { error = message }, statusCode: status);
 static void Audit(MajoraDb db, ClaimsPrincipal p, Guid? tenantId, string action, string entity, Guid id, string detail = "") => db.Audit.Add(new AuditEntry { ActorId = UserId(p), TenantId = tenantId, Action = action, EntityType = entity, EntityId = id.ToString(), Detail = detail });
+static bool ValidCheque(ChequeRequest body) =>
+    body.Direction is "received" or "issued" && !string.IsNullOrWhiteSpace(body.Party) && body.Party.Trim().Length <= 200 &&
+    !string.IsNullOrWhiteSpace(body.Serial) && body.Serial.Trim().Length <= 80 &&
+    !string.IsNullOrWhiteSpace(body.Bank) && body.Bank.Trim().Length <= 120 &&
+    body.AmountRial > 0 && body.DueAt.Year is >= 1900 and <= 2100 &&
+    body.RegistrationStatus is "unknown" or "unregistered" or "registered" or "confirmed" &&
+    (string.IsNullOrEmpty(body.SayadId) || body.SayadId.Length == 16 && body.SayadId.All(char.IsAsciiDigit)) &&
+    (string.IsNullOrEmpty(body.IssuerNationalId) || body.IssuerNationalId.Length == 10 && body.IssuerNationalId.All(char.IsAsciiDigit)) &&
+    (string.IsNullOrEmpty(body.BeneficiaryNationalId) || body.BeneficiaryNationalId.Length == 10 && body.BeneficiaryNationalId.All(char.IsAsciiDigit)) &&
+    (body.Note?.Length ?? 0) <= 500;
+static Cheque NewCheque(ChequeRequest body, Guid tid, Guid? invoiceId = null) => new()
+{
+    TenantId = tid, InvoiceId = invoiceId, Direction = body.Direction, Party = body.Party.Trim(), Serial = body.Serial.Trim(),
+    Bank = body.Bank.Trim(), AmountRial = body.AmountRial, DueAt = body.DueAt.ToUniversalTime(),
+    SayadId = body.SayadId?.Trim() ?? "", IssuerNationalId = body.IssuerNationalId?.Trim() ?? "",
+    BeneficiaryNationalId = body.BeneficiaryNationalId?.Trim() ?? "", RegistrationStatus = body.RegistrationStatus,
+    Note = body.Note?.Trim() ?? "", ShowDetails = body.ShowDetails, ShowImage = body.ShowImage
+};
 static async Task<bool> Active(MajoraDb db, Guid tenantId) => await db.Tenants.AnyAsync(t => t.Id == tenantId && t.Enabled) && await db.Subscriptions.AnyAsync(s => s.TenantId == tenantId && s.PaymentStatus == "paid" && s.StartsAt <= DateTime.UtcNow && s.EndsAt > DateTime.UtcNow);
 static void Csrf(HttpContext c) { var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(24)); c.Response.Cookies.Append("majora.csrf", token, new CookieOptions { HttpOnly = false, Secure = !c.RequestServices.GetRequiredService<IHostEnvironment>().IsDevelopment() || c.Request.IsHttps, SameSite = SameSiteMode.Strict, Path = "/" }); }
 
@@ -266,7 +284,7 @@ merchant.MapGet("/dashboard", async (MajoraDb db, HttpContext c) =>
     var receipts30 = await db.Payments.Where(x => x.TenantId == tid && x.ReceivedAt >= since).SumAsync(x => x.AmountRial);
     var refunds30 = await db.Refunds.Where(x => x.TenantId == tid && x.RefundedAt >= since).SumAsync(x => x.AmountRial);
     var openInvoices = await db.Invoices.Where(x => x.TenantId == tid && x.Status == "issued" && x.PaymentStatus != "proforma").ToListAsync();
-    return Results.Ok(new { sales30Rial = invoices.Sum(x => x.TotalRial) - returns30, received30Rial = receipts30 - refunds30, receivable30Rial = openInvoices.Sum(FinanceMath.Receivable), refundDueRial = openInvoices.Sum(FinanceMath.RefundDue), invoiceCount30 = invoices.Count, customers = await db.Customers.CountAsync(x => x.TenantId == tid && !x.Archived), products = await db.Products.CountAsync(x => x.TenantId == tid && !x.Archived), lowStock = await db.Products.CountAsync(x => x.TenantId == tid && !x.Archived && x.Stock <= 3), overdue = await db.Reminders.CountAsync(x => x.TenantId == tid && !x.Done && x.DueAt <= DateTime.UtcNow) });
+    return Results.Ok(new { sales30Rial = invoices.Sum(x => x.TotalRial) - returns30, received30Rial = receipts30 - refunds30, receivable30Rial = openInvoices.Sum(FinanceMath.Receivable), refundDueRial = openInvoices.Sum(FinanceMath.RefundDue), invoiceCount30 = invoices.Count, customers = await db.Customers.CountAsync(x => x.TenantId == tid && !x.Archived), products = await db.Products.CountAsync(x => x.TenantId == tid && !x.Archived), lowStock = await db.Products.CountAsync(x => x.TenantId == tid && !x.Archived && x.Stock <= 3), overdue = await db.Reminders.CountAsync(x => x.TenantId == tid && !x.Done && x.DueAt <= DateTime.UtcNow), openCheques = await db.Cheques.CountAsync(x => x.TenantId == tid && x.Status == "open"), dueCheques = await db.Cheques.CountAsync(x => x.TenantId == tid && x.Status == "open" && x.DueAt <= DateTime.UtcNow) });
 });
 merchant.MapGet("/products/meta", async (MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var products = db.Products.Where(x => x.TenantId == tid && !x.Archived); return Results.Ok(new { count = await products.CountAsync(), categories = await products.Select(x => x.Category).Distinct().OrderBy(x => x).ToListAsync() }); });
 merchant.MapGet("/products", async (string? q, string? category, int? page, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Products.Where(x => x.TenantId == tid && !x.Archived && (q == null || x.Name.Contains(q) || x.Sku.Contains(q)) && (string.IsNullOrEmpty(category) || x.Category == category)).OrderBy(x => x.Name).Skip(Math.Max(0, (page ?? 1) - 1) * 50).Take(50).ToListAsync()); });
@@ -453,6 +471,7 @@ merchant.MapPost("/archive/{kind}/{id:guid}", async (string kind, Guid id, Major
         case "invoices":
             var invoice = await db.Invoices.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid);
             if (invoice is null) return Results.NotFound();
+            if (await db.Cheques.AnyAsync(x => x.TenantId == tid && x.InvoiceId == id && x.Status == "open")) return Fail("چک این فاکتور هنوز باز است و فاکتور باید در پیگیری‌ها بماند.", 409);
             if (invoice.PaymentStatus != "proforma" && (FinanceMath.Receivable(invoice) > 0 || FinanceMath.RefundDue(invoice) > 0)) return Fail("فاکتور دارای مانده یا بازپرداخت باز است و باید در پیگیری‌ها بماند.", 409);
             invoice.Archived = true; break;
         default: return Results.NotFound();
@@ -492,6 +511,15 @@ merchant.MapPost("/customers", async (CustomerRequest body, MajoraDb db, HttpCon
 });
 merchant.MapGet("/invoices", async (string? q, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Invoices.Where(x => x.TenantId == tid && !x.Archived && (q == null || x.CustomerName.Contains(q) || x.CustomerPhone.Contains(q) || x.Number.ToString() == q)).OrderByDescending(x => x.IssuedAt).Take(100).Select(x => new { x.Id, x.Number, x.Revision, x.CustomerName, x.CustomerPhone, x.IssuedAt, x.TotalRial, x.PaidRial, x.ReturnedRial, x.RefundedRial, x.PaymentStatus, x.Status }).ToListAsync()); });
 merchant.MapGet("/invoices/{id:guid}", async (Guid id, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var invoice = await db.Invoices.Include(x => x.Lines).SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid); return invoice is null ? Results.NotFound() : Results.Ok(invoice); });
+merchant.MapGet("/invoices/{id:guid}/cheque", async (Guid id, MajoraDb db, HttpContext c) =>
+{
+    var tid = TenantId(c.User);
+    if (!await db.Invoices.AnyAsync(x => x.Id == id && x.TenantId == tid)) return Results.NotFound();
+    var cheque = await db.Cheques.AsNoTracking().Where(x => x.InvoiceId == id && x.TenantId == tid)
+        .Select(x => new { x.Id, x.Serial, x.Bank, x.AmountRial, x.DueAt, x.SayadId, x.IssuerNationalId,
+            x.BeneficiaryNationalId, x.RegistrationStatus, x.Status, x.ShowDetails, x.ShowImage, HasPhoto = x.PhotoBytes != null }).SingleOrDefaultAsync();
+    return Results.Ok(cheque);
+});
 merchant.MapGet("/invoices/{id:guid}/revisions", async (Guid id, MajoraDb db, HttpContext c) =>
 {
     var tid = TenantId(c.User);
@@ -514,6 +542,7 @@ merchant.MapPost("/invoices/{id:guid}/revisions", async (Guid id, InvoiceRevisio
     var invoice = await db.Invoices.Include(x => x.Lines).SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && x.Status == "issued" && !x.Archived);
     if (invoice is null) return Results.NotFound();
     if (invoice.Revision != body.ExpectedRevision) return Fail("فاکتور در دستگاه دیگری تغییر کرده است؛ دوباره بازش کنید.", 409);
+    if (await db.Cheques.AnyAsync(x => x.TenantId == tid && x.InvoiceId == id && x.Status == "open")) return Fail("چک این فاکتور هنوز باز است؛ پیش از ویرایش، وضعیت آن را تعیین کنید.", 409);
     if (invoice.ReturnedRial > 0 || invoice.RefundedRial > 0 || await db.SalesReturns.AnyAsync(x => x.InvoiceId == id && x.TenantId == tid))
         return Fail("فاکتور دارای مرجوعی یا بازپرداخت از مسیر اصلاح سند قابل تغییر نیست؛ برای اصلاح بعدی سند جداگانه ثبت کنید.", 409);
     var oldLines = invoice.Lines.ToDictionary(x => x.Id);
@@ -608,10 +637,15 @@ merchant.MapPost("/invoices", async (InvoiceRequest body, MajoraDb db, HttpConte
     if (string.IsNullOrWhiteSpace(body.IdempotencyKey) || body.IdempotencyKey.Length > 100 || body.Lines.Count is < 1 or > 200) return Fail("شناسهٔ درخواست یا اقلام نامعتبر است.");
     var catalogIds = body.Lines.Where(x => x.ProductId is not null).Select(x => x.ProductId).ToList();
     if (catalogIds.Distinct().Count() != catalogIds.Count) return Fail("یک کالا بیش از یک بار در فاکتور انتخاب شده است.");
-    if (body.PaymentStatus is not ("paid" or "partial" or "unpaid" or "proforma")) return Fail("وضعیت پرداخت لازم است.");
+    if (body.PaymentStatus is not ("paid" or "partial" or "unpaid" or "proforma" or "cheque")) return Fail("وضعیت پرداخت لازم است.");
+    if (body.PaymentStatus == "cheque" && (body.Cheque is null || !ValidCheque(body.Cheque) || body.Cheque.Direction != "received")) return Fail("مشخصات چک دریافتی را کامل و درست وارد کنید.");
+    if (body.PaymentStatus != "cheque" && body.Cheque is not null) return Fail("اطلاعات چک فقط برای فاکتور چکی پذیرفته می‌شود.");
+    if (body.Cheque?.PhotoDataUrl is { Length: > 0 } && !ProductPhotos.TryDecode(body.Cheque.PhotoDataUrl, out _, out _)) return Fail("تصویر چک معتبر نیست.");
     await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
     var existing = await db.Invoices.SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == body.IdempotencyKey);
     if (existing is not null) return Results.Ok(new { existing.Id, existing.Number, existing.TotalRial });
+    var chequeSayad = body.Cheque?.SayadId;
+    if (!string.IsNullOrWhiteSpace(chequeSayad) && await db.Cheques.AnyAsync(x => x.TenantId == tid && x.SayadId == chequeSayad)) return Fail("این شناسهٔ صیادی قبلاً در فروشگاه ثبت شده است.", 409);
     var tenant = await db.Tenants.SingleAsync(x => x.Id == tid); var customer = body.CustomerId is Guid cid ? await db.Customers.SingleOrDefaultAsync(x => x.Id == cid && x.TenantId == tid && !x.Archived) : null;
     if (body.CustomerId is not null && customer is null) return Fail("مشتری یافت نشد.");
     if (customer is null)
@@ -654,7 +688,15 @@ merchant.MapPost("/invoices", async (InvoiceRequest body, MajoraDb db, HttpConte
         if (body.PaymentStatus != "proforma" && p is not null) { p.Stock -= item.Quantity; db.StockMovements.Add(new StockMovement { TenantId = tid, ProductId = p.Id, InvoiceId = invoice.Id, Delta = -item.Quantity, Reason = "invoice-issued" }); }
     }
     if (body.ExpectedTotalRial is long expectedTotal && expectedTotal != invoice.TotalRial) return Fail("جمع فاکتور با قیمت فعلی کالاها سازگار نیست؛ فهرست را تازه کنید.", 409);
-    if (body.PaidRial < 0 || body.PaidRial > invoice.TotalRial || (body.PaymentStatus == "paid" && body.PaidRial != invoice.TotalRial) || (body.PaymentStatus == "partial" && (body.PaidRial <= 0 || body.PaidRial == invoice.TotalRial)) || (body.PaymentStatus is "unpaid" or "proforma" && body.PaidRial != 0)) return Fail("مبلغ پرداخت با وضعیت فاکتور سازگار نیست.");
+    if (body.PaidRial < 0 || body.PaidRial > invoice.TotalRial || (body.PaymentStatus == "paid" && body.PaidRial != invoice.TotalRial) || (body.PaymentStatus == "partial" && (body.PaidRial <= 0 || body.PaidRial == invoice.TotalRial)) || (body.PaymentStatus is "unpaid" or "proforma" or "cheque" && body.PaidRial != 0)) return Fail("مبلغ پرداخت با وضعیت فاکتور سازگار نیست.");
+    if (body.Cheque is { } chequeInput)
+    {
+        if (chequeInput.AmountRial > invoice.TotalRial || chequeInput.ShowImage && string.IsNullOrWhiteSpace(chequeInput.PhotoDataUrl)) return Fail("مبلغ یا تصویر چک با فاکتور سازگار نیست.");
+        var cheque = NewCheque(chequeInput, tid, invoice.Id);
+        if (!string.IsNullOrWhiteSpace(chequeInput.PhotoDataUrl) && ProductPhotos.TryDecode(chequeInput.PhotoDataUrl, out var contentType, out var bytes))
+        { cheque.PhotoContentType = contentType; cheque.PhotoBytes = bytes; }
+        db.Cheques.Add(cheque);
+    }
     invoice.PaidRial = body.PaidRial; if (body.PaidRial > 0) db.Payments.Add(new Payment { TenantId = tid, InvoiceId = invoice.Id, AmountRial = body.PaidRial, Method = "initial" });
     if (body.PaymentStatus != "proforma" && invoice.PaidRial < invoice.TotalRial && body.DueAt is DateTime due) db.Reminders.Add(new Reminder { TenantId = tid, InvoiceId = invoice.Id, Title = $"پیگیری مانده فاکتور {invoice.Number}", DueAt = due });
     db.InvoiceRevisions.Add(new InvoiceRevision { TenantId = tid, InvoiceId = invoice.Id, RevisionNo = 1,
@@ -704,6 +746,7 @@ merchant.MapPost("/invoices/{id:guid}/payments", async (Guid id, PaymentRequest 
     var existing = await db.Payments.SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == body.IdempotencyKey);
     if (existing is not null) return existing.InvoiceId == id ? Results.Ok(new { existing.Id, existing.AmountRial }) : Fail("شناسهٔ درخواست برای فاکتور دیگری استفاده شده است.", 409);
     var invoice = await db.Invoices.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && x.Status == "issued" && x.PaymentStatus != "proforma"); if (invoice is null) return Results.NotFound();
+    if (await db.Cheques.AnyAsync(x => x.TenantId == tid && x.InvoiceId == id && x.Status == "open")) return Fail("چک این فاکتور هنوز باز است؛ ابتدا وضعیت چک را مشخص کنید.", 409);
     if (body.AmountRial < 1 || body.AmountRial > FinanceMath.Receivable(invoice) || string.IsNullOrWhiteSpace(body.Method)) return Fail("مبلغ از مانده بیشتر است یا معتبر نیست.");
     var payment = new Payment { TenantId = invoice.TenantId, InvoiceId = id, IdempotencyKey = body.IdempotencyKey, AmountRial = body.AmountRial, Method = body.Method.Trim(), Reference = body.Reference?.Trim() ?? "" };
     invoice.PaidRial = checked(invoice.PaidRial + body.AmountRial); FinanceMath.UpdateStatus(invoice);
@@ -735,6 +778,7 @@ merchant.MapPost("/invoices/{id:guid}/returns", async (Guid id, SalesReturnReque
     await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
     var existing = await db.SalesReturns.SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == body.IdempotencyKey);
     if (existing is not null) return existing.InvoiceId == id ? Results.Ok(new { existing.Id, existing.AmountRial }) : Fail("شناسهٔ درخواست برای فاکتور دیگری استفاده شده است.", 409);
+    if (await db.Cheques.AnyAsync(x => x.TenantId == tid && x.InvoiceId == id && x.Status == "open")) return Fail("پیش از ثبت مرجوعی، وضعیت چک باز فاکتور را تعیین کنید.", 409);
     var invoice = await db.Invoices.Include(x => x.Lines).SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && x.Status == "issued" && x.PaymentStatus != "proforma");
     if (invoice is null) return Results.NotFound();
     var salesReturn = new SalesReturn { TenantId = tid, InvoiceId = id, IdempotencyKey = body.IdempotencyKey, Reason = body.Reason.Trim() };
@@ -839,6 +883,93 @@ merchant.MapGet("/accounting/overview", async (MajoraDb db, HttpContext c) =>
     var received = await db.Payments.Where(x => x.TenantId == tid && x.ReceivedAt >= since).SumAsync(x => x.AmountRial);
     var refunded = await db.Refunds.Where(x => x.TenantId == tid && x.RefundedAt >= since).SumAsync(x => x.AmountRial);
     return Results.Ok(new { periodDays = 30, revenueRial = revenue, returnsRial, receivedRial = received - refunded, refundedRial = refunded, customerReceivableRial = openInvoices.Sum(FinanceMath.Receivable), refundDueRial = openInvoices.Sum(FinanceMath.RefundDue), purchasesRial = purchases.Sum(x => x.TotalRial), supplierPayableRial = purchases.Sum(x => x.TotalRial - x.PaidRial), expensesRial = expenses.Sum(x => x.AmountRial), costComplete, costOfGoodsSoldRial = cogs, estimatedOperatingRial = cogs is null ? null : (long?)(revenue - cogs.Value - expenses.Sum(x => x.AmountRial)), note = "برآورد ۳۰روزهٔ عملیاتی است؛ مالیات، استهلاک و ماندهٔ ابتدای دوره در آن نیست. طلب و بازپرداخت، ماندهٔ باز همهٔ فاکتورهاست." });
+});
+merchant.MapGet("/accounting/cheques", async (string? q, string? status, MajoraDb db, HttpContext c) =>
+{
+    var tid = TenantId(c.User);
+    var query = db.Cheques.AsNoTracking().Where(x => x.TenantId == tid);
+    if (!string.IsNullOrWhiteSpace(status) && status != "all") query = query.Where(x => x.Status == status);
+    if (!string.IsNullOrWhiteSpace(q)) query = query.Where(x => x.Party.Contains(q) || x.Serial.Contains(q) || x.Bank.Contains(q) || x.SayadId.Contains(q));
+    return Results.Ok(await query.OrderBy(x => x.Status == "open" ? 0 : 1).ThenBy(x => x.DueAt).Take(200)
+        .Select(x => new { x.Id, x.InvoiceId, InvoiceNumber = x.InvoiceId == null ? (long?)null : db.Invoices.Where(i => i.Id == x.InvoiceId && i.TenantId == tid).Select(i => (long?)i.Number).FirstOrDefault(),
+            x.Direction, x.Party, x.Serial, x.Bank, x.AmountRial, x.DueAt, x.SayadId, x.IssuerNationalId, x.BeneficiaryNationalId,
+            x.RegistrationStatus, x.Status, x.Note, x.ShowDetails, x.ShowImage, HasPhoto = x.PhotoBytes != null, x.CreatedAt, x.UpdatedAt }).ToListAsync());
+});
+merchant.MapGet("/accounting/cheques/overview", async (MajoraDb db, HttpContext c) =>
+{
+    var tid = TenantId(c.User);
+    var groups = await db.Cheques.AsNoTracking().Where(x => x.TenantId == tid)
+        .GroupBy(x => new { x.Direction, x.Status }).Select(g => new { g.Key.Direction, g.Key.Status, Count = g.Count(), AmountRial = g.Sum(x => x.AmountRial) }).ToListAsync();
+    return Results.Ok(new { groups, overdueCount = await db.Cheques.CountAsync(x => x.TenantId == tid && x.Status == "open" && x.DueAt <= DateTime.UtcNow) });
+});
+merchant.MapPost("/accounting/cheques", async (ChequeRequest body, MajoraDb db, HttpContext c) =>
+{
+    if (!CanWrite(c.User)) return Results.Forbid();
+    if (!ValidCheque(body) || body.ShowDetails || body.ShowImage || !string.IsNullOrWhiteSpace(body.PhotoDataUrl) && !ProductPhotos.TryDecode(body.PhotoDataUrl, out _, out _)) return Fail("مشخصات چک مستقل نامعتبر است.");
+    var tid = TenantId(c.User); var cheque = NewCheque(body, tid);
+    if (cheque.SayadId.Length > 0 && await db.Cheques.AnyAsync(x => x.TenantId == tid && x.SayadId == cheque.SayadId)) return Fail("این شناسهٔ صیادی قبلاً در فروشگاه ثبت شده است.", 409);
+    if (!string.IsNullOrWhiteSpace(body.PhotoDataUrl) && ProductPhotos.TryDecode(body.PhotoDataUrl, out var contentType, out var bytes))
+    { cheque.PhotoContentType = contentType; cheque.PhotoBytes = bytes; }
+    db.Cheques.Add(cheque); Audit(db, c.User, tid, "cheque.create", "cheque", cheque.Id);
+    try { await db.SaveChangesAsync(); } catch (DbUpdateException) { return Fail("چک تکراری است یا هم‌زمان تغییر کرده است.", 409); }
+    return Results.Created($"/api/merchant/accounting/cheques/{cheque.Id}", new { cheque.Id });
+});
+merchant.MapPut("/accounting/cheques/{id:guid}", async (Guid id, ChequeRequest body, MajoraDb db, HttpContext c) =>
+{
+    if (!CanWrite(c.User)) return Results.Forbid();
+    if (!ValidCheque(body)) return Fail("مشخصات چک نامعتبر است.");
+    var tid = TenantId(c.User); await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    var cheque = await db.Cheques.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid);
+    if (cheque is null) return Results.NotFound();
+    if (cheque.Status != "open") return Fail("پروندهٔ بسته‌شده را نمی‌توان بی‌سابقه ویرایش کرد.", 409);
+    if (!string.IsNullOrWhiteSpace(body.SayadId) && await db.Cheques.AnyAsync(x => x.TenantId == tid && x.Id != id && x.SayadId == body.SayadId)) return Fail("این شناسهٔ صیادی قبلاً در فروشگاه ثبت شده است.", 409);
+    if (cheque.Direction != body.Direction || cheque.InvoiceId is not null && (body.Direction != "received" || body.AmountRial > await db.Invoices.Where(i => i.Id == cheque.InvoiceId && i.TenantId == tid).Select(i => i.TotalRial - i.ReturnedRial - i.PaidRial + i.RefundedRial).SingleAsync())) return Fail("نوع یا مبلغ چک با فاکتور ناسازگار است.", 409);
+    if (body.PhotoDataUrl is { Length: > 0 } && !ProductPhotos.TryDecode(body.PhotoDataUrl, out _, out _)) return Fail("تصویر چک معتبر نیست.");
+    if (body.ShowImage && body.PhotoDataUrl is null && cheque.PhotoBytes is null) return Fail("برای چاپ تصویر، ابتدا عکس چک را ثبت کنید.");
+    cheque.Party = body.Party.Trim(); cheque.Serial = body.Serial.Trim(); cheque.Bank = body.Bank.Trim(); cheque.AmountRial = body.AmountRial;
+    cheque.DueAt = body.DueAt.ToUniversalTime(); cheque.SayadId = body.SayadId?.Trim() ?? ""; cheque.IssuerNationalId = body.IssuerNationalId?.Trim() ?? "";
+    cheque.BeneficiaryNationalId = body.BeneficiaryNationalId?.Trim() ?? ""; cheque.RegistrationStatus = body.RegistrationStatus;
+    cheque.Note = body.Note?.Trim() ?? ""; cheque.ShowDetails = cheque.InvoiceId is not null && body.ShowDetails; cheque.ShowImage = cheque.InvoiceId is not null && body.ShowImage;
+    if (body.PhotoDataUrl == "") { cheque.PhotoBytes = null; cheque.PhotoContentType = null; cheque.ShowImage = false; }
+    else if (body.PhotoDataUrl is { Length: > 0 } && ProductPhotos.TryDecode(body.PhotoDataUrl, out var contentType, out var bytes))
+    { cheque.PhotoBytes = bytes; cheque.PhotoContentType = contentType; }
+    cheque.UpdatedAt = DateTime.UtcNow; Audit(db, c.User, tid, "cheque.update", "cheque", id);
+    try { await db.SaveChangesAsync(); await tx.CommitAsync(); }
+    catch (DbUpdateException) { return Fail("چک تکراری است یا هم‌زمان تغییر کرده است.", 409); }
+    return Results.Ok(new { cheque.Id });
+});
+merchant.MapGet("/accounting/cheques/{id:guid}/photo", async (Guid id, MajoraDb db, HttpContext c) =>
+{
+    var tid = TenantId(c.User); var cheque = await db.Cheques.AsNoTracking().Where(x => x.Id == id && x.TenantId == tid && x.PhotoBytes != null)
+        .Select(x => new { x.PhotoBytes, x.PhotoContentType }).SingleOrDefaultAsync();
+    c.Response.Headers.CacheControl = "no-store";
+    return cheque?.PhotoBytes is { } bytes ? Results.File(bytes, cheque.PhotoContentType ?? "image/jpeg") : Results.NotFound();
+});
+merchant.MapPost("/accounting/cheques/{id:guid}/status", async (Guid id, ChequeStatusRequest body, MajoraDb db, HttpContext c) =>
+{
+    if (!CanWrite(c.User)) return Results.Forbid();
+    if (body.Status is not ("cleared" or "returned" or "cancelled")) return Fail("وضعیت چک نامعتبر است.");
+    var tid = TenantId(c.User); await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    var cheque = await db.Cheques.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid);
+    if (cheque is null) return Results.NotFound();
+    if (cheque.Status != "open") return Fail("وضعیت این چک قبلاً تعیین شده است؛ برای اصلاح، سند جبرانی لازم است.", 409);
+    if (cheque.InvoiceId is Guid invoiceId)
+    {
+        var invoice = await db.Invoices.SingleAsync(x => x.Id == invoiceId && x.TenantId == tid);
+        if (body.Status == "cleared")
+        {
+            if (cheque.AmountRial > FinanceMath.Receivable(invoice)) return Fail("مبلغ چک از ماندهٔ قابل دریافت بیشتر است؛ پرونده را بررسی کنید.", 409);
+            invoice.PaidRial = checked(invoice.PaidRial + cheque.AmountRial);
+            db.Payments.Add(new Payment { TenantId = tid, InvoiceId = invoiceId, AmountRial = cheque.AmountRial, Method = "cheque", Reference = cheque.Serial, IdempotencyKey = $"cheque-{cheque.Id}" });
+        }
+        FinanceMath.UpdateStatus(invoice);
+        if (invoice.PaymentStatus == "paid") foreach (var reminder in await db.Reminders.Where(x => x.TenantId == tid && x.InvoiceId == invoiceId && !x.Done).ToListAsync()) reminder.Done = true;
+    }
+    cheque.Status = body.Status; cheque.UpdatedAt = DateTime.UtcNow;
+    Audit(db, c.User, tid, "cheque.status", "cheque", id, body.Status);
+    try { await db.SaveChangesAsync(); await tx.CommitAsync(); }
+    catch (DbUpdateException) { return Fail("وضعیت چک هم‌زمان تغییر کرده است؛ فهرست را تازه کنید.", 409); }
+    return Results.Ok(new { cheque.Id, cheque.Status });
 });
 merchant.MapGet("/accounting/purchases", async (MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Purchases.Where(x => x.TenantId == tid).OrderByDescending(x => x.PurchasedAt).Take(100).Select(x => new { x.Id, x.SupplierName, x.SupplierInvoiceNumber, x.PurchasedAt, x.TotalRial, x.PaidRial }).ToListAsync()); });
 merchant.MapPost("/accounting/purchases", async (PurchaseRequest body, MajoraDb db, HttpContext c) =>
@@ -952,7 +1083,9 @@ public sealed record ProductRequest(string Name, string Sku, string Category, lo
 public sealed record ProductPhotoRequest(string DataUrl);
 public sealed record PriceBatchRequest(string IdempotencyKey, decimal Percent, bool AllProducts, List<Guid>? ProductIds);
 public sealed record CustomerRequest(string Name, string Phone);
-public sealed record InvoiceRequest(string IdempotencyKey, Guid? CustomerId, string CustomerName, string CustomerPhone, string PaymentStatus, long PaidRial, DateTime? DueAt, List<InvoiceLineRequest> Lines, long? ExpectedTotalRial = null);
+public sealed record InvoiceRequest(string IdempotencyKey, Guid? CustomerId, string CustomerName, string CustomerPhone, string PaymentStatus, long PaidRial, DateTime? DueAt, List<InvoiceLineRequest> Lines, long? ExpectedTotalRial = null, ChequeRequest? Cheque = null);
+public sealed record ChequeRequest(string Direction, string Party, string Serial, string Bank, long AmountRial, DateTime DueAt, string? SayadId, string? IssuerNationalId, string? BeneficiaryNationalId, string RegistrationStatus, string? Note, bool ShowDetails = false, bool ShowImage = false, string? PhotoDataUrl = null);
+public sealed record ChequeStatusRequest(string Status);
 public sealed record InvoiceLineRequest(Guid? ProductId, long Quantity, long? ExpectedUnitPriceRial = null, decimal DiscountPercent = 0, string? Name = null, long? UnitPriceRial = null);
 public sealed record InvoiceRevisionRequest(int ExpectedRevision, string Reason, string CustomerName, string CustomerPhone, DateTime? IssuedAt, List<InvoiceLineRevisionRequest> Lines);
 public sealed record InvoiceLineRevisionRequest(Guid? LineId, Guid? ProductId, string Name, long UnitPriceRial, long Quantity, long DiscountRial);
