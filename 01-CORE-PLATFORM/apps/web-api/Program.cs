@@ -884,11 +884,12 @@ merchant.MapGet("/accounting/overview", async (MajoraDb db, HttpContext c) =>
     var refunded = await db.Refunds.Where(x => x.TenantId == tid && x.RefundedAt >= since).SumAsync(x => x.AmountRial);
     return Results.Ok(new { periodDays = 30, revenueRial = revenue, returnsRial, receivedRial = received - refunded, refundedRial = refunded, customerReceivableRial = openInvoices.Sum(FinanceMath.Receivable), refundDueRial = openInvoices.Sum(FinanceMath.RefundDue), purchasesRial = purchases.Sum(x => x.TotalRial), supplierPayableRial = purchases.Sum(x => x.TotalRial - x.PaidRial), expensesRial = expenses.Sum(x => x.AmountRial), costComplete, costOfGoodsSoldRial = cogs, estimatedOperatingRial = cogs is null ? null : (long?)(revenue - cogs.Value - expenses.Sum(x => x.AmountRial)), note = "برآورد ۳۰روزهٔ عملیاتی است؛ مالیات، استهلاک و ماندهٔ ابتدای دوره در آن نیست. طلب و بازپرداخت، ماندهٔ باز همهٔ فاکتورهاست." });
 });
-merchant.MapGet("/accounting/cheques", async (string? q, string? status, MajoraDb db, HttpContext c) =>
+merchant.MapGet("/accounting/cheques", async (string? q, string? status, string? direction, MajoraDb db, HttpContext c) =>
 {
     var tid = TenantId(c.User);
     var query = db.Cheques.AsNoTracking().Where(x => x.TenantId == tid);
     if (!string.IsNullOrWhiteSpace(status) && status != "all") query = query.Where(x => x.Status == status);
+    if (direction is "received" or "issued") query = query.Where(x => x.Direction == direction);
     if (!string.IsNullOrWhiteSpace(q)) query = query.Where(x => x.Party.Contains(q) || x.Serial.Contains(q) || x.Bank.Contains(q) || x.SayadId.Contains(q));
     return Results.Ok(await query.OrderBy(x => x.Status == "open" ? 0 : 1).ThenBy(x => x.DueAt).Take(200)
         .Select(x => new { x.Id, x.InvoiceId, InvoiceNumber = x.InvoiceId == null ? (long?)null : db.Invoices.Where(i => i.Id == x.InvoiceId && i.TenantId == tid).Select(i => (long?)i.Number).FirstOrDefault(),
@@ -900,7 +901,9 @@ merchant.MapGet("/accounting/cheques/overview", async (MajoraDb db, HttpContext 
     var tid = TenantId(c.User);
     var groups = await db.Cheques.AsNoTracking().Where(x => x.TenantId == tid)
         .GroupBy(x => new { x.Direction, x.Status }).Select(g => new { g.Key.Direction, g.Key.Status, Count = g.Count(), AmountRial = g.Sum(x => x.AmountRial) }).ToListAsync();
-    return Results.Ok(new { groups, overdueCount = await db.Cheques.CountAsync(x => x.TenantId == tid && x.Status == "open" && x.DueAt <= DateTime.UtcNow) });
+    return Results.Ok(new { groups,
+        overdueReceivedCount = await db.Cheques.CountAsync(x => x.TenantId == tid && x.Direction == "received" && x.Status == "open" && x.DueAt <= DateTime.UtcNow),
+        overdueIssuedCount = await db.Cheques.CountAsync(x => x.TenantId == tid && x.Direction == "issued" && x.Status == "open" && x.DueAt <= DateTime.UtcNow) });
 });
 merchant.MapPost("/accounting/cheques", async (ChequeRequest body, MajoraDb db, HttpContext c) =>
 {

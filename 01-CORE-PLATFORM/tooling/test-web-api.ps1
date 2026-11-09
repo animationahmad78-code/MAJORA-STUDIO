@@ -180,6 +180,8 @@ try {
   if ($returnedInvoice.paymentStatus -ne 'unpaid' -or $returnedInvoice.paidRial -ne 0) { throw 'Returned cheque was treated as paid' }
   $independentCheque = PostJson '/merchant/accounting/cheques' @{direction='issued';party='تأمین‌کننده آزمون';serial='OUT-1';bank='بانک آزمون';amountRial=100000;dueAt=[datetime]::UtcNow.AddDays(9).ToString('o');registrationStatus='unknown'} $ownerSession
   if (-not $independentCheque.id) { throw 'Independent issued cheque was not registered' }
+  $issuedOnly = Invoke-RestMethod "$base/api/merchant/accounting/cheques?direction=issued" -WebSession $ownerSession
+  if (@($issuedOnly).Count -ne 1 -or $issuedOnly[0].id -ne $independentCheque.id) { throw 'Issued-cheque direction filter included received records' }
   $otherPass = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(20))
   $other = PostJson '/admin/tenants' @{name='فروشگاه دوم';slug="other-$($id.Substring(0,8))";ownerUsername="other_$id";ownerName='مالک دوم';ownerPassword=$otherPass} $adminSession
   $null = PostJson "/admin/tenants/$($other.id)/subscription" @{planId=$plan.id;startsAt=[datetime]::UtcNow.AddDays(-1).ToString('o');endsAt=[datetime]::UtcNow.AddDays(30).ToString('o');paymentStatus='paid'} $adminSession
