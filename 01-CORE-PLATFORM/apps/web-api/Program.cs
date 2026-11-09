@@ -67,7 +67,26 @@ if (!app.Environment.IsDevelopment() && builder.Configuration["MAJORA_TRUSTED_PR
     });
 }
 if (!app.Environment.IsDevelopment()) { app.UseHsts(); app.UseHttpsRedirection(); }
-app.UseDefaultFiles(); app.UseStaticFiles(); app.UseRateLimiter(); app.UseAuthentication(); app.UseAuthorization();
+app.UseDefaultFiles(); app.UseStaticFiles();
+app.Use(async (ctx, next) =>
+{
+    if (!ctx.Request.Path.StartsWithSegments("/api")) { await next(); return; }
+    ctx.Response.Headers["X-Correlation-ID"] = ctx.TraceIdentifier;
+    await next();
+    if (!ctx.Response.HasStarted && string.IsNullOrEmpty(ctx.Response.ContentType) &&
+        ctx.Response.StatusCode is 401 or 403 or 404)
+    {
+        var status = ctx.Response.StatusCode;
+        ctx.Response.StatusCode = status;
+        await ctx.Response.WriteAsJsonAsync(new {
+            errorCode = status == 401 ? "authentication_required" : status == 403 ? "access_denied" : "not_found",
+            message = status == 401 ? "نشست ورود معتبر نیست؛ دوباره وارد شوید." :
+                status == 403 ? "برای این عملیات دسترسی ندارید." : "مسیر یا مورد درخواستی پیدا نشد.",
+            correlationId = ctx.TraceIdentifier
+        });
+    }
+});
+app.UseRateLimiter(); app.UseAuthentication(); app.UseAuthorization();
 
 app.Use(async (ctx, next) =>
 {
@@ -123,7 +142,10 @@ static Guid TenantId(ClaimsPrincipal p) => Guid.Parse(p.FindFirstValue("tenant")
 static string Role(ClaimsPrincipal p) => p.FindFirstValue(ClaimTypes.Role) ?? "";
 static bool CanWrite(ClaimsPrincipal p) => Role(p) is "owner" or "manager";
 static bool CanSell(ClaimsPrincipal p) => Role(p) is "owner" or "manager" or "staff";
-static IResult Fail(string message, int status = 400) => Results.Json(new { error = message }, statusCode: status);
+static IResult Fail(string message, int status = 400) => Results.Json(new {
+    errorCode = status == 409 ? "conflict" : status == 403 ? "access_denied" : status == 401 ? "authentication_required" : "invalid_request",
+    error = message
+}, statusCode: status);
 static void Audit(MajoraDb db, ClaimsPrincipal p, Guid? tenantId, string action, string entity, Guid id, string detail = "") => db.Audit.Add(new AuditEntry { ActorId = UserId(p), TenantId = tenantId, Action = action, EntityType = entity, EntityId = id.ToString(), Detail = detail });
 static bool ValidCheque(ChequeRequest body) =>
     body.Direction is "received" or "issued" && !string.IsNullOrWhiteSpace(body.Party) && body.Party.Trim().Length <= 200 &&
@@ -210,7 +232,16 @@ app.MapPost("/api/auth/change-password", async (PasswordChange body, MajoraDb db
 });
 
 var admin = app.MapGroup("/api/admin").RequireAuthorization(p => p.AddAuthenticationSchemes("MajoraAdmin").RequireRole("platform_admin"));
-admin.MapGet("/overview", async (MajoraDb db) => Results.Ok(new { tenants = await db.Tenants.CountAsync(), activeSubscriptions = await db.Subscriptions.CountAsync(s => s.PaymentStatus == "paid" && s.EndsAt > DateTime.UtcNow), users = await db.Users.CountAsync() }));
+admin.MapGet("/overview", async (MajoraDb db) =>
+{
+    var now = DateTime.UtcNow;
+    return Results.Ok(new {
+        tenants = await db.Tenants.CountAsync(),
+        activeSubscriptions = await db.Tenants.CountAsync(t => t.Enabled && db.Subscriptions.Any(s =>
+            s.TenantId == t.Id && s.PaymentStatus == "paid" && s.StartsAt <= now && s.EndsAt > now)),
+        users = await db.Users.CountAsync()
+    });
+});
 admin.MapGet("/ai-provider", async (MajoraDb db, IConfiguration config) =>
 {
     var profile = await db.AiProviderProfiles.AsNoTracking().SingleOrDefaultAsync(x => x.Id == 1);
@@ -289,7 +320,8 @@ admin.MapPost("/tenants", async (TenantRequest body, MajoraDb db, IPasswordHashe
     if (string.IsNullOrWhiteSpace(body.Name) || body.Name.Length > 200 || string.IsNullOrWhiteSpace(body.Slug) ||
         !System.Text.RegularExpressions.Regex.IsMatch(body.Slug, "^[a-z0-9-]{3,40}$") ||
         string.IsNullOrWhiteSpace(body.OwnerPassword) || body.OwnerPassword.Length < 12 ||
-        string.IsNullOrWhiteSpace(body.OwnerUsername) ||
+        string.IsNullOrWhiteSpace(body.OwnerUsername) || body.OwnerUsername.Length > 100 ||
+        string.IsNullOrWhiteSpace(body.OwnerName) || body.OwnerName.Length > 200 ||
         body.BrandColor is not null && !System.Text.RegularExpressions.Regex.IsMatch(body.BrandColor, "^#[0-9a-fA-F]{6}$"))
         return Fail("نام، شناسه، رنگ یا رمز مالک نامعتبر است؛ رمز حداقل ۱۲ نویسه باشد.");
     async Task<IResult?> ExistingResult()

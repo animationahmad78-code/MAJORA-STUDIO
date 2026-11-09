@@ -36,6 +36,11 @@ try {
     Invoke-RestMethod "$base/api$path" -Method Put -WebSession $session -Headers @{'X-CSRF'=$token} -ContentType 'application/json' -Body ($body | ConvertTo-Json -Depth 10 -Compress)
   }
   $null = PostJson '/auth/login' @{username=$adminUser;password=$adminPass} $adminSession $true
+  $missingTenant = Invoke-WebRequest "$base/api/admin/tenants/$([guid]::NewGuid())/invoice-brand" -WebSession $adminSession -SkipHttpErrorCheck
+  $missingError = $missingTenant.Content | ConvertFrom-Json
+  if ($missingTenant.StatusCode -ne 404 -or $missingError.errorCode -ne 'not_found' -or
+      [string]::IsNullOrWhiteSpace($missingError.correlationId) -or
+      $missingError.correlationId -ne $missingTenant.Headers['X-Correlation-ID']) { throw 'API 404 did not include a correlated, safe error' }
   $blockedAiEndpoint = $false
   try { $null = PutJson '/admin/ai-provider' @{enabled=$true;endpoint='https://localhost/v1/chat/completions';model='sample-model';apiKey='secret-test-key'} $adminSession } catch { $blockedAiEndpoint = $_.Exception.Response.StatusCode -eq 400 }
   if (-not $blockedAiEndpoint) { throw 'Private AI endpoint was accepted' }
@@ -60,10 +65,18 @@ try {
   $duplicateRejected = $false
   try { $null = PostJson '/admin/tenants' @{name='فروشگاه دیگر';slug=$tenantBody.slug;ownerUsername='different_owner';ownerName='مالک دیگر';ownerPassword=$ownerPass;classicPreset=$false} $adminSession } catch { $duplicateRejected = $_.Exception.Response.StatusCode -eq 409 }
   if (-not $duplicateRejected) { throw 'Conflicting repeated tenant creation was accepted' }
+  $invalidOwnerNameBlocked = $false
+  try { $null = PostJson '/admin/tenants' @{name='ثبت نامعتبر';slug="invalid-$($id.Substring(0,8))";ownerUsername="invalid_$id";ownerName='';ownerPassword=$ownerPass} $adminSession } catch { $invalidOwnerNameBlocked = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $invalidOwnerNameBlocked) { throw 'Invalid tenant form was not rejected cleanly' }
   $subscriptionBody = @{planId=$plan.id;startsAt=[datetime]::UtcNow.AddDays(-1).ToString('o');endsAt=[datetime]::UtcNow.AddDays(30).ToString('o');paymentStatus='paid'}
+  $invalidSubscriptionBlocked = $false
+  try { $null = PostJson "/admin/tenants/$($tenant.id)/subscription" @{planId=$plan.id;startsAt=$subscriptionBody.endsAt;endsAt=$subscriptionBody.startsAt;paymentStatus='paid'} $adminSession } catch { $invalidSubscriptionBlocked = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $invalidSubscriptionBlocked) { throw 'Invalid subscription form was not rejected cleanly' }
   $subscription = PostJson "/admin/tenants/$($tenant.id)/subscription" $subscriptionBody $adminSession
   $subscriptionAgain = PostJson "/admin/tenants/$($tenant.id)/subscription" $subscriptionBody $adminSession
   if ($subscriptionAgain.id -ne $subscription.id) { throw 'Repeated subscription creation was not idempotent' }
+  $adminOverview = Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession
+  if ($adminOverview.tenants -ne 20 -or $adminOverview.activeSubscriptions -ne 1) { throw 'Admin overview active tenant count disagrees with subscription data' }
   $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $ownerSession $true
   $null = PostJson '/auth/login' @{username=$adminUser;password=$adminPass} $ownerSession $true
   $adminInSharedBrowser = Invoke-RestMethod "$base/api/auth/me?panel=admin" -WebSession $ownerSession
@@ -365,11 +378,14 @@ try {
   $csrfBlocked = $false
   try { $null = Invoke-RestMethod "$base/api/merchant/customers" -Method Post -WebSession $ownerSession -Headers @{'X-CSRF'='invalid'} -ContentType 'application/json' -Body '{"name":"CSRF","phone":""}' } catch { $csrfBlocked = $_.Exception.Response.StatusCode -eq 400 }
   if (-not $csrfBlocked) { throw 'CSRF protection failed' }
+  $beforeSuspension = (Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession).activeSubscriptions
   $null = PutJson "/admin/tenants/$($tenant.id)" @{name='فروشگاه آزمون';enabled=$false;brandColor='#0B2B53'} $adminSession
+  if ((Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession).activeSubscriptions -ne $beforeSuspension - 1) { throw 'Suspended tenant was counted as active' }
   $suspended = $false
   try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession } catch { $suspended = $_.Exception.Response.StatusCode -eq 403 }
   if (-not $suspended) { throw 'Suspended tenant still has access' }
   $null = PutJson "/admin/tenants/$($tenant.id)" @{name='فروشگاه آزمون';enabled=$true;brandColor='#0B2B53'} $adminSession
+  if ((Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession).activeSubscriptions -ne $beforeSuspension) { throw 'Reactivated tenant was missing from active overview' }
   $reactivated = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession
   if (@($reactivated).Count -lt 1) { throw 'Reactivated tenant did not regain access' }
   $merchantSubscriptions = Invoke-RestMethod "$base/api/merchant/subscription" -WebSession $ownerSession
@@ -381,7 +397,7 @@ try {
   if ($oldStaffSessionValid) { throw 'Password reset left old session valid' }
   $null = PostJson '/auth/login' @{username="staff_$id";password=$replacementPassword} $staffSession $true
   $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession
-  Write-Output 'PASS: 20 consecutive tenants and conflict retry, separate admin/merchant cookies, password reset revocation, subscription creation/retry/merchant visibility, brand authorization/snapshot, AI fallback, product/photo, customer/CSV, invoice revision/history/stock/payment guard/isolation, cheque issue/photo/clear/return/overview/tenant isolation, price-quote/selective discount/manual lines/proforma conversion, returns/refund/idempotency/accounting, price batch/revert/isolation, archive/restore/open balance guard, purchase/expense/cost estimate, staff role, CSRF, suspension/reactivation'
+  Write-Output 'PASS: 20 consecutive tenants, invalid form then successful retry, conflict retry, separate admin/merchant cookies, password reset revocation, subscription creation/retry/merchant visibility, brand authorization/snapshot, AI fallback, product/photo, customer/CSV, invoice revision/history/stock/payment guard/isolation, cheque issue/photo/clear/return/overview/tenant isolation, price-quote/selective discount/manual lines/proforma conversion, returns/refund/idempotency/accounting, price batch/revert/isolation, archive/restore/open balance guard, purchase/expense/cost estimate, staff role, CSRF, suspension/reactivation'
 } finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
   Write-Output "Test log: $log"

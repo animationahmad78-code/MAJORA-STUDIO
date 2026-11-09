@@ -35,7 +35,7 @@ export async function api<T>(path: string, method = 'GET', data?: unknown): Prom
   if (!response.ok) {
     const json = await response.json().catch(() => ({})) as { error?: string; message?: string; errorCode?: string; correlationId?: string };
     if (response.status === 401 && path !== '/auth/me') window.dispatchEvent(new Event('majora:session-changed'));
-    throw new ApiError(json.error ?? json.message ?? (response.status === 403 ? 'برای این عملیات دسترسی ندارید.' : `خطای ${response.status}`), response.status, json.errorCode, json.correlationId);
+    throw new ApiError(json.error ?? json.message ?? (response.status === 403 ? 'برای این عملیات دسترسی ندارید.' : `خطای ${response.status}`), response.status, json.errorCode, json.correlationId ?? response.headers.get('X-Correlation-ID') ?? undefined);
   }
   if (path === '/auth/logout') sessionChanged(panel);
   if (response.status === 204) return undefined as T;
