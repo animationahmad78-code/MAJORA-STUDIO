@@ -1,4 +1,4 @@
-param([string]$Dotnet = "$env:LOCALAPPDATA\MajoraTools\dotnet\dotnet.exe")
+param([string]$Dotnet = "$env:LOCALAPPDATA\MajoraTools\dotnet\dotnet.exe", [string]$ApiDll = '')
 $ErrorActionPreference = 'Stop'
 $apiProject = Join-Path $PSScriptRoot '..\apps\web-api\Majora.WebApi.csproj'
 $id = [guid]::NewGuid().ToString('N')
@@ -14,7 +14,8 @@ $envVars = @{
   MAJORA_BOOTSTRAP_PASSWORD = $adminPass
   ConnectionStrings__Sqlite = "Data Source=$database"
 }
-$process = Start-Process -FilePath $Dotnet -ArgumentList @('run','-c','Release','--no-build','--project',$apiProject,'--urls',$base) -Environment $envVars -WindowStyle Hidden -PassThru -RedirectStandardOutput $log -RedirectStandardError "$log.err"
+$arguments = if ($ApiDll) { @($ApiDll, '--urls', $base) } else { @('run','-c','Release','--no-build','--project',$apiProject,'--urls',$base) }
+$process = Start-Process -FilePath $Dotnet -ArgumentList $arguments -WorkingDirectory (Split-Path $apiProject) -Environment $envVars -WindowStyle Hidden -PassThru -RedirectStandardOutput $log -RedirectStandardError "$log.err"
 try {
   $ready = $false
   for ($attempt=0; $attempt -lt 35; $attempt++) {
@@ -26,11 +27,12 @@ try {
   $otherSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
   function PostJson($path,$body,$session,[bool]$login=$false) {
     $headers = @{}
-    if (-not $login) { $token = $session.Cookies.GetCookies([uri]$base)['majora.csrf'].Value; $headers['X-CSRF']=$token }
+    if (-not $login) { $cookieName = if ($path.StartsWith('/admin/')) { 'majora.admin.csrf' } else { 'majora.csrf' }; $token = $session.Cookies.GetCookies([uri]$base)[$cookieName].Value; $headers['X-CSRF']=$token }
     Invoke-RestMethod "$base/api$path" -Method Post -WebSession $session -Headers $headers -ContentType 'application/json' -Body ($body | ConvertTo-Json -Depth 10 -Compress)
   }
   function PutJson($path,$body,$session) {
-    $token = $session.Cookies.GetCookies([uri]$base)['majora.csrf'].Value
+    $cookieName = if ($path.StartsWith('/admin/')) { 'majora.admin.csrf' } else { 'majora.csrf' }
+    $token = $session.Cookies.GetCookies([uri]$base)[$cookieName].Value
     Invoke-RestMethod "$base/api$path" -Method Put -WebSession $session -Headers @{'X-CSRF'=$token} -ContentType 'application/json' -Body ($body | ConvertTo-Json -Depth 10 -Compress)
   }
   $null = PostJson '/auth/login' @{username=$adminUser;password=$adminPass} $adminSession $true
@@ -43,18 +45,57 @@ try {
   $null = PutJson '/admin/ai-provider' @{enabled=$false;endpoint='https://api.example.com/v1/chat/completions';model='sample-model'} $adminSession
   $plan = PostJson '/admin/plans' @{name='پایه';monthlyRial=1000000;maxUsers=3} $adminSession
   $ownerPass = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(20))
-  $tenant = PostJson '/admin/tenants' @{name='فروشگاه آزمون';slug="shop-$($id.Substring(0,8))";ownerUsername="owner_$id";ownerName='مالک آزمون';ownerPassword=$ownerPass;classicPreset=$true} $adminSession
-  $null = PostJson "/admin/tenants/$($tenant.id)/subscription" @{planId=$plan.id;startsAt=[datetime]::UtcNow.AddDays(-1).ToString('o');endsAt=[datetime]::UtcNow.AddDays(30).ToString('o');paymentStatus='paid'} $adminSession
+  $tenantBody = @{name='فروشگاه آزمون';slug="shop-$($id.Substring(0,8))";ownerUsername="owner_$id";ownerName='مالک آزمون';ownerPassword=$ownerPass;classicPreset=$true}
+  $tenant = PostJson '/admin/tenants' $tenantBody $adminSession
+  $tenantAgain = PostJson '/admin/tenants' $tenantBody $adminSession
+  if ($tenantAgain.id -ne $tenant.id) { throw 'Repeated tenant creation was not idempotent' }
+  $createdTenantIds = [System.Collections.Generic.HashSet[string]]::new()
+  [void]$createdTenantIds.Add($tenant.id.ToString())
+  for ($shopIndex = 2; $shopIndex -le 20; $shopIndex++) {
+    $shop = PostJson '/admin/tenants' @{name="فروشگاه آزمون $shopIndex";slug="shop-$($id.Substring(0,8))-$shopIndex";ownerUsername="owner_$($id)_$shopIndex";ownerName="مالک $shopIndex";ownerPassword=$ownerPass;classicPreset=$false} $adminSession
+    if (-not $createdTenantIds.Add($shop.id.ToString())) { throw 'Consecutive tenant creation reused an ID' }
+  }
+  $tenantList = Invoke-RestMethod "$base/api/admin/tenants" -WebSession $adminSession
+  if (@($tenantList).Count -ne 20) { throw 'Consecutive tenant creation did not produce exactly 20 shops' }
+  $duplicateRejected = $false
+  try { $null = PostJson '/admin/tenants' @{name='فروشگاه دیگر';slug=$tenantBody.slug;ownerUsername='different_owner';ownerName='مالک دیگر';ownerPassword=$ownerPass;classicPreset=$false} $adminSession } catch { $duplicateRejected = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $duplicateRejected) { throw 'Conflicting repeated tenant creation was accepted' }
+  $subscriptionBody = @{planId=$plan.id;startsAt=[datetime]::UtcNow.AddDays(-1).ToString('o');endsAt=[datetime]::UtcNow.AddDays(30).ToString('o');paymentStatus='paid'}
+  $subscription = PostJson "/admin/tenants/$($tenant.id)/subscription" $subscriptionBody $adminSession
+  $subscriptionAgain = PostJson "/admin/tenants/$($tenant.id)/subscription" $subscriptionBody $adminSession
+  if ($subscriptionAgain.id -ne $subscription.id) { throw 'Repeated subscription creation was not idempotent' }
   $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $ownerSession $true
+  $null = PostJson '/auth/login' @{username=$adminUser;password=$adminPass} $ownerSession $true
+  $adminInSharedBrowser = Invoke-RestMethod "$base/api/auth/me?panel=admin" -WebSession $ownerSession
+  $merchantInSharedBrowser = Invoke-RestMethod "$base/api/auth/me?panel=merchant" -WebSession $ownerSession
+  if ($adminInSharedBrowser.role -ne 'platform_admin' -or $merchantInSharedBrowser.role -ne 'owner') { throw 'Admin and merchant cookies replaced each other' }
+  $null = Invoke-RestMethod "$base/api/admin/overview" -WebSession $ownerSession
+  $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $ownerSession
+  $adminToken = $ownerSession.Cookies.GetCookies([uri]$base)['majora.admin.csrf'].Value
+  $null = Invoke-RestMethod "$base/api/auth/logout" -Method Post -WebSession $ownerSession -Headers @{'X-CSRF'=$adminToken;'X-Majora-Panel'='admin'}
+  $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $ownerSession
+  $adminStillSignedIn = $true
+  try { $null = Invoke-RestMethod "$base/api/admin/overview" -WebSession $ownerSession } catch { $adminStillSignedIn = $false }
+  if ($adminStillSignedIn) { throw 'Admin logout did not invalidate its cookie' }
   $ownerAiBlocked = $false
-  try { $null = Invoke-RestMethod "$base/api/admin/ai-provider" -WebSession $ownerSession } catch { $ownerAiBlocked = $_.Exception.Response.StatusCode -eq 403 }
+  try { $null = Invoke-RestMethod "$base/api/admin/ai-provider" -WebSession $ownerSession } catch { $ownerAiBlocked = $_.Exception.Response.StatusCode -in 401,403 }
   if (-not $ownerAiBlocked) { throw 'Merchant could read global AI settings' }
   $advisorFallback = PostJson '/merchant/advisor/ask' @{question='وضعیت فروش چیست؟'} $ownerSession
   if ($advisorFallback.source -ne 'rules') { throw 'Disabled AI provider did not use local fallback' }
   $brand = Invoke-RestMethod "$base/api/merchant/invoice-brand" -WebSession $ownerSession
   if ($brand.storeName -ne 'کیف و کمربند کلاسیک' -or @($brand.conditions).Count -ne 6 -or -not $brand.logoDataUrl.StartsWith('data:image/png;base64,')) { throw 'Classic invoice brand preset missing' }
+  $merchantBrandBlocked = $false
+  try { $null = PutJson '/merchant/invoice-brand' $brand $ownerSession } catch { $merchantBrandBlocked = $_.Exception.Response.StatusCode -eq 403 }
+  if (-not $merchantBrandBlocked) { throw 'Merchant changed canonical invoice brand' }
   $brand.slogan = 'نسخهٔ اول آزمون'
-  $brand = PutJson '/merchant/invoice-brand' $brand $ownerSession
+  $brand = PutJson "/admin/tenants/$($tenant.id)/invoice-brand" @{brand=$brand;reason='آزمون تغییر هویت'} $adminSession
+  $brandRead = Invoke-RestMethod "$base/api/merchant/invoice-brand" -WebSession $ownerSession
+  if ($brandRead.slogan -ne 'نسخهٔ اول آزمون' -or $brandRead.revision -ne $brand.revision) { throw 'Admin invoice brand update was not visible to merchant' }
+  $brand.logoDataUrl = $null
+  $logoDeletionBlocked = $false
+  try { $null = PutJson "/admin/tenants/$($tenant.id)/invoice-brand" @{brand=$brand;reason='آزمون حذف'} $adminSession } catch { $logoDeletionBlocked = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $logoDeletionBlocked) { throw 'Primary logo could be deleted without replacement' }
+  $brand.logoDataUrl = $brandRead.logoDataUrl
   $product = PostJson '/merchant/products' @{name='کیف چرم آزمون';sku="BAG-$id";category='کیف';priceRial=500000;stock=5} $ownerSession
   $png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+iX1sAAAAASUVORK5CYII='
   $photoSaved = PutJson "/merchant/products/$($product.id)/photo" @{dataUrl=$png} $ownerSession
@@ -64,6 +105,12 @@ try {
   $invoiceBody = @{idempotencyKey="invoice-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='partial';paidRial=200000;lines=@(@{productId=$product.id;quantity=2})}
   $invoice = PostJson '/merchant/invoices' $invoiceBody $ownerSession
   if ($invoice.number -ne 1 -or $invoice.totalRial -ne 1000000) { throw 'Invoice total/number mismatch' }
+  $brand.storeName = 'نام جدید فروشگاه'
+  $brand = PutJson "/admin/tenants/$($tenant.id)/invoice-brand" @{brand=$brand;reason='آزمون ثبات برند فاکتور قبلی'} $adminSession
+  $frozenInvoice = Invoke-RestMethod "$base/api/merchant/invoices/$($invoice.id)" -WebSession $ownerSession
+  if (($frozenInvoice.brandSnapshotJson | ConvertFrom-Json).storeName -ne 'کیف و کمربند کلاسیک') { throw 'Issued invoice lost its brand snapshot' }
+  $workspace = Invoke-RestMethod "$base/api/merchant/workspace" -WebSession $ownerSession
+  if ($workspace.name -ne 'نام جدید فروشگاه') { throw 'Workspace brand did not follow admin edit' }
   $again = PostJson '/merchant/invoices' $invoiceBody $ownerSession
   if ($again.id -ne $invoice.id) { throw 'Idempotency failed' }
   $products = Invoke-RestMethod "$base/api/merchant/products" -WebSession $ownerSession
@@ -138,11 +185,11 @@ try {
   $stockAfterRevision = Invoke-RestMethod "$base/api/merchant/products" -WebSession $ownerSession
   if ($stockAfterRevision[0].stock -ne 2) { throw 'Invoice revision changed stock during a rejected edit' }
   $brand.slogan = 'نسخهٔ دوم آزمون'
-  $brand = PutJson '/merchant/invoice-brand' $brand $ownerSession
+  $brand = PutJson "/admin/tenants/$($tenant.id)/invoice-brand" @{brand=$brand;reason='آزمون نسخه دوم'} $adminSession
   $snapshot = $detail.brandSnapshotJson | ConvertFrom-Json
   if ($snapshot.slogan -ne 'نسخهٔ اول آزمون' -or $brand.slogan -ne 'نسخهٔ دوم آزمون') { throw 'Issued invoice brand snapshot changed' }
   $staleBrandBlocked = $false
-  try { $null = PutJson '/merchant/invoice-brand' @{revision=1;storeName='ناسازگار';slogan='';phone='';address='';card='';cardHolder='';note='';conditions=@();socialTelegram='';socialInstagram='';socialContact=''} $ownerSession } catch { $staleBrandBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  try { $null = PutJson "/admin/tenants/$($tenant.id)/invoice-brand" @{brand=@{revision=1;storeName='ناسازگار';slogan='';phone='';address='';card='';cardHolder='';note='';conditions=@();socialTelegram='';socialInstagram='';socialContact='';logoDataUrl=$brand.logoDataUrl};reason='آزمون نسخه منسوخ'} $adminSession } catch { $staleBrandBlocked = $_.Exception.Response.StatusCode -eq 409 }
   if (-not $staleBrandBlocked) { throw 'Stale invoice brand edit was accepted' }
   $chequeDetails = @{direction='received';party='مشتری آزمون';serial='CHK-100';bank='بانک آزمون';amountRial=600000;dueAt=[datetime]::UtcNow.AddDays(5).ToString('o');sayadId='1234567890123456';issuerNationalId='';beneficiaryNationalId='';registrationStatus='unknown';note='آزمون چک';showDetails=$true;showImage=$true;photoDataUrl=$png}
   $chequeInvoiceBody = @{idempotencyKey="cheque-invoice-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='cheque';paidRial=0;lines=@(@{productId=$null;name='قلم چکی';unitPriceRial=1000000;quantity=1});cheque=$chequeDetails}
@@ -322,7 +369,19 @@ try {
   $suspended = $false
   try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession } catch { $suspended = $_.Exception.Response.StatusCode -eq 403 }
   if (-not $suspended) { throw 'Suspended tenant still has access' }
-  Write-Output 'PASS: login, subscription, AI fallback, product/photo, customer/CSV, invoice revision/history/stock/payment guard/isolation, cheque issue/photo/clear/return/overview/tenant isolation, price-quote/selective discount/manual lines/proforma conversion, returns/refund/idempotency/accounting, price batch/revert/isolation, archive/restore/open balance guard, purchase/expense/cost estimate, staff role, CSRF, suspension'
+  $null = PutJson "/admin/tenants/$($tenant.id)" @{name='فروشگاه آزمون';enabled=$true;brandColor='#0B2B53'} $adminSession
+  $reactivated = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession
+  if (@($reactivated).Count -lt 1) { throw 'Reactivated tenant did not regain access' }
+  $merchantSubscriptions = Invoke-RestMethod "$base/api/merchant/subscription" -WebSession $ownerSession
+  if (@($merchantSubscriptions | Where-Object id -eq $subscription.id).Count -ne 1) { throw 'Admin and merchant subscription views disagree' }
+  $replacementPassword = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(20))
+  $null = PostJson "/admin/users/$($staff.id)/reset-password" @{newPassword=$replacementPassword} $adminSession
+  $oldStaffSessionValid = $true
+  try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession } catch { $oldStaffSessionValid = $_.Exception.Response.StatusCode -ne 401 }
+  if ($oldStaffSessionValid) { throw 'Password reset left old session valid' }
+  $null = PostJson '/auth/login' @{username="staff_$id";password=$replacementPassword} $staffSession $true
+  $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession
+  Write-Output 'PASS: 20 consecutive tenants and conflict retry, separate admin/merchant cookies, password reset revocation, subscription creation/retry/merchant visibility, brand authorization/snapshot, AI fallback, product/photo, customer/CSV, invoice revision/history/stock/payment guard/isolation, cheque issue/photo/clear/return/overview/tenant isolation, price-quote/selective discount/manual lines/proforma conversion, returns/refund/idempotency/accounting, price batch/revert/isolation, archive/restore/open balance guard, purchase/expense/cost estimate, staff role, CSRF, suspension/reactivation'
 } finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
   Write-Output "Test log: $log"

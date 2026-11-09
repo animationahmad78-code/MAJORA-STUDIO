@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace Majora.WebApi;
 
@@ -52,6 +54,10 @@ public static class InvoiceBrand
         profile.SocialTelegram, profile.SocialInstagram, profile.SocialContact, profile.LogoDataUrl);
 
     public static string Snapshot(InvoiceBrandProfile profile) => JsonSerializer.Serialize(View(profile), WebJson);
+
+    // Audit the identity of a logo without copying its potentially large image into the audit log.
+    public static string? LogoHash(string? dataUrl) => string.IsNullOrWhiteSpace(dataUrl)
+        ? null : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(dataUrl)));
 
     public static string? Validate(InvoiceBrandUpdate input)
     {

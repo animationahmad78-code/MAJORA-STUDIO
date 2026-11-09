@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Net.Http.Json;
 using System.Numerics;
 using System.Text;
+using System.Diagnostics;
 using System.Threading.RateLimiting;
 using Majora.WebApi;
 using Microsoft.AspNetCore.Authentication;
@@ -40,6 +41,12 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
     o.Cookie.SameSite = SameSiteMode.Strict; o.ExpireTimeSpan = TimeSpan.FromHours(12); o.SlidingExpiration = true;
     o.Events.OnRedirectToLogin = c => { c.Response.StatusCode = 401; return Task.CompletedTask; };
     o.Events.OnRedirectToAccessDenied = c => { c.Response.StatusCode = 403; return Task.CompletedTask; };
+}).AddCookie("MajoraAdmin", o =>
+{
+    o.Cookie.Name = "majora.admin.sid"; o.Cookie.HttpOnly = true; o.Cookie.SecurePolicy = builder.Environment.IsDevelopment() ? CookieSecurePolicy.SameAsRequest : CookieSecurePolicy.Always;
+    o.Cookie.SameSite = SameSiteMode.Strict; o.ExpireTimeSpan = TimeSpan.FromHours(12); o.SlidingExpiration = true;
+    o.Events.OnRedirectToLogin = c => { c.Response.StatusCode = 401; return Task.CompletedTask; };
+    o.Events.OnRedirectToAccessDenied = c => { c.Response.StatusCode = 403; return Task.CompletedTask; };
 });
 builder.Services.AddAuthorization();
 builder.Services.AddRateLimiter(o => o.AddPolicy("login", context => RateLimitPartition.GetFixedWindowLimiter(
@@ -64,7 +71,8 @@ app.UseDefaultFiles(); app.UseStaticFiles(); app.UseRateLimiter(); app.UseAuthen
 
 app.Use(async (ctx, next) =>
 {
-    if (ctx.User.Identity?.IsAuthenticated == true && ctx.Request.Path.StartsWithSegments("/api"))
+    if (ctx.User.Identity?.IsAuthenticated == true && ctx.Request.Path.StartsWithSegments("/api") &&
+        !ctx.Request.Path.StartsWithSegments("/api/auth"))
     {
         var db = ctx.RequestServices.GetRequiredService<MajoraDb>();
         var id = Guid.Parse(ctx.User.FindFirstValue(ClaimTypes.NameIdentifier)!);
@@ -82,7 +90,10 @@ app.Use(async (ctx, next) =>
     {
         if (ctx.Request.Path != "/api/auth/login")
         {
-            var cookie = ctx.Request.Cookies["majora.csrf"];
+            var panel = ctx.Request.Path.StartsWithSegments("/api/admin") ||
+                ctx.Request.Path.StartsWithSegments("/api/auth") && ctx.Request.Headers["X-Majora-Panel"] == "admin"
+                ? "admin" : "merchant";
+            var cookie = ctx.Request.Cookies[panel == "admin" ? "majora.admin.csrf" : "majora.csrf"];
             if (string.IsNullOrEmpty(cookie) || cookie != ctx.Request.Headers["X-CSRF"].ToString())
             { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsJsonAsync(new { error = "توکن امنیتی درخواست نامعتبر است." }); return; }
         }
@@ -133,37 +144,72 @@ static Cheque NewCheque(ChequeRequest body, Guid tid, Guid? invoiceId = null) =>
     Note = body.Note?.Trim() ?? "", ShowDetails = body.ShowDetails, ShowImage = body.ShowImage
 };
 static async Task<bool> Active(MajoraDb db, Guid tenantId) => await db.Tenants.AnyAsync(t => t.Id == tenantId && t.Enabled) && await db.Subscriptions.AnyAsync(s => s.TenantId == tenantId && s.PaymentStatus == "paid" && s.StartsAt <= DateTime.UtcNow && s.EndsAt > DateTime.UtcNow);
-static void Csrf(HttpContext c) { var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(24)); c.Response.Cookies.Append("majora.csrf", token, new CookieOptions { HttpOnly = false, Secure = !c.RequestServices.GetRequiredService<IHostEnvironment>().IsDevelopment() || c.Request.IsHttps, SameSite = SameSiteMode.Strict, Path = "/" }); }
+static string AuthScheme(string panel) => panel == "admin" ? "MajoraAdmin" : CookieAuthenticationDefaults.AuthenticationScheme;
+static void Csrf(HttpContext c, string panel)
+{
+    var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(24));
+    c.Response.Cookies.Append(panel == "admin" ? "majora.admin.csrf" : "majora.csrf", token,
+        new CookieOptions { HttpOnly = false, Secure = !c.RequestServices.GetRequiredService<IHostEnvironment>().IsDevelopment() || c.Request.IsHttps,
+            SameSite = SameSiteMode.Strict, Path = "/" });
+}
+static async Task<AppUser?> AuthenticatedAccount(MajoraDb db, HttpContext c, string panel)
+{
+    var scheme = AuthScheme(panel);
+    var ticket = await c.AuthenticateAsync(scheme);
+    var principal = ticket.Principal;
+    if (!ticket.Succeeded || principal is null || !Guid.TryParse(principal.FindFirstValue(ClaimTypes.NameIdentifier), out var id)) return null;
+    var user = await db.Users.FindAsync(id);
+    if (user is null || !user.Enabled || user.Role != principal.FindFirstValue(ClaimTypes.Role) ||
+        user.AuthVersion.ToString() != principal.FindFirstValue("authVersion") ||
+        user.TenantId?.ToString() != principal.FindFirstValue("tenant") ||
+        panel == "admin" && user.Role != "platform_admin" ||
+        panel == "merchant" && user.TenantId is null)
+    { await c.SignOutAsync(scheme); return null; }
+    c.User = principal;
+    return user;
+}
 
 app.MapGet("/api/health", () => Results.Ok(new { status = "ok", version = "web-foundation-1" }));
 app.MapPost("/api/auth/login", async (LoginRequest body, MajoraDb db, IPasswordHasher<AppUser> hasher, HttpContext ctx) =>
 {
+    if (string.IsNullOrWhiteSpace(body.Username) || string.IsNullOrWhiteSpace(body.Password)) return Fail("نام کاربری یا رمز عبور نادرست است.", 401);
     var user = await db.Users.SingleOrDefaultAsync(x => x.Username == body.Username && x.Enabled);
     if (user is null || hasher.VerifyHashedPassword(user, user.PasswordHash, body.Password) == PasswordVerificationResult.Failed) return Fail("نام کاربری یا رمز عبور نادرست است.", 401);
     if (user.TenantId is Guid tid && !await Active(db, tid)) return Fail("اشتراک این کسب‌وکار فعال نیست. با پشتیبانی ماژورا تماس بگیرید.", 403);
+    var panel = user.Role == "platform_admin" ? "admin" : "merchant";
+    var scheme = AuthScheme(panel);
     var claims = new List<Claim> { new(ClaimTypes.NameIdentifier, user.Id.ToString()), new(ClaimTypes.Name, user.DisplayName), new(ClaimTypes.Role, user.Role), new("authVersion", user.AuthVersion.ToString()) };
     if (user.TenantId is Guid tenantId) claims.Add(new Claim("tenant", tenantId.ToString()));
-    await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme)));
-    Csrf(ctx);
+    await ctx.SignInAsync(scheme, new ClaimsPrincipal(new ClaimsIdentity(claims, scheme)));
+    Csrf(ctx, panel);
     return Results.Ok(new { user.Id, user.DisplayName, user.Role, user.TenantId });
 }).RequireRateLimiting("login");
-app.MapPost("/api/auth/logout", async (HttpContext ctx) => { await ctx.SignOutAsync(); ctx.Response.Cookies.Delete("majora.csrf"); return Results.NoContent(); }).RequireAuthorization();
-app.MapGet("/api/auth/me", async (MajoraDb db, HttpContext c) =>
+app.MapPost("/api/auth/logout", async (MajoraDb db, HttpContext c) =>
 {
-    var user = await db.Users.FindAsync(UserId(c.User));
-    if (user is null || !user.Enabled) return Results.Unauthorized();
-    Csrf(c);
+    var panel = c.Request.Headers["X-Majora-Panel"].ToString() == "admin" ? "admin" : "merchant";
+    if (await AuthenticatedAccount(db, c, panel) is null) return Results.Unauthorized();
+    await c.SignOutAsync(AuthScheme(panel));
+    c.Response.Cookies.Delete(panel == "admin" ? "majora.admin.csrf" : "majora.csrf");
+    return Results.NoContent();
+});
+app.MapGet("/api/auth/me", async (string? panel, MajoraDb db, HttpContext c) =>
+{
+    panel = panel == "admin" ? "admin" : "merchant";
+    var user = await AuthenticatedAccount(db, c, panel);
+    if (user is null) return Results.Unauthorized();
+    Csrf(c, panel);
     return Results.Ok(new { user.Id, user.DisplayName, user.Role, user.TenantId });
-}).RequireAuthorization();
+});
 app.MapPost("/api/auth/change-password", async (PasswordChange body, MajoraDb db, IPasswordHasher<AppUser> hasher, HttpContext c) =>
 {
-    var user = await db.Users.FindAsync(UserId(c.User)); if (user is null) return Results.Unauthorized();
+    var panel = c.Request.Headers["X-Majora-Panel"].ToString() == "admin" ? "admin" : "merchant";
+    var user = await AuthenticatedAccount(db, c, panel); if (user is null) return Results.Unauthorized();
     if (body.NewPassword.Length < 12 || hasher.VerifyHashedPassword(user, user.PasswordHash, body.CurrentPassword) == PasswordVerificationResult.Failed) return Fail("رمز فعلی نادرست است یا رمز جدید کمتر از ۱۲ نویسه دارد.");
     user.PasswordHash = hasher.HashPassword(user, body.NewPassword); user.AuthVersion++;
-    Audit(db, c.User, user.TenantId, "password.change", "user", user.Id); await db.SaveChangesAsync(); await c.SignOutAsync(); return Results.NoContent();
-}).RequireAuthorization();
+    Audit(db, c.User, user.TenantId, "password.change", "user", user.Id); await db.SaveChangesAsync(); await c.SignOutAsync(AuthScheme(panel)); return Results.NoContent();
+});
 
-var admin = app.MapGroup("/api/admin").RequireAuthorization(p => p.RequireRole("platform_admin"));
+var admin = app.MapGroup("/api/admin").RequireAuthorization(p => p.AddAuthenticationSchemes("MajoraAdmin").RequireRole("platform_admin"));
 admin.MapGet("/overview", async (MajoraDb db) => Results.Ok(new { tenants = await db.Tenants.CountAsync(), activeSubscriptions = await db.Subscriptions.CountAsync(s => s.PaymentStatus == "paid" && s.EndsAt > DateTime.UtcNow), users = await db.Users.CountAsync() }));
 admin.MapGet("/ai-provider", async (MajoraDb db, IConfiguration config) =>
 {
@@ -174,8 +220,9 @@ admin.MapGet("/ai-provider", async (MajoraDb db, IConfiguration config) =>
 });
 admin.MapPut("/ai-provider", async (AiProviderRequest body, MajoraDb db, IDataProtectionProvider protection, HttpContext c) =>
 {
-    if (!AiEndpointGuard.ValidUri(body.Endpoint, out _) || string.IsNullOrWhiteSpace(body.Model) || body.Model.Length > 120 || body.ApiKey?.Length > 1000)
+    if (!AiEndpointGuard.ValidUri(body.Endpoint, out var endpointUri) || string.IsNullOrWhiteSpace(body.Model) || body.Model.Length > 120 || body.ApiKey?.Length > 1000)
         return Fail("نشانی HTTPS یا نام مدل نامعتبر است.");
+    if (AiProviders.ValidateEndpoint(endpointUri!, body.Model) is { } endpointError) return Fail(endpointError);
     var profile = await db.AiProviderProfiles.SingleOrDefaultAsync(x => x.Id == 1);
     if (body.Enabled && string.IsNullOrWhiteSpace(body.ApiKey) && string.IsNullOrWhiteSpace(profile?.ProtectedApiKey))
         return Fail("برای فعال‌سازی، کلید API لازم است.");
@@ -186,6 +233,42 @@ admin.MapPut("/ai-provider", async (AiProviderRequest body, MajoraDb db, IDataPr
     await db.SaveChangesAsync();
     return Results.Ok(new { profile.Enabled, profile.Endpoint, profile.Model, hasApiKey = !string.IsNullOrWhiteSpace(profile.ProtectedApiKey), source = "panel" });
 });
+admin.MapPost("/ai-provider/test", async (MajoraDb db, IDataProtectionProvider protection, IConfiguration config, IHttpClientFactory clients, HttpContext c) =>
+{
+    var profile = await db.AiProviderProfiles.AsNoTracking().SingleOrDefaultAsync(x => x.Id == 1);
+    var endpoint = profile?.Endpoint ?? config["MAJORA_AI_ENDPOINT"];
+    var model = profile?.Model ?? config["MAJORA_AI_MODEL"];
+    string? key;
+    try { key = profile is null ? config["MAJORA_AI_API_KEY"] : protection.CreateProtector("ai-provider-key-v1").Unprotect(profile.ProtectedApiKey); }
+    catch (System.Security.Cryptography.CryptographicException) { return Results.Ok(new { success = false, errorCode = "key_unavailable", message = "کلید ذخیره‌شده قابل بازیابی نیست؛ آن را دوباره ثبت کنید.", correlationId = c.TraceIdentifier }); }
+    if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(model) || !AiEndpointGuard.ValidUri(endpoint, out var uri))
+        return Results.Ok(new { success = false, errorCode = "configuration_missing", message = "نشانی HTTPS، مدل یا کلید API تنظیم نشده است.", correlationId = c.TraceIdentifier });
+    var endpointError = AiProviders.ValidateEndpoint(uri!, model);
+    if (endpointError is not null) return Results.Ok(new { success = false, errorCode = "model_endpoint_mismatch", message = endpointError, correlationId = c.TraceIdentifier });
+    var watch = Stopwatch.StartNew();
+    using var request = AiProviders.CreateRequest(uri!, key, model, "فقط یک پاسخ کوتاه فارسی بده.", "سلام؛ فقط بنویس آماده‌ام.", 30);
+    try
+    {
+        using var response = await clients.CreateClient("ai").SendAsync(request, c.RequestAborted);
+        if (!response.IsSuccessStatusCode)
+        {
+            var failure = AiProviders.FromStatus(response.StatusCode);
+            return Results.Ok(new { success = false, errorCode = failure.Code, message = failure.Message,
+                upstreamStatus = failure.UpstreamStatus, retryable = failure.Retryable,
+                latencyMs = watch.ElapsedMilliseconds, correlationId = c.TraceIdentifier });
+        }
+        using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(c.RequestAborted), cancellationToken: c.RequestAborted);
+        _ = AiProviders.ReadAnswer(doc.RootElement, uri!);
+        return Results.Ok(new { success = true, provider = AiProviders.Kind(uri!), latencyMs = watch.ElapsedMilliseconds,
+            correlationId = c.TraceIdentifier });
+    }
+    catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or KeyNotFoundException or JsonException or ArgumentOutOfRangeException)
+    {
+        var failure = AiProviders.FromException(ex);
+        return Results.Ok(new { success = false, errorCode = failure.Code, message = failure.Message,
+            retryable = failure.Retryable, latencyMs = watch.ElapsedMilliseconds, correlationId = c.TraceIdentifier });
+    }
+}).RequireRateLimiting("login");
 admin.MapGet("/plans", async (MajoraDb db) => Results.Ok(await db.Plans.OrderBy(x => x.MonthlyRial).ToListAsync()));
 admin.MapPost("/plans", async (PlanRequest body, MajoraDb db, HttpContext c) =>
 {
@@ -203,28 +286,102 @@ admin.MapPut("/plans/{id:guid}", async (Guid id, PlanRequest body, MajoraDb db, 
 admin.MapGet("/tenants", async (MajoraDb db) => Results.Ok(await db.Tenants.OrderBy(x => x.Name).Select(x => new { x.Id, x.Name, x.Slug, x.Enabled, x.BrandColor, x.LogoUrl, Subscription = db.Subscriptions.Where(s => s.TenantId == x.Id).OrderByDescending(s => s.EndsAt).Select(s => new { s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot }).FirstOrDefault() }).ToListAsync()));
 admin.MapPost("/tenants", async (TenantRequest body, MajoraDb db, IPasswordHasher<AppUser> hasher, IWebHostEnvironment host, HttpContext c) =>
 {
-    if (string.IsNullOrWhiteSpace(body.Name) || string.IsNullOrWhiteSpace(body.Slug) || !System.Text.RegularExpressions.Regex.IsMatch(body.Slug, "^[a-z0-9-]{3,40}$") || body.OwnerPassword.Length < 12 || string.IsNullOrWhiteSpace(body.OwnerUsername)) return Fail("نام، شناسه یا رمز مالک نامعتبر است؛ رمز حداقل ۱۲ نویسه باشد.");
-    if (await db.Tenants.AnyAsync(x => x.Slug == body.Slug) || await db.Users.AnyAsync(x => x.Username == body.OwnerUsername)) return Fail("شناسهٔ فروشگاه یا نام کاربری تکراری است.", 409);
+    if (string.IsNullOrWhiteSpace(body.Name) || body.Name.Length > 200 || string.IsNullOrWhiteSpace(body.Slug) ||
+        !System.Text.RegularExpressions.Regex.IsMatch(body.Slug, "^[a-z0-9-]{3,40}$") ||
+        string.IsNullOrWhiteSpace(body.OwnerPassword) || body.OwnerPassword.Length < 12 ||
+        string.IsNullOrWhiteSpace(body.OwnerUsername) ||
+        body.BrandColor is not null && !System.Text.RegularExpressions.Regex.IsMatch(body.BrandColor, "^#[0-9a-fA-F]{6}$"))
+        return Fail("نام، شناسه، رنگ یا رمز مالک نامعتبر است؛ رمز حداقل ۱۲ نویسه باشد.");
+    async Task<IResult?> ExistingResult()
+    {
+        var existing = await db.Tenants.AsNoTracking().SingleOrDefaultAsync(x => x.Slug == body.Slug);
+        if (existing is null) return null;
+        var owner = await db.Users.AsNoTracking().SingleOrDefaultAsync(x => x.TenantId == existing.Id && x.Role == "owner");
+        if (owner?.Username == body.OwnerUsername.Trim() && existing.Name == body.Name.Trim() &&
+            hasher.VerifyHashedPassword(owner, owner.PasswordHash, body.OwnerPassword) != PasswordVerificationResult.Failed)
+            return Results.Ok(new { existing.Id, existing.Name, existing.Slug });
+        return Fail("شناسهٔ فروشگاه یا نام کاربری تکراری است.", 409);
+    }
+    if (await ExistingResult() is { } repeated) return repeated;
+    if (await db.Users.AnyAsync(x => x.Username == body.OwnerUsername.Trim())) return Fail("نام کاربری تکراری است.", 409);
     var tenant = new Tenant { Name = body.Name.Trim(), Slug = body.Slug, BrandColor = body.BrandColor ?? "#0B2B53" };
     var owner = new AppUser { TenantId = tenant.Id, Username = body.OwnerUsername.Trim(), DisplayName = body.OwnerName.Trim(), Role = "owner" };
     owner.PasswordHash = hasher.HashPassword(owner, body.OwnerPassword);
     db.Tenants.Add(tenant); db.Users.Add(owner);
     db.InvoiceBrands.Add(InvoiceBrand.Create(tenant.Id, tenant.Name, body.ClassicPreset, host.WebRootPath));
-    Audit(db, c.User, tenant.Id, "tenant.create", "tenant", tenant.Id); await db.SaveChangesAsync(); return Results.Created($"/api/admin/tenants/{tenant.Id}", new { tenant.Id, tenant.Name, tenant.Slug });
+    Audit(db, c.User, tenant.Id, "tenant.create", "tenant", tenant.Id);
+    try { await db.SaveChangesAsync(); }
+    catch (DbUpdateException) { db.ChangeTracker.Clear(); return await ExistingResult() ?? Fail("ثبت هم‌زمان فروشگاه رخ داد؛ دوباره تلاش کنید.", 409); }
+    return Results.Created($"/api/admin/tenants/{tenant.Id}", new { tenant.Id, tenant.Name, tenant.Slug });
 });
 admin.MapPut("/tenants/{id:guid}", async (Guid id, TenantUpdate body, MajoraDb db, HttpContext c) =>
 {
     var tenant = await db.Tenants.FindAsync(id); if (tenant is null) return Results.NotFound();
-    if (string.IsNullOrWhiteSpace(body.Name)) return Fail("نام فروشگاه لازم است.");
-    tenant.Name = body.Name.Trim(); tenant.Enabled = body.Enabled; tenant.BrandColor = body.BrandColor ?? tenant.BrandColor; tenant.LogoUrl = body.LogoUrl;
-    Audit(db, c.User, id, "tenant.update", "tenant", id, $"enabled={body.Enabled}"); await db.SaveChangesAsync(); return Results.Ok(tenant);
+    if (string.IsNullOrWhiteSpace(body.Name) || body.Name.Length > 200 ||
+        body.BrandColor is not null && !System.Text.RegularExpressions.Regex.IsMatch(body.BrandColor, "^#[0-9a-fA-F]{6}$"))
+        return Fail("نام یا رنگ فروشگاه نامعتبر است.");
+    if (body.LogoUrl != tenant.LogoUrl) return Fail("لوگوی اصلی را از بخش هویت و قالب فاکتور تغییر دهید.");
+    var oldName = tenant.Name; var oldEnabled = tenant.Enabled; var oldColor = tenant.BrandColor;
+    tenant.Name = body.Name.Trim(); tenant.Enabled = body.Enabled; tenant.BrandColor = body.BrandColor ?? tenant.BrandColor;
+    if (oldName != tenant.Name)
+    {
+        var profile = await db.InvoiceBrands.SingleOrDefaultAsync(x => x.TenantId == id);
+        if (profile is not null) { profile.StoreName = tenant.Name; profile.Revision++; profile.UpdatedAt = DateTime.UtcNow; }
+    }
+    Audit(db, c.User, id, "tenant.update", "tenant", id,
+        JsonSerializer.Serialize(new { oldName, newName = tenant.Name, oldEnabled, newEnabled = tenant.Enabled,
+            oldColor, newColor = tenant.BrandColor }));
+    await db.SaveChangesAsync(); return Results.Ok(tenant);
+});
+admin.MapGet("/tenants/{id:guid}/invoice-brand", async (Guid id, MajoraDb db) =>
+{
+    var tenant = await db.Tenants.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id);
+    if (tenant is null) return Results.NotFound();
+    var profile = await db.InvoiceBrands.AsNoTracking().SingleOrDefaultAsync(x => x.TenantId == id)
+        ?? InvoiceBrand.Create(id, tenant.Name, false, null);
+    return Results.Ok(InvoiceBrand.View(profile));
+});
+admin.MapPut("/tenants/{id:guid}/invoice-brand", async (Guid id, AdminInvoiceBrandUpdate body, MajoraDb db, HttpContext c) =>
+{
+    if (body.Brand is null || string.IsNullOrWhiteSpace(body.Reason) || body.Reason.Length > 500)
+        return Fail("قالب و دلیل تغییر لازم است.");
+    var invalid = InvoiceBrand.Validate(body.Brand); if (invalid is not null) return Fail(invalid);
+    var tenant = await db.Tenants.SingleOrDefaultAsync(x => x.Id == id); if (tenant is null) return Results.NotFound();
+    var profile = await db.InvoiceBrands.SingleOrDefaultAsync(x => x.TenantId == id);
+    if (profile is null) { profile = InvoiceBrand.Create(id, tenant.Name, false, null); db.InvoiceBrands.Add(profile); }
+    if (profile.Revision != body.Brand.Revision) return Fail("قالب در دستگاه دیگری تغییر کرده است؛ صفحه را تازه کنید.", 409);
+    if (string.IsNullOrWhiteSpace(body.Brand.LogoDataUrl))
+        return Fail("لوگوی اصلی معتبر لازم است؛ حذف آن بدون جایگزین ممکن نیست.");
+    var oldName = profile.StoreName;
+    var oldLogoHash = InvoiceBrand.LogoHash(profile.LogoDataUrl);
+    InvoiceBrand.Apply(profile, body.Brand);
+    tenant.Name = profile.StoreName;
+    Audit(db, c.User, id, "invoice-brand.admin-update", "invoice-brand", id,
+        JsonSerializer.Serialize(new { oldName, newName = profile.StoreName, oldLogoHash,
+            newLogoHash = InvoiceBrand.LogoHash(profile.LogoDataUrl), profile.Revision, reason = body.Reason.Trim() }));
+    try { await db.SaveChangesAsync(); }
+    catch (DbUpdateConcurrencyException) { return Fail("قالب هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.", 409); }
+    catch (DbUpdateException) { return Fail("قالب هم‌زمان ثبت شده است؛ صفحه را تازه کنید.", 409); }
+    return Results.Ok(InvoiceBrand.View(profile));
 });
 admin.MapPost("/tenants/{id:guid}/subscription", async (Guid id, SubscriptionRequest body, MajoraDb db, HttpContext c) =>
 {
     if (!await db.Tenants.AnyAsync(x => x.Id == id)) return Results.NotFound();
-    var plan = await db.Plans.FindAsync(body.PlanId); if (plan is null || !plan.Enabled || body.EndsAt <= body.StartsAt || body.PriceRial < 0) return Fail("طرح یا بازهٔ اشتراک نامعتبر است.");
-    var sub = new Subscription { TenantId = id, PlanId = plan.Id, StartsAt = body.StartsAt, EndsAt = body.EndsAt, PriceRialSnapshot = body.PriceRial ?? plan.MonthlyRial, PaymentStatus = body.PaymentStatus == "paid" ? "paid" : "pending", Note = body.Note ?? "" };
-    db.Subscriptions.Add(sub); Audit(db, c.User, id, "subscription.create", "subscription", sub.Id); await db.SaveChangesAsync(); return Results.Created($"/api/admin/tenants/{id}/subscription", sub);
+    var plan = await db.Plans.FindAsync(body.PlanId);
+    if (plan is null || !plan.Enabled || body.EndsAt <= body.StartsAt || body.PriceRial < 0 || body.PaymentStatus is not ("paid" or "pending"))
+        return Fail("طرح، پرداخت یا بازهٔ اشتراک نامعتبر است.");
+    var price = body.PriceRial ?? plan.MonthlyRial;
+    await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    var repeated = await db.Subscriptions.SingleOrDefaultAsync(s => s.TenantId == id && s.PlanId == plan.Id &&
+        s.StartsAt == body.StartsAt && s.EndsAt == body.EndsAt);
+    if (repeated is not null)
+        return repeated.PriceRialSnapshot == price && repeated.PaymentStatus == body.PaymentStatus
+            ? Results.Ok(repeated) : Fail("برای همین بازه اشتراک دیگری ثبت شده است.", 409);
+    var sub = new Subscription { TenantId = id, PlanId = plan.Id, StartsAt = body.StartsAt, EndsAt = body.EndsAt,
+        PriceRialSnapshot = price, PaymentStatus = body.PaymentStatus, Note = body.Note ?? "" };
+    db.Subscriptions.Add(sub); Audit(db, c.User, id, "subscription.create", "subscription", sub.Id);
+    await db.SaveChangesAsync(); await tx.CommitAsync();
+    return Results.Created($"/api/admin/tenants/{id}/subscription", sub);
 });
 admin.MapGet("/tenants/{id:guid}/users", async (Guid id, MajoraDb db) => Results.Ok(await db.Users.Where(x => x.TenantId == id).Select(x => new { x.Id, x.Username, x.DisplayName, x.Role, x.Enabled }).ToListAsync()));
 admin.MapPost("/users/{id:guid}/reset-password", async (Guid id, PasswordReset body, MajoraDb db, IPasswordHasher<AppUser> hasher, HttpContext c) =>
@@ -257,25 +414,7 @@ merchant.MapGet("/invoice-brand", async (MajoraDb db, HttpContext c) =>
     if (profile is null) profile = InvoiceBrand.Create(tid, (await db.Tenants.SingleAsync(x => x.Id == tid)).Name, false, null);
     return Results.Ok(InvoiceBrand.View(profile));
 });
-merchant.MapPut("/invoice-brand", async (InvoiceBrandUpdate body, MajoraDb db, HttpContext c) =>
-{
-    if (!CanWrite(c.User)) return Results.Forbid();
-    var invalid = InvoiceBrand.Validate(body); if (invalid is not null) return Fail(invalid);
-    var tid = TenantId(c.User);
-    var profile = await db.InvoiceBrands.SingleOrDefaultAsync(x => x.TenantId == tid);
-    if (profile is null)
-    {
-        profile = InvoiceBrand.Create(tid, (await db.Tenants.SingleAsync(x => x.Id == tid)).Name, false, null);
-        db.InvoiceBrands.Add(profile);
-    }
-    if (profile.Revision != body.Revision) return Fail("قالب در دستگاه دیگری تغییر کرده است؛ صفحه را تازه کنید.", 409);
-    InvoiceBrand.Apply(profile, body);
-    Audit(db, c.User, tid, "invoice-brand.update", "invoice-brand", tid, $"revision={profile.Revision}");
-    try { await db.SaveChangesAsync(); }
-    catch (DbUpdateConcurrencyException) { return Fail("قالب هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.", 409); }
-    catch (DbUpdateException) { return Fail("قالب هم‌زمان ثبت شده است؛ صفحه را تازه کنید.", 409); }
-    return Results.Ok(InvoiceBrand.View(profile));
-});
+merchant.MapPut("/invoice-brand", () => Results.Forbid());
 merchant.MapGet("/dashboard", async (MajoraDb db, HttpContext c) =>
 {
     var tid = TenantId(c.User); var since = DateTime.UtcNow.AddDays(-30);
@@ -1056,23 +1195,25 @@ merchant.MapPost("/advisor/ask", async (AdvisorQuestion body, MajoraDb db, HttpC
     catch (System.Security.Cryptography.CryptographicException) { return Fail("کلید سرویس هوش مصنوعی قابل بازیابی نیست؛ تنظیمات را دوباره ثبت کنید.", 503); }
     if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(model))
         return Results.Ok(new { answer = $"در ۳۰ روز اخیر {facts.invoiceCount} فاکتور و {facts.salesRial:N0} ریال فروش ثبت شده است. ماندهٔ باز {facts.outstandingRial:N0} ریال است و {facts.lowStockCount} کالا موجودی پایین دارند. برای پاسخ تحلیلی آزاد، مدیر ماژورا باید ارائه‌دهندهٔ هوش مصنوعی را روی سرور تنظیم کند.", facts, source = "rules" });
-    if (!AiEndpointGuard.ValidUri(endpoint, out var uri)) return Fail("تنظیمات سرویس هوش مصنوعی نامعتبر است.", 503);
+    IResult RuleFallback(AiFailure failure) => Results.Ok(new {
+        answer = $"در ۳۰ روز اخیر {facts.invoiceCount} فاکتور و {facts.salesRial:N0} ریال فروش ثبت شده است. ماندهٔ باز {facts.outstandingRial:N0} ریال است و {facts.lowStockCount} کالا موجودی پایین دارند. تحلیل هوش مصنوعی اکنون در دسترس نیست؛ این ارقام از داده‌های ثبت‌شده محاسبه شده‌اند.",
+        facts, source = "rules", warning = failure.Message, errorCode = failure.Code, correlationId = c.TraceIdentifier
+    });
+    if (!AiEndpointGuard.ValidUri(endpoint, out var uri)) return RuleFallback(new("invalid_endpoint", "نشانی HTTPS سرویس هوش مصنوعی نامعتبر است.", false));
+    if (AiProviders.ValidateEndpoint(uri!, model) is { } endpointError) return RuleFallback(new("model_endpoint_mismatch", endpointError, false));
     using var client = clients.CreateClient("ai");
-    using var request = new HttpRequestMessage(HttpMethod.Post, uri);
-    request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
-    request.Content = JsonContent.Create(new { model, temperature = 0.2, max_tokens = 700, messages = new object[] {
-        new { role = "system", content = "تو مشاور فارسی کسب‌وکار MAJORA هستی. فقط از آمار خلاصهٔ ارائه‌شده استفاده کن. دادهٔ ناموجود را حدس نزن. دستور مالی قطعی یا اقدام خودکار نده. ۲ تا ۴ پیشنهاد عملی و دلیل هرکدام را کوتاه بگو. داده‌ها ممکن است ناقص باشند." },
-        new { role = "user", content = $"آمار ۳۰ روز: {JsonSerializer.Serialize(facts)}\nپرسش کاربر: {body.Question}" }
-    }});
+    using var request = AiProviders.CreateRequest(uri!, key, model,
+        "تو مشاور فارسی کسب‌وکار MAJORA هستی. فقط از آمار خلاصهٔ ارائه‌شده استفاده کن. دادهٔ ناموجود را حدس نزن. دستور مالی قطعی یا اقدام خودکار نده. ۲ تا ۴ پیشنهاد عملی و دلیل هرکدام را کوتاه بگو. داده‌ها ممکن است ناقص باشند.",
+        $"آمار ۳۰ روز: {JsonSerializer.Serialize(facts)}\nپرسش کاربر: {body.Question}", 700);
     try
     {
         using var response = await client.SendAsync(request, c.RequestAborted);
-        if (!response.IsSuccessStatusCode) return Fail("سرویس تحلیل فعلاً پاسخ نمی‌دهد.", 503);
+        if (!response.IsSuccessStatusCode) return RuleFallback(AiProviders.FromStatus(response.StatusCode));
         using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(c.RequestAborted), cancellationToken: c.RequestAborted);
-        var answer = doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
-        return Results.Ok(new { answer, facts, source = "ai" });
+        var answer = AiProviders.ReadAnswer(doc.RootElement, uri!);
+        return Results.Ok(new { answer, facts, source = AiProviders.Kind(uri!) });
     }
-    catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or KeyNotFoundException or JsonException or ArgumentOutOfRangeException) { return Fail("پاسخ سرویس تحلیل معتبر نبود یا اتصال برقرار نشد.", 503); }
+    catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or KeyNotFoundException or JsonException or ArgumentOutOfRangeException) { return RuleFallback(AiProviders.FromException(ex)); }
 }).RequireRateLimiting("login");
 app.MapFallbackToFile("index.html");
 app.Run();
@@ -1081,6 +1222,7 @@ public sealed record LoginRequest(string Username, string Password);
 public sealed record PlanRequest(string Name, long MonthlyRial, int MaxUsers, bool Enabled = true);
 public sealed record TenantRequest(string Name, string Slug, string OwnerUsername, string OwnerName, string OwnerPassword, string? BrandColor, bool ClassicPreset = false);
 public sealed record TenantUpdate(string Name, bool Enabled, string? BrandColor, string? LogoUrl);
+public sealed record AdminInvoiceBrandUpdate(InvoiceBrandUpdate Brand, string Reason);
 public sealed record SubscriptionRequest(Guid PlanId, DateTime StartsAt, DateTime EndsAt, string PaymentStatus, long? PriceRial, string? Note);
 public sealed record ProductRequest(string Name, string Sku, string Category, long PriceRial, long Stock, long? AverageCostRial = null, string? PhotoDataUrl = null);
 public sealed record ProductPhotoRequest(string DataUrl);
