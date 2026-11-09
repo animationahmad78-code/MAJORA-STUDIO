@@ -22,3 +22,4 @@
 02-CLIENT-PROJECTS/*/releases/
 06-BUILDS-AND-RELEASES/
 07-BACKUPS/
+.playwright-cli/

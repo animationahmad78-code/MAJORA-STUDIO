@@ -9,7 +9,7 @@ const statusLabel: Record<string, string> = {
   refund_due: 'بازپرداخت باز', returned: 'تماماً مرجوع', cheque: 'چک در انتظار وصول'
 };
 
-export function Invoices({ run, onReturn, onCheque }: { run: (action: () => Promise<unknown>, success?: string) => Promise<void>; onReturn: (id: string) => void; onCheque: () => void }) {
+export function Invoices({ run, onReturn, onCheque, initialId, onInitialViewed }: { run: (action: () => Promise<unknown>, success?: string) => Promise<void>; onReturn: (id: string) => void; onCheque: () => void; initialId?: string | null; onInitialViewed?: () => void }) {
   const [items, setItems] = useState<Invoice[]>([]);
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<Invoice | null>(null);
@@ -21,6 +21,7 @@ export function Invoices({ run, onReturn, onCheque }: { run: (action: () => Prom
   const paymentKey = useRef(crypto.randomUUID());
   const load = () => api<Invoice[]>(`/merchant/invoices?q=${encodeURIComponent(query)}`).then(setItems);
   useEffect(() => { void load().catch(() => {}); }, [query]);
+  useEffect(() => { if (initialId) { setPreview(initialId); onInitialViewed?.(); } }, [initialId]);
   return <><div className="page-intro"><h2>فاکتورها و مانده‌ها</h2><p>شماره، نام یا تلفن مشتری را جست‌وجو کنید؛ دریافت وجه و مرجوعی از همین فهرست در دسترس‌اند.</p></div>
     <section className="card"><div className="card-head"><h2>فهرست فاکتورها</h2><input className="search" value={query} onChange={e => setQuery(e.target.value)} placeholder="شماره، نام یا تلفن" aria-label="جست‌وجوی فاکتور"/></div>
       {items.length ? <div className="list">{items.map(invoice => <div className="list-row invoice-list-row" key={invoice.id}>

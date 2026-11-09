@@ -9,7 +9,7 @@ type Stage = 'customer' | 'products' | 'review';
 type CartLine = { product: Product; quantity: number; manual?: boolean };
 type ProductMeta = { categories: string[] };
 
-export function SaleWorkspace({ onDone }: { onDone: () => void }) {
+export function SaleWorkspace({ onDone }: { onDone: (invoiceId: string) => void }) {
   const [stage, setStage] = useState<Stage>('customer');
   const [customerQuery, setCustomerQuery] = useState('');
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -89,7 +89,7 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
     catch (e) { setError(e instanceof Error ? e.message : 'مشخصات چک نامعتبر است.'); return; }
     setBusy(true); setError('');
     try {
-      await api('/merchant/invoices', 'POST', {
+      const created = await api<{ id: string }>('/merchant/invoices', 'POST', {
         idempotencyKey: requestKey.current, customerId: customer?.id ?? null,
         customerName: customer ? '' : customerName.trim(), customerPhone: customer ? '' : customerPhone.trim(),
         paymentStatus, paidRial, dueAt: dueIso ? new Date(`${dueIso}T12:00:00`).toISOString() : null,
@@ -100,7 +100,7 @@ export function SaleWorkspace({ onDone }: { onDone: () => void }) {
           : { productId: x.product.id, quantity: x.quantity, expectedUnitPriceRial: x.product.priceRial, discountPercent: lineBasis(x.product.id) / 1000 }),
       });
       requestKey.current = crypto.randomUUID();
-      onDone();
+      onDone(created.id);
     } catch (e) { setError(e instanceof Error ? e.message : 'فاکتور ثبت نشد.'); }
     finally { setBusy(false); }
   };
