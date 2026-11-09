@@ -7,7 +7,7 @@ export type InvoiceBrand = {
   storeName: string; slogan: string; phone: string; address: string; card: string; cardHolder: string;
   note: string; conditions: string[]; socialTelegram: string; socialInstagram: string; socialContact: string;
 };
-type Props = { brand: InvoiceBrand; receipt: InvoiceReceipt; mono: boolean; paper: PaperSize; logo: string; chequePhoto?: string };
+type Props = { brand: InvoiceBrand; receipt: InvoiceReceipt; mono: boolean; paper: PaperSize; logo: string; chequePhoto?: string; revisionLabel?: string };
 
 export function pageLines<T extends { name: string }>(lines: T[], paper: PaperSize, extraSummaryRows = 0): T[][] {
   // Reserve the bottom of the last sheet for terms, totals and signatures.
@@ -38,7 +38,7 @@ export function pageLines<T extends { name: string }>(lines: T[], paper: PaperSi
   return pages;
 }
 
-export function InvoiceDocument({ brand, receipt, mono, paper, logo, chequePhoto }: Props) {
+export function InvoiceDocument({ brand, receipt, mono, paper, logo, chequePhoto, revisionLabel }: Props) {
   const returned = receipt.returnedRial ?? 0;
   const refunded = receipt.refundedRial ?? 0;
   const netTotal = receipt.totalRial - returned;
@@ -65,7 +65,7 @@ export function InvoiceDocument({ brand, receipt, mono, paper, logo, chequePhoto
         {(receipt.showCardNumber ?? true) && <div className="inv-payment"><span>▣ شماره کارت <b dir="ltr">{brand.card}</b></span><span>♟ {brand.cardHolder}</span></div>}
         <div className="inv-note">➤ {brand.note}</div>
         <div className="inv-meta">
-          <span>{proforma ? 'شماره پیش‌فاکتور' : 'شماره فاکتور'}: <b>{formatRial(receipt.number)}</b></span>
+          <span>{proforma ? 'شماره پیش‌فاکتور' : 'شماره فاکتور'}: <b>{formatRial(receipt.number)}{revisionLabel ? ` · ${revisionLabel}` : ''}</b></span>
           <span>تاریخ: <b>{receipt.dateJalali || new Date(receipt.at).toLocaleDateString('fa-IR-u-ca-persian')}</b></span>
           <span>نام خریدار: <b>{receipt.customerName || 'خریدار حضوری'}</b></span>
           <span>شماره تماس: <b dir="ltr">{receipt.customerPhone || '—'}</b></span>

@@ -6,8 +6,8 @@ import { api, type InvoiceBrand as BrandView } from './api';
 import { makeInvoiceFiles, saveBlob, type ExportKind } from './invoice-export';
 import './invoice-print.css';
 
-type InvoiceRecord = {
-  id: string; number: number; issuedAt: string; customerName: string; customerPhone: string;
+export type InvoiceRecord = {
+  id: string; number: number; revision?: number; issuedAt: string; customerName: string; customerPhone: string;
   paymentStatus: string; totalRial: number; paidRial: number; returnedRial: number; refundedRial: number; brandSnapshotJson: string;
   lines: { id: string; productId?: string; nameSnapshot: string; quantity: number; unitPriceRial: number; totalRial: number }[];
 };
@@ -29,7 +29,7 @@ function print(paper: PaperSize) {
   window.setTimeout(cleanup, 30000);
 }
 
-export function InvoicePreview({ id, close }: { id: string; close: () => void }) {
+export function InvoicePreview({ id, close, snapshot }: { id: string; close: () => void; snapshot?: InvoiceRecord }) {
   const previewRef = useRef<HTMLDivElement>(null);
   const [invoice, setInvoice] = useState<InvoiceRecord | null>(null);
   const [fallbackBrand, setFallbackBrand] = useState<BrandView | null>(null);
@@ -40,9 +40,10 @@ export function InvoicePreview({ id, close }: { id: string; close: () => void })
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   useEffect(() => {
-    api<InvoiceRecord>(`/merchant/invoices/${id}`).then(setInvoice).catch(e => setError(e.message));
+    if (snapshot) setInvoice(snapshot);
+    else api<InvoiceRecord>(`/merchant/invoices/${id}`).then(setInvoice).catch(e => setError(e.message));
     api<BrandView>('/merchant/invoice-brand').then(setFallbackBrand).catch(() => {});
-  }, [id]);
+  }, [id, snapshot]);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) close(); };
     window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler);
@@ -105,7 +106,7 @@ export function InvoicePreview({ id, close }: { id: string; close: () => void })
     setError('');
     setBusy(kind === 'pdf' ? 'در حال ساخت PDF فاکتور…' : 'در حال ساخت تصویر فاکتور…');
     try {
-      const files = await makeInvoiceFiles(previewRef.current, paper, invoice.number, kind);
+      const files = await makeInvoiceFiles(previewRef.current, paper, invoice.number, kind, snapshot ? invoice.revision : undefined);
       if (action === 'share' && navigator.share && navigator.canShare?.({ files })) {
         await navigator.share({ title: `فاکتور ${invoice.number}`, files });
       } else if (files.length === 1) {
@@ -114,7 +115,7 @@ export function InvoicePreview({ id, close }: { id: string; close: () => void })
       } else {
         const archive = new JSZip();
         files.forEach(file => archive.file(file.name, file));
-        saveBlob(await archive.generateAsync({ type: 'blob' }), `majora-invoice-${invoice.number}-${paper}-images.zip`);
+        saveBlob(await archive.generateAsync({ type: 'blob' }), `majora-invoice-${invoice.number}${snapshot ? `-revision-${invoice.revision ?? 'old'}` : ''}-${paper}-images.zip`);
         if (action === 'share') setError('اشتراک چند تصویر در این مرورگر فعال نیست؛ فایل ZIP ذخیره شد.');
       }
     } catch (e) {
@@ -134,14 +135,14 @@ export function InvoicePreview({ id, close }: { id: string; close: () => void })
   return <div className="modal-backdrop print-backdrop" onClick={() => { if (!busy) close(); }}>
     <div className="invoice-dialog detailed-invoice-dialog" role="dialog" aria-modal="true" aria-label="پیش‌نمایش فاکتور" onClick={e => e.stopPropagation()}>
       <div className="print-actions">
-        <div className="print-heading"><strong>{invoice?.paymentStatus === 'proforma' ? 'پیش‌فاکتور' : 'فاکتور'} {invoice?.number ?? ''}</strong><button onClick={close} disabled={!!busy}>بستن</button></div>
+        <div className="print-heading"><strong>{invoice?.paymentStatus === 'proforma' ? 'پیش‌فاکتور' : 'فاکتور'} {invoice?.number ?? ''}{snapshot ? ` · نسخهٔ ${invoice?.revision ?? 'قدیمی'}` : ''}</strong><button onClick={close} disabled={!!busy}>بستن</button></div>
         <div className="print-settings"><label>کاغذ<select value={paper} onChange={e => setPaper(e.target.value as PaperSize)} disabled={!!busy}><option value="a4">A4</option><option value="a5">A5</option></select></label><label className="print-checkbox"><input type="checkbox" checked={mono} onChange={e => setMono(e.target.checked)} disabled={!!busy}/>سیاه و سفید</label><button onClick={() => setFit(value => !value)} disabled={!!busy}>{fit ? 'نمایش درشت' : 'نمایش کامل'}</button></div>
         <div className="print-main-actions"><button onClick={() => void exportFile('pdf', 'save')} disabled={!receipt || !brand || !!busy}>دریافت PDF</button><button onClick={() => void exportFile('png', 'save')} disabled={!receipt || !brand || !!busy}>ذخیره تصویر</button><button className="primary" onClick={() => print(paper)} disabled={!receipt || !brand || !!busy}>چاپ {paper.toUpperCase()}</button></div>
         <details className="print-more"><summary>اشتراک‌گذاری و متن فاکتور</summary><div><button onClick={() => void exportFile('pdf', 'share')} disabled={!receipt || !brand || !!busy}>اشتراک PDF</button><button onClick={() => void exportFile('png', 'share')} disabled={!receipt || !brand || !!busy}>اشتراک تصویر</button><button onClick={() => void navigator.clipboard.writeText(text).catch(() => setError('کپی متن انجام نشد.'))} disabled={!text || !!busy}>کپی متن</button><button onClick={() => void shareText()} disabled={!text || !!busy}>اشتراک متن</button></div></details>
       </div>
       {error && <div role="alert" className="field-error">{error}</div>}
       {busy && <div className="invoice-export-progress" role="status" aria-live="polite"><span className="invoice-export-spinner" aria-hidden="true"/>{busy}</div>}
-      {receipt && brand ? <div ref={previewRef} className="invoice-preview-scroll"><div className="invoice-preview-fit" style={{ zoom: previewScale }}><InvoiceDocument brand={brand} receipt={receipt} mono={mono} paper={paper} logo={brandView?.logoDataUrl || placeholderLogo(brand.storeName)}/></div></div> : <div className="empty">در حال دریافت فاکتور…</div>}
+      {receipt && brand ? <div ref={previewRef} className="invoice-preview-scroll"><div className="invoice-preview-fit" style={{ zoom: previewScale }}><InvoiceDocument brand={brand} receipt={receipt} mono={mono} paper={paper} logo={brandView?.logoDataUrl || placeholderLogo(brand.storeName)} revisionLabel={snapshot ? `نسخهٔ ${invoice?.revision ?? 'قدیمی'}` : undefined}/></div></div> : <div className="empty">در حال دریافت فاکتور…</div>}
     </div>
   </div>;
 }

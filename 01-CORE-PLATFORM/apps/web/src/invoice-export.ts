@@ -44,9 +44,9 @@ function pngBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   return new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('ساخت تصویر فاکتور انجام نشد.')), 'image/png'));
 }
 
-export async function makeInvoiceFiles(root: HTMLElement, paper: PaperSize, number: number, kind: ExportKind): Promise<File[]> {
+export async function makeInvoiceFiles(root: HTMLElement, paper: PaperSize, number: number, kind: ExportKind, revision?: number): Promise<File[]> {
   const canvases = await renderPages(root);
-  const basename = `majora-invoice-${number}-${paper}`;
+  const basename = `majora-invoice-${number}${revision ? `-revision-${revision}` : ''}-${paper}`;
   if (kind === 'png') return Promise.all(canvases.map(async (canvas, index) => new File([await pngBlob(canvas)], `${basename}-page-${index + 1}.png`, { type: 'image/png' })));
 
   const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: paper, compress: true });
