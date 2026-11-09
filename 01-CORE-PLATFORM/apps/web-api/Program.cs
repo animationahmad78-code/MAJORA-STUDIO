@@ -490,8 +490,117 @@ merchant.MapPost("/customers", async (CustomerRequest body, MajoraDb db, HttpCon
     if (string.IsNullOrWhiteSpace(body.Name)) return Fail("نام مشتری لازم است.");
     var customer = new Customer { TenantId = TenantId(c.User), Name = body.Name.Trim(), Phone = body.Phone.Trim() }; db.Customers.Add(customer); Audit(db, c.User, customer.TenantId, "customer.create", "customer", customer.Id); await db.SaveChangesAsync(); return Results.Created($"/api/merchant/customers/{customer.Id}", customer);
 });
-merchant.MapGet("/invoices", async (string? q, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Invoices.Where(x => x.TenantId == tid && !x.Archived && (q == null || x.CustomerName.Contains(q) || x.CustomerPhone.Contains(q) || x.Number.ToString() == q)).OrderByDescending(x => x.IssuedAt).Take(100).Select(x => new { x.Id, x.Number, x.CustomerName, x.CustomerPhone, x.IssuedAt, x.TotalRial, x.PaidRial, x.ReturnedRial, x.RefundedRial, x.PaymentStatus, x.Status }).ToListAsync()); });
+merchant.MapGet("/invoices", async (string? q, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Invoices.Where(x => x.TenantId == tid && !x.Archived && (q == null || x.CustomerName.Contains(q) || x.CustomerPhone.Contains(q) || x.Number.ToString() == q)).OrderByDescending(x => x.IssuedAt).Take(100).Select(x => new { x.Id, x.Number, x.Revision, x.CustomerName, x.CustomerPhone, x.IssuedAt, x.TotalRial, x.PaidRial, x.ReturnedRial, x.RefundedRial, x.PaymentStatus, x.Status }).ToListAsync()); });
 merchant.MapGet("/invoices/{id:guid}", async (Guid id, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var invoice = await db.Invoices.Include(x => x.Lines).SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid); return invoice is null ? Results.NotFound() : Results.Ok(invoice); });
+merchant.MapGet("/invoices/{id:guid}/revisions", async (Guid id, MajoraDb db, HttpContext c) =>
+{
+    var tid = TenantId(c.User);
+    if (!await db.Invoices.AnyAsync(x => x.Id == id && x.TenantId == tid)) return Results.NotFound();
+    return Results.Ok(await db.InvoiceRevisions.AsNoTracking().Where(x => x.InvoiceId == id && x.TenantId == tid)
+        .OrderByDescending(x => x.RevisionNo).Select(x => new { x.RevisionNo, x.Reason, x.RecordedAt, x.SnapshotJson }).ToListAsync());
+});
+merchant.MapPost("/invoices/{id:guid}/revisions", async (Guid id, InvoiceRevisionRequest body, MajoraDb db, HttpContext c) =>
+{
+    if (!CanSell(c.User)) return Results.Forbid();
+    if (body.ExpectedRevision < 1 || string.IsNullOrWhiteSpace(body.Reason) || body.Reason.Length > 500 ||
+        string.IsNullOrWhiteSpace(body.CustomerName) || body.CustomerName.Length > 200 || body.CustomerPhone is null || body.CustomerPhone.Length > 30 ||
+        body.Lines is null || body.Lines.Count is < 1 or > 200 ||
+        body.Lines.Where(x => x.LineId is not null).Select(x => x.LineId).Distinct().Count() != body.Lines.Count(x => x.LineId is not null))
+        return Fail("دلیل ویرایش، مشتری و ردیف‌های فاکتور را بررسی کنید.");
+    if (body.IssuedAt is DateTime changedDate && (changedDate.Kind != DateTimeKind.Utc || changedDate.Year < 2000 || changedDate.Year > 2100))
+        return Fail("تاریخ فاکتور باید معتبر و همراه با منطقهٔ زمانی UTC باشد.");
+    var tid = TenantId(c.User);
+    await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    var invoice = await db.Invoices.Include(x => x.Lines).SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && x.Status == "issued" && !x.Archived);
+    if (invoice is null) return Results.NotFound();
+    if (invoice.Revision != body.ExpectedRevision) return Fail("فاکتور در دستگاه دیگری تغییر کرده است؛ دوباره بازش کنید.", 409);
+    if (invoice.ReturnedRial > 0 || invoice.RefundedRial > 0 || await db.SalesReturns.AnyAsync(x => x.InvoiceId == id && x.TenantId == tid))
+        return Fail("فاکتور دارای مرجوعی یا بازپرداخت از مسیر اصلاح سند قابل تغییر نیست؛ برای اصلاح بعدی سند جداگانه ثبت کنید.", 409);
+    var oldLines = invoice.Lines.ToDictionary(x => x.Id);
+    var oldSnapshot = JsonSerializer.Serialize(invoice, JsonSerializerOptions.Web);
+    var newLines = new List<InvoiceLine>();
+    long newTotal = 0;
+    try
+    {
+        foreach (var item in body.Lines)
+        {
+            if (string.IsNullOrWhiteSpace(item.Name) || item.Name.Length > 300 || item.UnitPriceRial < 0 || item.Quantity < 1 || item.Quantity > 1_000_000)
+                return Fail("نام، قیمت یا تعداد یکی از ردیف‌ها معتبر نیست.");
+            InvoiceLine? old = null;
+            if (item.LineId is Guid lineId && (!oldLines.TryGetValue(lineId, out old) || old.ProductId != item.ProductId))
+                return Fail("شناسه یا کالای ردیف تغییر کرده است؛ فاکتور را تازه کنید.", 409);
+            Product? product = null;
+            if (item.ProductId is Guid productId)
+            {
+                product = await db.Products.SingleOrDefaultAsync(x => x.Id == productId && x.TenantId == tid);
+                if (product is null || (product.Archived && old is null)) return Fail("کالای جدید در فهرست فعال پیدا نشد.", 409);
+            }
+            var gross = checked(item.UnitPriceRial * item.Quantity);
+            if (item.DiscountRial < 0 || item.DiscountRial > gross) return Fail("تخفیف ردیف از مبلغ آن بیشتر است.");
+            var net = checked(gross - item.DiscountRial);
+            newTotal = checked(newTotal + net);
+            newLines.Add(new InvoiceLine { InvoiceId = id, ProductId = item.ProductId, NameSnapshot = item.Name.Trim(),
+                UnitPriceRial = item.UnitPriceRial, Quantity = item.Quantity, TotalRial = net,
+                UnitCostRialSnapshot = old?.UnitCostRialSnapshot ?? product?.AverageCostRial ?? 0,
+                CostKnown = old?.CostKnown ?? product?.CostKnown ?? false });
+        }
+        if (invoice.PaymentStatus != "proforma")
+        {
+            if (invoice.PaidRial - invoice.RefundedRial > newTotal) return Fail("جمع اصلاح‌شده از وجه دریافت‌شده کمتر است؛ ابتدا وضعیت مالی را تعیین کنید.", 409);
+            var deltas = new Dictionary<Guid, long>();
+            foreach (var line in oldLines.Values.Where(x => x.ProductId is not null)) deltas[line.ProductId!.Value] = checked(deltas.GetValueOrDefault(line.ProductId.Value) + line.Quantity);
+            foreach (var line in newLines.Where(x => x.ProductId is not null)) deltas[line.ProductId!.Value] = checked(deltas.GetValueOrDefault(line.ProductId.Value) - line.Quantity);
+            foreach (var (productId, delta) in deltas.Where(x => x.Value != 0))
+            {
+                var product = await db.Products.SingleAsync(x => x.Id == productId && x.TenantId == tid);
+                if (delta < 0 && product.Stock < -delta) return Fail($"موجودی «{product.Name}» برای اصلاح فاکتور کافی نیست.", 409);
+                product.Stock = checked(product.Stock + delta); product.UpdatedAt = DateTime.UtcNow;
+                db.StockMovements.Add(new StockMovement { TenantId = tid, ProductId = productId, InvoiceId = id, Delta = delta, Reason = "invoice-revised" });
+            }
+        }
+    }
+    catch (OverflowException) { return Fail("مبلغ یا تعداد از محدودهٔ پشتیبانی‌شده بیشتر است."); }
+    if (invoice.Revision == 1 && !await db.InvoiceRevisions.AnyAsync(x => x.InvoiceId == id && x.TenantId == tid))
+        db.InvoiceRevisions.Add(new InvoiceRevision { TenantId = tid, InvoiceId = id, RevisionNo = 1, SnapshotJson = oldSnapshot, Reason = "نسخهٔ صادرشده", RecordedAt = invoice.IssuedAt });
+    var previousTotal = invoice.TotalRial;
+    db.InvoiceLines.RemoveRange(oldLines.Values);
+    db.InvoiceLines.AddRange(newLines);
+    if (invoice.CustomerName != body.CustomerName.Trim() || invoice.CustomerPhone != body.CustomerPhone.Trim())
+    {
+        var currentCustomer = invoice.CustomerId is Guid currentId
+            ? await db.Customers.SingleOrDefaultAsync(x => x.Id == currentId && x.TenantId == tid && !x.Archived) : null;
+        if (currentCustomer is not null && currentCustomer.Phone == body.CustomerPhone.Trim())
+            currentCustomer.Name = body.CustomerName.Trim();
+        else
+        {
+            var matched = await db.Customers.FirstOrDefaultAsync(x => x.TenantId == tid && !x.Archived &&
+                x.Phone == body.CustomerPhone.Trim() && x.Name == body.CustomerName.Trim());
+            if (matched is null)
+            {
+                matched = new Customer { TenantId = tid, Name = body.CustomerName.Trim(), Phone = body.CustomerPhone.Trim() };
+                db.Customers.Add(matched);
+            }
+            invoice.CustomerId = matched.Id;
+        }
+    }
+    invoice.CustomerName = body.CustomerName.Trim(); invoice.CustomerPhone = body.CustomerPhone.Trim();
+    invoice.IssuedAt = body.IssuedAt?.ToUniversalTime() ?? invoice.IssuedAt;
+    invoice.TotalRial = newTotal; invoice.Revision++;
+    FinanceMath.UpdateStatus(invoice);
+    var revisedSnapshot = new Invoice { Id = invoice.Id, TenantId = tid, Number = invoice.Number, CustomerId = invoice.CustomerId,
+        CustomerName = invoice.CustomerName, CustomerPhone = invoice.CustomerPhone, IssuedAt = invoice.IssuedAt,
+        Status = invoice.Status, PaymentStatus = invoice.PaymentStatus, Revision = invoice.Revision,
+        TotalRial = invoice.TotalRial, PaidRial = invoice.PaidRial, ReturnedRial = invoice.ReturnedRial,
+        RefundedRial = invoice.RefundedRial, Archived = invoice.Archived, IdempotencyKey = invoice.IdempotencyKey,
+        BrandSnapshotJson = invoice.BrandSnapshotJson, Lines = newLines };
+    db.InvoiceRevisions.Add(new InvoiceRevision { TenantId = tid, InvoiceId = id, RevisionNo = invoice.Revision,
+        SnapshotJson = JsonSerializer.Serialize(revisedSnapshot, JsonSerializerOptions.Web), Reason = body.Reason.Trim() });
+    Audit(db, c.User, tid, "invoice.revise", "invoice", id, $"from={invoice.Revision - 1};to={invoice.Revision};old={previousTotal};new={newTotal};reason={body.Reason.Trim()}");
+    try { await db.SaveChangesAsync(); await tx.CommitAsync(); }
+    catch (DbUpdateConcurrencyException) { return Fail("فاکتور هم‌زمان تغییر کرده است؛ دوباره بازش کنید.", 409); }
+    catch (DbUpdateException) { return Fail("اصلاح فاکتور ثبت نشد؛ داده‌ها را تازه کنید.", 409); }
+    return Results.Ok(new { invoice.Id, invoice.Number, invoice.Revision, invoice.TotalRial, invoice.PaymentStatus });
+});
 merchant.MapPost("/invoices", async (InvoiceRequest body, MajoraDb db, HttpContext c) =>
 {
     if (!CanSell(c.User)) return Results.Forbid();
@@ -548,6 +657,8 @@ merchant.MapPost("/invoices", async (InvoiceRequest body, MajoraDb db, HttpConte
     if (body.PaidRial < 0 || body.PaidRial > invoice.TotalRial || (body.PaymentStatus == "paid" && body.PaidRial != invoice.TotalRial) || (body.PaymentStatus == "partial" && (body.PaidRial <= 0 || body.PaidRial == invoice.TotalRial)) || (body.PaymentStatus is "unpaid" or "proforma" && body.PaidRial != 0)) return Fail("مبلغ پرداخت با وضعیت فاکتور سازگار نیست.");
     invoice.PaidRial = body.PaidRial; if (body.PaidRial > 0) db.Payments.Add(new Payment { TenantId = tid, InvoiceId = invoice.Id, AmountRial = body.PaidRial, Method = "initial" });
     if (body.PaymentStatus != "proforma" && invoice.PaidRial < invoice.TotalRial && body.DueAt is DateTime due) db.Reminders.Add(new Reminder { TenantId = tid, InvoiceId = invoice.Id, Title = $"پیگیری مانده فاکتور {invoice.Number}", DueAt = due });
+    db.InvoiceRevisions.Add(new InvoiceRevision { TenantId = tid, InvoiceId = invoice.Id, RevisionNo = 1,
+        SnapshotJson = JsonSerializer.Serialize(invoice, JsonSerializerOptions.Web), Reason = "نسخهٔ صادرشده", RecordedAt = invoice.IssuedAt });
     db.Invoices.Add(invoice); Audit(db, c.User, tid, "invoice.issue", "invoice", invoice.Id, $"number={invoice.Number}");
     try { await db.SaveChangesAsync(); await tx.CommitAsync(); }
     catch (DbUpdateException) { return Fail("هم‌زمانی در ثبت رخ داد؛ درخواست را دوباره بررسی کنید.", 409); }
@@ -561,6 +672,9 @@ merchant.MapPost("/invoices/{id:guid}/convert", async (Guid id, MajoraDb db, Htt
     var invoice = await db.Invoices.Include(x => x.Lines).SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && !x.Archived && x.Status == "issued");
     if (invoice is null) return Results.NotFound();
     if (invoice.PaymentStatus != "proforma") return Fail("این سند دیگر پیش‌فاکتور فعال نیست.", 409);
+    if (invoice.Revision == 1 && !await db.InvoiceRevisions.AnyAsync(x => x.InvoiceId == id && x.TenantId == tid))
+        db.InvoiceRevisions.Add(new InvoiceRevision { TenantId = tid, InvoiceId = id, RevisionNo = 1,
+            SnapshotJson = JsonSerializer.Serialize(invoice, JsonSerializerOptions.Web), Reason = "نسخهٔ پیش‌فاکتور", RecordedAt = invoice.IssuedAt });
     foreach (var line in invoice.Lines)
     {
         if (line.ProductId is not Guid productId) continue;
@@ -572,10 +686,14 @@ merchant.MapPost("/invoices/{id:guid}/convert", async (Guid id, MajoraDb db, Htt
         db.StockMovements.Add(new StockMovement { TenantId = tid, ProductId = productId, InvoiceId = invoice.Id, Delta = -line.Quantity, Reason = "proforma-converted" });
     }
     invoice.PaymentStatus = invoice.TotalRial == 0 ? "paid" : "unpaid";
+    invoice.Revision++;
+    db.InvoiceRevisions.Add(new InvoiceRevision { TenantId = tid, InvoiceId = id, RevisionNo = invoice.Revision,
+        SnapshotJson = JsonSerializer.Serialize(invoice, JsonSerializerOptions.Web), Reason = "تبدیل پیش‌فاکتور به فروش" });
     Audit(db, c.User, tid, "invoice.convert-proforma", "invoice", invoice.Id, $"number={invoice.Number}");
     try { await db.SaveChangesAsync(); await tx.CommitAsync(); }
+    catch (DbUpdateConcurrencyException) { return Fail("پیش‌فاکتور هم‌زمان تغییر کرده است؛ دوباره بازش کنید.", 409); }
     catch (DbUpdateException) { return Fail("هم‌زمانی در تبدیل رخ داد؛ موجودی را بررسی کنید.", 409); }
-    return Results.Ok(new { invoice.Id, invoice.Number, invoice.TotalRial, invoice.PaymentStatus });
+    return Results.Ok(new { invoice.Id, invoice.Number, invoice.Revision, invoice.TotalRial, invoice.PaymentStatus });
 });
 merchant.MapPost("/invoices/{id:guid}/payments", async (Guid id, PaymentRequest body, MajoraDb db, HttpContext c) =>
 {
@@ -836,6 +954,8 @@ public sealed record PriceBatchRequest(string IdempotencyKey, decimal Percent, b
 public sealed record CustomerRequest(string Name, string Phone);
 public sealed record InvoiceRequest(string IdempotencyKey, Guid? CustomerId, string CustomerName, string CustomerPhone, string PaymentStatus, long PaidRial, DateTime? DueAt, List<InvoiceLineRequest> Lines, long? ExpectedTotalRial = null);
 public sealed record InvoiceLineRequest(Guid? ProductId, long Quantity, long? ExpectedUnitPriceRial = null, decimal DiscountPercent = 0, string? Name = null, long? UnitPriceRial = null);
+public sealed record InvoiceRevisionRequest(int ExpectedRevision, string Reason, string CustomerName, string CustomerPhone, DateTime? IssuedAt, List<InvoiceLineRevisionRequest> Lines);
+public sealed record InvoiceLineRevisionRequest(Guid? LineId, Guid? ProductId, string Name, long UnitPriceRial, long Quantity, long DiscountRial);
 public sealed record PaymentRequest(string IdempotencyKey, long AmountRial, string Method, string? Reference);
 public sealed record SalesReturnRequest(string IdempotencyKey, string Reason, List<SalesReturnLineRequest> Lines);
 public sealed record SalesReturnLineRequest(Guid InvoiceLineId, long Quantity, bool Restock);

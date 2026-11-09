@@ -256,6 +256,12 @@ namespace Majora.WebApi.Migrations
                         .HasColumnType("bigint")
                         .HasDefaultValue(0L);
 
+                    b.Property<int>("Revision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(1);
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
@@ -384,6 +390,43 @@ namespace Majora.WebApi.Migrations
                     b.HasIndex("InvoiceId");
 
                     b.ToTable("InvoiceLines");
+                });
+
+            modelBuilder.Entity("Majora.WebApi.InvoiceRevision", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("InvoiceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<DateTime>("RecordedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("RevisionNo")
+                        .HasColumnType("int");
+
+                    b.Property<string>("SnapshotJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InvoiceId");
+
+                    b.HasIndex("TenantId", "InvoiceId", "RevisionNo")
+                        .IsUnique();
+
+                    b.ToTable("InvoiceRevisions");
                 });
 
             modelBuilder.Entity("Majora.WebApi.Payment", b =>
@@ -951,6 +994,15 @@ namespace Majora.WebApi.Migrations
                 {
                     b.HasOne("Majora.WebApi.Invoice", null)
                         .WithMany("Lines")
+                        .HasForeignKey("InvoiceId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Majora.WebApi.InvoiceRevision", b =>
+                {
+                    b.HasOne("Majora.WebApi.Invoice", null)
+                        .WithMany()
                         .HasForeignKey("InvoiceId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();

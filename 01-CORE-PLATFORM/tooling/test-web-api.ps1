@@ -83,6 +83,8 @@ try {
   if ($paymentAgain.id -ne $payment.id) { throw 'Payment idempotency failed' }
   $detail = Invoke-RestMethod "$base/api/merchant/invoices/$($invoice.id)" -WebSession $ownerSession
   if ($detail.paidRial -ne 1000000 -or $detail.paymentStatus -ne 'paid') { throw 'Payment settlement mismatch' }
+  $issuedRevision = Invoke-RestMethod "$base/api/merchant/invoices/$($invoice.id)/revisions" -WebSession $ownerSession
+  if (@($issuedRevision).Count -ne 1 -or $issuedRevision[0].revisionNo -ne 1 -or ($issuedRevision[0].snapshotJson | ConvertFrom-Json).paidRial -ne 200000) { throw 'Original invoice snapshot changed after later payment' }
   $returnLineId = $detail.lines[0].id
   $returnBody = @{idempotencyKey="return-1-$id";reason='مرجوعی آزمایشی';lines=@(@{invoiceLineId=$returnLineId;quantity=1;restock=$true})}
   $return = PostJson "/merchant/invoices/$($invoice.id)/returns" $returnBody $ownerSession
@@ -106,6 +108,35 @@ try {
   if (@($returns).Count -ne 1 -or $returns[0].invoiceNumber -ne 1) { throw 'Return list mismatch' }
   $financeAfterReturn = Invoke-RestMethod "$base/api/merchant/accounting/overview" -WebSession $ownerSession
   if ($financeAfterReturn.revenueRial -ne 500000 -or $financeAfterReturn.returnsRial -ne 500000 -or $financeAfterReturn.refundedRial -ne 500000 -or $financeAfterReturn.refundDueRial -ne 0) { throw 'Return accounting overview mismatch' }
+  $returnedRevisionBlocked = $false
+  try { $null = PostJson "/merchant/invoices/$($invoice.id)/revisions" @{expectedRevision=1;reason='نباید مرجوعی را تغییر دهد';customerName='مشتری آزمون';customerPhone='09120000000';lines=@(@{lineId=$returnLineId;productId=$product.id;name='کیف چرم آزمون';unitPriceRial=500000;quantity=2;discountRial=0})} $ownerSession } catch { $returnedRevisionBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $returnedRevisionBlocked) { throw 'Invoice with returns was revised' }
+  $revisionInvoice = PostJson '/merchant/invoices' @{idempotencyKey="revision-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='unpaid';paidRial=0;lines=@(@{productId=$product.id;quantity=1})} $ownerSession
+  $revisionDetail = Invoke-RestMethod "$base/api/merchant/invoices/$($revisionInvoice.id)" -WebSession $ownerSession
+  $revisionLines = @(@{lineId=$revisionDetail.lines[0].id;productId=$product.id;name='کیف چرم آزمون';unitPriceRial=500000;quantity=2;discountRial=0})
+  $revised = PostJson "/merchant/invoices/$($revisionInvoice.id)/revisions" @{expectedRevision=1;reason='اصلاح تعداد';customerName='مشتری اصلاح شده';customerPhone='09120000001';issuedAt='2026-11-02T12:00:00Z';lines=$revisionLines} $ownerSession
+  if ($revised.revision -ne 2 -or $revised.totalRial -ne 1000000) { throw 'Invoice revision total/version mismatch' }
+  $revisionHistory = Invoke-RestMethod "$base/api/merchant/invoices/$($revisionInvoice.id)/revisions" -WebSession $ownerSession
+  if (@($revisionHistory).Count -ne 2 -or $revisionHistory[0].revisionNo -ne 2 -or $revisionHistory[1].revisionNo -ne 1 -or ($revisionHistory[1].snapshotJson | ConvertFrom-Json).totalRial -ne 500000) { throw 'Original invoice snapshot was not preserved' }
+  $revisionAfter = Invoke-RestMethod "$base/api/merchant/invoices/$($revisionInvoice.id)" -WebSession $ownerSession
+  $revisedDate = ([datetime]$revisionAfter.issuedAt).ToUniversalTime().ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+  if ($revisionAfter.number -ne $revisionInvoice.number -or $revisionAfter.customerName -ne 'مشتری اصلاح شده' -or $revisionAfter.lines[0].quantity -ne 2 -or $revisedDate -ne '2026-11-02') { throw 'Revised invoice fields did not persist' }
+  $staleRevisionBlocked = $false
+  try { $null = PostJson "/merchant/invoices/$($revisionInvoice.id)/revisions" @{expectedRevision=1;reason='نسخه قدیمی';customerName='مشتری اصلاح شده';customerPhone='';lines=$revisionLines} $ownerSession } catch { $staleRevisionBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $staleRevisionBlocked) { throw 'Stale invoice revision was accepted' }
+  $revisionLines[0].quantity = 99
+  $stockRevisionBlocked = $false
+  try { $null = PostJson "/merchant/invoices/$($revisionInvoice.id)/revisions" @{expectedRevision=2;reason='موجودی ناکافی';customerName='مشتری اصلاح شده';customerPhone='';lines=$revisionLines} $ownerSession } catch { $stockRevisionBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $stockRevisionBlocked) { throw 'Invoice revision ignored stock' }
+  $revisionLines[0].quantity = 2
+  $null = PostJson "/merchant/invoices/$($revisionInvoice.id)/payments" @{idempotencyKey="revision-payment-$id";amountRial=200000;method='cash'} $ownerSession
+  $revisionLines[0].unitPriceRial = 10000
+  $paidRevisionBlocked = $false
+  try { $null = PostJson "/merchant/invoices/$($revisionInvoice.id)/revisions" @{expectedRevision=2;reason='کمتر از دریافتی';customerName='مشتری اصلاح شده';customerPhone='';lines=$revisionLines} $ownerSession } catch { $paidRevisionBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $paidRevisionBlocked) { throw 'Invoice revision allowed total below received cash' }
+  $revisionLines[0].unitPriceRial = 500000
+  $stockAfterRevision = Invoke-RestMethod "$base/api/merchant/products" -WebSession $ownerSession
+  if ($stockAfterRevision[0].stock -ne 2) { throw 'Invoice revision changed stock during a rejected edit' }
   $brand.slogan = 'نسخهٔ دوم آزمون'
   $brand = PutJson '/merchant/invoice-brand' $brand $ownerSession
   $snapshot = $detail.brandSnapshotJson | ConvertFrom-Json
@@ -139,6 +170,9 @@ try {
   $blocked = $false
   try { $null = Invoke-RestMethod "$base/api/merchant/invoices/$($invoice.id)" -WebSession $otherSession } catch { $blocked = $_.Exception.Response.StatusCode -eq 404 }
   if (-not $blocked) { throw 'Cross-tenant invoice read was not blocked' }
+  $crossRevisionBlocked = $false
+  try { $null = Invoke-RestMethod "$base/api/merchant/invoices/$($invoice.id)/revisions" -WebSession $otherSession } catch { $crossRevisionBlocked = $_.Exception.Response.StatusCode -eq 404 }
+  if (-not $crossRevisionBlocked) { throw 'Cross-tenant invoice revision history was readable' }
   $crossReturnBlocked = $false
   try { $null = PostJson "/merchant/invoices/$($invoice.id)/returns" @{idempotencyKey="cross-return-$id";reason='نباید ثبت شود';lines=@(@{invoiceLineId=$returnLineId;quantity=1;restock=$true})} $otherSession } catch { $crossReturnBlocked = $_.Exception.Response.StatusCode -eq 404 }
   if (-not $crossReturnBlocked) { throw 'Cross-tenant return was not blocked' }
@@ -211,6 +245,8 @@ try {
   $converted = PostJson "/merchant/invoices/$($convertible.id)/convert" @{} $ownerSession
   $afterConversion = Invoke-RestMethod "$base/api/merchant/products?q=کالای تخفیف آزمون" -WebSession $ownerSession
   if ($beforeConversion[0].stock -ne 3 -or $afterConversion[0].stock -ne 1 -or $converted.paymentStatus -ne 'unpaid' -or $converted.totalRial -ne 1802 -or $converted.number -ne $convertible.number) { throw 'Proforma conversion stock, price or identity mismatch' }
+  $conversionHistory = Invoke-RestMethod "$base/api/merchant/invoices/$($convertible.id)/revisions" -WebSession $ownerSession
+  if ($converted.revision -ne 2 -or @($conversionHistory).Count -ne 2 -or ($conversionHistory[1].snapshotJson | ConvertFrom-Json).paymentStatus -ne 'proforma' -or ($conversionHistory[0].snapshotJson | ConvertFrom-Json).paymentStatus -ne 'unpaid') { throw 'Proforma conversion history mismatch' }
   $secondConversionBlocked = $false
   try { $null = PostJson "/merchant/invoices/$($convertible.id)/convert" @{} $ownerSession } catch { $secondConversionBlocked = $_.Exception.Response.StatusCode -eq 409 }
   if (-not $secondConversionBlocked) { throw 'Proforma was converted twice' }
@@ -242,7 +278,7 @@ try {
   $suspended = $false
   try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession } catch { $suspended = $_.Exception.Response.StatusCode -eq 403 }
   if (-not $suspended) { throw 'Suspended tenant still has access' }
-  Write-Output 'PASS: login, subscription, AI key/role/endpoint/fallback, product/photo, customer/CSV, invoice/stock/payment/price-quote/selective discount/manual lines/proforma conversion, discounted partial returns/refund/idempotency/accounting, price batch/revert/isolation, archive/restore/open balance guard, purchase/expense/cost estimate, staff role, CSRF, suspension'
+  Write-Output 'PASS: login, subscription, AI fallback, product/photo, customer/CSV, invoice revision/history/stock/payment guard/isolation, price-quote/selective discount/manual lines/proforma conversion, returns/refund/idempotency/accounting, price batch/revert/isolation, archive/restore/open balance guard, purchase/expense/cost estimate, staff role, CSRF, suspension'
 } finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
   Write-Output "Test log: $log"
