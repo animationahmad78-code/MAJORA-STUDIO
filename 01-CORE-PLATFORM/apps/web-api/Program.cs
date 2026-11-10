@@ -146,6 +146,19 @@ using (var scope = app.Services.CreateScope())
                 upgrade.CommandText = "ALTER TABLE InvoiceBrands ADD COLUMN SocialLinksJson TEXT NOT NULL DEFAULT '[]'";
                 await upgrade.ExecuteNonQueryAsync();
             }
+            using var tenantColumns = connection.CreateCommand();
+            tenantColumns.CommandText = "PRAGMA table_info(Tenants)";
+            using var tenantReader = await tenantColumns.ExecuteReaderAsync();
+            var hasDisabledFeatures = false;
+            while (await tenantReader.ReadAsync())
+                if (string.Equals(tenantReader.GetString(1), "DisabledFeaturesJson", StringComparison.OrdinalIgnoreCase)) hasDisabledFeatures = true;
+            await tenantReader.CloseAsync();
+            if (!hasDisabledFeatures)
+            {
+                using var upgrade = connection.CreateCommand();
+                upgrade.CommandText = "ALTER TABLE Tenants ADD COLUMN DisabledFeaturesJson TEXT NOT NULL DEFAULT '[]'";
+                await upgrade.ExecuteNonQueryAsync();
+            }
         }
         finally { if (openedHere) await connection.CloseAsync(); }
     }
@@ -426,6 +439,25 @@ admin.MapPost("/subscription-orders/{id:guid}/decision", async (Guid id, Subscri
     await db.SaveChangesAsync(); await tx.CommitAsync(); return Results.Ok(new { order.Id, order.Status, order.SubscriptionId });
 });
 admin.MapGet("/tenants", async (MajoraDb db) => Results.Ok(await db.Tenants.OrderBy(x => x.Name).Select(x => new { x.Id, x.Name, x.Slug, x.Enabled, x.BrandColor, x.LogoUrl, Subscription = db.Subscriptions.Where(s => s.TenantId == x.Id).OrderByDescending(s => s.EndsAt).Select(s => new { s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot }).FirstOrDefault() }).ToListAsync()));
+admin.MapGet("/feature-catalog", () => Results.Ok(TenantFeatures.Names.Select(x => new { key = x.Key, name = x.Value, requires = TenantFeatures.Dependencies.GetValueOrDefault(x.Key) ?? [] })));
+admin.MapGet("/tenants/{id:guid}/features", async (Guid id, MajoraDb db) =>
+{
+    var tenant = await db.Tenants.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id);
+    return tenant is null ? Results.NotFound() : Results.Ok(new { disabled = TenantFeatures.Read(tenant.DisabledFeaturesJson) });
+});
+admin.MapPut("/tenants/{id:guid}/features", async (Guid id, TenantFeatureUpdate body, MajoraDb db, HttpContext c) =>
+{
+    var tenant = await db.Tenants.SingleOrDefaultAsync(x => x.Id == id);
+    if (tenant is null) return Results.NotFound();
+    if (body.Disabled is null || body.Disabled.Any(x => !TenantFeatures.Names.ContainsKey(x))) return Fail("نام بخش نامعتبر است.");
+    var disabled = body.Disabled.ToHashSet(StringComparer.Ordinal);
+    if (TenantFeatures.BrokenDependency(disabled) is { } conflict) return Fail(conflict, 409);
+    var before = tenant.DisabledFeaturesJson;
+    tenant.DisabledFeaturesJson = JsonSerializer.Serialize(disabled.OrderBy(x => x).ToArray());
+    Audit(db, c.User, id, "tenant.features.update", "tenant", id, JsonSerializer.Serialize(new { before, after = tenant.DisabledFeaturesJson }));
+    await db.SaveChangesAsync();
+    return Results.Ok(new { disabled });
+});
 admin.MapPost("/tenants", async (TenantRequest body, MajoraDb db, IPasswordHasher<AppUser> hasher, IWebHostEnvironment host, HttpContext c) =>
 {
     if (string.IsNullOrWhiteSpace(body.Name) || body.Name.Length > 200 || string.IsNullOrWhiteSpace(body.Slug) ||
@@ -575,7 +607,22 @@ merchant.AddEndpointFilter(async (invocation, next) =>
         c.Request.Path.StartsWithSegments("/api/merchant/plans") ||
         c.Request.Path.StartsWithSegments("/api/merchant/billing");
     if (!await Active(db, TenantId(c.User)) && !subscriptionSelfService) return Fail("اشتراک فعال نیست.", 403);
+    var required = TenantFeatures.Required(c.Request.Path.Value ?? "", c.Request.Method);
+    if (required.Length > 0)
+    {
+        var tenantId = TenantId(c.User);
+        var policy = await db.Tenants.AsNoTracking().Where(x => x.Id == tenantId).Select(x => x.DisabledFeaturesJson).SingleAsync();
+        var disabled = TenantFeatures.Read(policy);
+        if (required.FirstOrDefault(disabled.Contains) is { } denied)
+            return Fail($"بخش «{TenantFeatures.Names[denied]}» برای این فروشگاه فعال نیست. برای فعال‌سازی با ماژورا تماس بگیرید.", 403);
+    }
     return await next(invocation);
+});
+merchant.MapGet("/features", async (MajoraDb db, HttpContext c) =>
+{
+    var tenantId = TenantId(c.User);
+    var policy = await db.Tenants.AsNoTracking().Where(x => x.Id == tenantId).Select(x => x.DisabledFeaturesJson).SingleAsync();
+    return Results.Ok(new { disabled = TenantFeatures.Read(policy) });
 });
 merchant.MapGet("/subscription", async (MajoraDb db, HttpContext c) =>
 {
@@ -654,20 +701,21 @@ merchant.MapGet("/search", async (string? q, MajoraDb db, HttpContext c) =>
     if (string.IsNullOrEmpty(term)) return Results.Ok(Array.Empty<GlobalSearchHit>());
     if (term.Length > 100) return Fail("عبارت جست‌وجو نباید بیش از ۱۰۰ نویسه باشد.");
     var tid = TenantId(c.User); var hits = new List<GlobalSearchHit>();
-    hits.AddRange(await db.Products.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived && (x.Name.Contains(term) || x.Sku.Contains(term) || x.Category.Contains(term)))
+    var disabled = TenantFeatures.Read(await db.Tenants.AsNoTracking().Where(x => x.Id == tid).Select(x => x.DisabledFeaturesJson).SingleAsync());
+    if (!disabled.Contains("products")) hits.AddRange(await db.Products.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived && (x.Name.Contains(term) || x.Sku.Contains(term) || x.Category.Contains(term)))
         .OrderBy(x => x.Name).Take(8).Select(x => new GlobalSearchHit("product", x.Id, x.Name, x.Sku + " · " + x.Category)).ToListAsync());
-    hits.AddRange(await db.Customers.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived && (x.Name.Contains(term) || x.Phone.Contains(term)))
+    if (!disabled.Contains("customers")) hits.AddRange(await db.Customers.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived && (x.Name.Contains(term) || x.Phone.Contains(term)))
         .OrderBy(x => x.Name).Take(8).Select(x => new GlobalSearchHit("customer", x.Id, x.Name, x.Phone)).ToListAsync());
     var isNumber = long.TryParse(term, out var invoiceNumber);
-    hits.AddRange(await db.Invoices.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived && (x.CustomerName.Contains(term) || x.CustomerPhone.Contains(term) || (isNumber && x.Number == invoiceNumber)))
+    if (!disabled.Contains("invoices")) hits.AddRange(await db.Invoices.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived && (x.CustomerName.Contains(term) || x.CustomerPhone.Contains(term) || (isNumber && x.Number == invoiceNumber)))
         .OrderByDescending(x => x.IssuedAt).Take(8).Select(x => new GlobalSearchHit("invoice", x.Id, "فاکتور " + x.Number, x.CustomerName)).ToListAsync());
-    hits.AddRange(await db.Cheques.AsNoTracking().Where(x => x.TenantId == tid && (x.Party.Contains(term) || x.Serial.Contains(term) || x.Bank.Contains(term) || x.SayadId.Contains(term)))
+    if (!disabled.Contains("cheques") && !disabled.Contains("accounting")) hits.AddRange(await db.Cheques.AsNoTracking().Where(x => x.TenantId == tid && (x.Party.Contains(term) || x.Serial.Contains(term) || x.Bank.Contains(term) || x.SayadId.Contains(term)))
         .OrderByDescending(x => x.CreatedAt).Take(8).Select(x => new GlobalSearchHit("cheque", x.Id, x.Party + " · " + x.Serial, x.Bank)).ToListAsync());
-    hits.AddRange(await db.Reminders.AsNoTracking().Where(x => x.TenantId == tid && !x.Done && x.Title.Contains(term))
+    if (!disabled.Contains("reminders")) hits.AddRange(await db.Reminders.AsNoTracking().Where(x => x.TenantId == tid && !x.Done && x.Title.Contains(term))
         .OrderBy(x => x.DueAt).Take(8).Select(x => new GlobalSearchHit("reminder", x.Id, x.Title, "یادآور باز")).ToListAsync());
-    hits.AddRange(await db.Purchases.AsNoTracking().Where(x => x.TenantId == tid && (x.SupplierName.Contains(term) || x.SupplierInvoiceNumber.Contains(term)))
+    if (!disabled.Contains("accounting")) hits.AddRange(await db.Purchases.AsNoTracking().Where(x => x.TenantId == tid && (x.SupplierName.Contains(term) || x.SupplierInvoiceNumber.Contains(term)))
         .OrderByDescending(x => x.PurchasedAt).Take(8).Select(x => new GlobalSearchHit("purchase", x.Id, x.SupplierName, x.SupplierInvoiceNumber)).ToListAsync());
-    hits.AddRange(await db.Expenses.AsNoTracking().Where(x => x.TenantId == tid && !x.Voided && (x.Category.Contains(term) || x.Description.Contains(term)))
+    if (!disabled.Contains("accounting")) hits.AddRange(await db.Expenses.AsNoTracking().Where(x => x.TenantId == tid && !x.Voided && (x.Category.Contains(term) || x.Description.Contains(term)))
         .OrderByDescending(x => x.IncurredAt).Take(8).Select(x => new GlobalSearchHit("expense", x.Id, x.Category, x.Description)).ToListAsync());
     return Results.Ok(hits);
 });
@@ -1279,11 +1327,11 @@ merchant.MapGet("/accounting/returns", async (string? q, MajoraDb db, HttpContex
 {
     var tid = TenantId(c.User);
     return Results.Ok(await db.SalesReturns.AsNoTracking().Where(x => x.TenantId == tid &&
-        (q == null || x.Reason.Contains(q) || db.Invoices.Any(i => i.Id == x.InvoiceId && (i.CustomerName.Contains(q) || i.Number.ToString() == q))))
+        (q == null || x.Reason.Contains(q) || db.Invoices.Any(i => i.Id == x.InvoiceId && i.TenantId == tid && (i.CustomerName.Contains(q) || i.Number.ToString() == q))))
         .OrderByDescending(x => x.CreatedAt).Take(100)
         .Select(x => new { x.Id, x.InvoiceId, x.Reason, x.AmountRial, x.CreatedAt,
-            InvoiceNumber = db.Invoices.Where(i => i.Id == x.InvoiceId).Select(i => i.Number).FirstOrDefault(),
-            CustomerName = db.Invoices.Where(i => i.Id == x.InvoiceId).Select(i => i.CustomerName).FirstOrDefault() }).ToListAsync());
+            InvoiceNumber = db.Invoices.Where(i => i.Id == x.InvoiceId && i.TenantId == tid).Select(i => i.Number).FirstOrDefault(),
+            CustomerName = db.Invoices.Where(i => i.Id == x.InvoiceId && i.TenantId == tid).Select(i => i.CustomerName).FirstOrDefault() }).ToListAsync());
 });
 merchant.MapPost("/invoices/{id:guid}/returns", async (Guid id, SalesReturnRequest body, MajoraDb db, HttpContext c) =>
 {
@@ -1711,6 +1759,7 @@ public sealed record SubscriptionDecision(string Decision);
 public sealed record UsernameUpdate(string Username);
 public sealed record TenantRequest(string Name, string Slug, string OwnerUsername, string OwnerName, string OwnerPassword, string? BrandColor, bool ClassicPreset = false);
 public sealed record TenantUpdate(string Name, bool Enabled, string? BrandColor, string? LogoUrl);
+public sealed record TenantFeatureUpdate(List<string> Disabled);
 public sealed record AdminInvoiceBrandUpdate(InvoiceBrandUpdate Brand, string Reason);
 public sealed record SubscriptionRequest(Guid PlanId, DateTime StartsAt, DateTime EndsAt, string PaymentStatus, long? PriceRial, string? Note);
 public sealed record ProductRequest(string Name, string Sku, string Category, long PriceRial, long Stock, long? AverageCostRial = null, string? PhotoDataUrl = null);

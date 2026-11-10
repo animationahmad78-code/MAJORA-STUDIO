@@ -3,7 +3,7 @@ using Microsoft.EntityFrameworkCore.Design;
 
 namespace Majora.WebApi;
 
-public sealed class Tenant { public Guid Id { get; set; } = Guid.NewGuid(); public string Name { get; set; } = ""; public string Slug { get; set; } = ""; public string BrandColor { get; set; } = "#0B2B53"; public string? LogoUrl { get; set; } public bool Enabled { get; set; } = true; public long NextInvoiceNumber { get; set; } = 1; public DateTime CreatedAt { get; set; } = DateTime.UtcNow; }
+public sealed class Tenant { public Guid Id { get; set; } = Guid.NewGuid(); public string Name { get; set; } = ""; public string Slug { get; set; } = ""; public string BrandColor { get; set; } = "#0B2B53"; public string? LogoUrl { get; set; } public bool Enabled { get; set; } = true; public string DisabledFeaturesJson { get; set; } = "[]"; public long NextInvoiceNumber { get; set; } = 1; public DateTime CreatedAt { get; set; } = DateTime.UtcNow; }
 public sealed class InvoiceBrandProfile { public Guid TenantId { get; set; } public int Revision { get; set; } = 1; public string StoreName { get; set; } = ""; public string Slogan { get; set; } = ""; public string Phone { get; set; } = ""; public string Address { get; set; } = ""; public string Card { get; set; } = ""; public string CardHolder { get; set; } = ""; public string Note { get; set; } = ""; public string ConditionsJson { get; set; } = "[]"; public string SocialTelegram { get; set; } = ""; public string SocialInstagram { get; set; } = ""; public string SocialContact { get; set; } = ""; public string SocialLinksJson { get; set; } = "[]"; public string? LogoDataUrl { get; set; } public DateTime UpdatedAt { get; set; } = DateTime.UtcNow; }
 public sealed class AppUser { public Guid Id { get; set; } = Guid.NewGuid(); public Guid? TenantId { get; set; } public string Username { get; set; } = ""; public string PasswordHash { get; set; } = ""; public string DisplayName { get; set; } = ""; public string Role { get; set; } = "staff"; public bool Enabled { get; set; } = true; public int AuthVersion { get; set; } public DateTime CreatedAt { get; set; } = DateTime.UtcNow; }
 public sealed class Plan { public Guid Id { get; set; } = Guid.NewGuid(); public string Name { get; set; } = ""; public string Description { get; set; } = ""; public string FeaturesJson { get; set; } = "[]"; public long MonthlyRial { get; set; } public int MaxUsers { get; set; } = 3; public bool Enabled { get; set; } = true; }
@@ -42,6 +42,7 @@ public sealed class MajoraDb(DbContextOptions<MajoraDb> options) : DbContext(opt
         b.Entity<AiProviderProfile>().Property(x => x.Endpoint).HasMaxLength(500);
         b.Entity<AiProviderProfile>().Property(x => x.Model).HasMaxLength(120);
         b.Entity<Tenant>().Property(x => x.Slug).HasMaxLength(40);
+        b.Entity<Tenant>().Property(x => x.DisabledFeaturesJson).HasDefaultValue("[]");
         b.Entity<AppUser>().Property(x => x.Username).HasMaxLength(100);
         b.Entity<Product>().Property(x => x.Sku).HasMaxLength(100);
         b.Entity<Invoice>().Property(x => x.IdempotencyKey).HasMaxLength(100);

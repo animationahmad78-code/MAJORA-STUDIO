@@ -90,6 +90,28 @@ try {
   $adminStillSignedIn = $true
   try { $null = Invoke-RestMethod "$base/api/admin/overview" -WebSession $ownerSession } catch { $adminStillSignedIn = $false }
   if ($adminStillSignedIn) { throw 'Admin logout did not invalidate its cookie' }
+  $catalog = Invoke-RestMethod "$base/api/admin/feature-catalog" -WebSession $adminSession
+  if (@($catalog).Count -lt 10) { throw 'Feature catalog is incomplete' }
+  $dependencyRejected = $false
+  try { $null = PutJson "/admin/tenants/$($tenant.id)/features" @{disabled=@('products')} $adminSession } catch { $dependencyRejected = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $dependencyRejected) { throw 'Feature dependency was not enforced' }
+  $policy = PutJson "/admin/tenants/$($tenant.id)/features" @{disabled=@('sale','prices','archive','products')} $adminSession
+  $merchantPolicy = Invoke-RestMethod "$base/api/merchant/features" -WebSession $ownerSession
+  if (@($policy.disabled).Count -ne 4 -or @($merchantPolicy.disabled).Count -ne 4) { throw 'Tenant feature policy was not persisted' }
+  $productBlocked = $false
+  try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $ownerSession } catch { $productBlocked = $_.Exception.Response.StatusCode -eq 403 }
+  if (-not $productBlocked) { throw 'Disabled product API remained accessible' }
+  foreach ($disabledPath in @('/merchant/price-batches', '/merchant/archive/products')) {
+    $blocked = $false
+    try { $null = Invoke-RestMethod "$base/api$disabledPath" -WebSession $ownerSession } catch { $blocked = $_.Exception.Response.StatusCode -eq 403 }
+    if (-not $blocked) { throw "Disabled feature endpoint remained accessible: $disabledPath" }
+  }
+  $null = Invoke-RestMethod "$base/api/merchant/customers" -WebSession $ownerSession
+  $merchantCannotEditFeatures = $false
+  try { $null = PutJson "/admin/tenants/$($tenant.id)/features" @{disabled=@()} $ownerSession } catch { $merchantCannotEditFeatures = $_.Exception.Response.StatusCode -in 401,403 }
+  if (-not $merchantCannotEditFeatures) { throw 'Merchant could alter owner feature policy' }
+  $null = PutJson "/admin/tenants/$($tenant.id)/features" @{disabled=@()} $adminSession
+  $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $ownerSession
   $ownerAiBlocked = $false
   try { $null = Invoke-RestMethod "$base/api/admin/ai-provider" -WebSession $ownerSession } catch { $ownerAiBlocked = $_.Exception.Response.StatusCode -in 401,403 }
   if (-not $ownerAiBlocked) { throw 'Merchant could read global AI settings' }
