@@ -43,7 +43,7 @@ export function Returns({ initialId, onTargetUsed }: { initialId: string | null;
   const picked = available.filter(line => selected[line.id]);
   const returnTotal = picked.reduce((sum, line) => sum + line.unitPriceRial * selected[line.id].quantity, 0);
   const due = invoice ? refundDue(invoice) : 0;
-  const selectAll = () => setSelected(Object.fromEntries(available.filter(line => line.remaining > 0).map(line => [line.id, { quantity: line.remaining, restock: true }])));
+  const selectAll = () => setSelected(Object.fromEntries(available.filter(line => line.remaining > 0).map(line => [line.id, { quantity: line.remaining, restock: !!line.productId }])));
 
   const saveReturn = async () => {
     if (!invoice || !picked.length || !reason.trim() || busy) return;
@@ -59,7 +59,7 @@ export function Returns({ initialId, onTargetUsed }: { initialId: string | null;
       const updated = await api<InvoiceDetail>(`/merchant/invoices/${invoice.id}`);
       setInvoice(updated); setRefundAmount(refundDue(updated)); setSelected({}); setReason('');
       await refreshLists();
-      setNotice('مرجوعی ثبت شد. مانده و موجودی به‌روزرسانی شدند.');
+      setNotice('مرجوعی ثبت شد. مانده به‌روزرسانی شد؛ فقط کالاهای انتخاب‌شده برای بازگشت به انبار، موجودی را تغییر دادند.');
     } catch (e) { setError(e instanceof Error ? e.message : 'ثبت مرجوعی انجام نشد.'); }
     finally { setBusy(false); }
   };
@@ -97,8 +97,8 @@ export function Returns({ initialId, onTargetUsed }: { initialId: string | null;
         <div className="return-section-title"><h3>اقلام قابل مرجوع</h3><button type="button" onClick={selectAll} disabled={!available.some(line => line.remaining > 0)}>مرجوع کلِ باقی‌مانده</button></div>
         <div className="return-lines">{available.map(line => {
           const value = selected[line.id];
-          return <div className="return-line" key={line.id}><label className="return-line-toggle"><input type="checkbox" disabled={line.remaining === 0} checked={!!value} onChange={e => setSelected(current => { const next = { ...current }; if (e.target.checked) next[line.id] = { quantity: line.remaining, restock: true }; else delete next[line.id]; return next; })}/><span><strong>{line.nameSnapshot}</strong><small>فروخته‌شده {line.quantity} · قبلاً برگشته {line.returnedQuantity} · قابل مرجوع {line.remaining}</small></span></label>
-            {value && <div className="return-line-controls"><label>تعداد برگشتی<div className="return-stepper"><button type="button" aria-label={`کم کردن ${line.nameSnapshot}`} onClick={() => setSelected(current => ({ ...current, [line.id]: { ...value, quantity: Math.max(1, value.quantity - 1) } }))}>−</button><input type="number" min="1" max={line.remaining} value={value.quantity} onChange={e => setSelected(current => ({ ...current, [line.id]: { ...value, quantity: Number(e.target.value) } }))}/><button type="button" aria-label={`افزودن ${line.nameSnapshot}`} onClick={() => setSelected(current => ({ ...current, [line.id]: { ...value, quantity: Math.min(line.remaining, value.quantity + 1) } }))}>＋</button></div></label><label className="return-restock"><input type="checkbox" checked={value.restock} onChange={e => setSelected(current => ({ ...current, [line.id]: { ...value, restock: e.target.checked } }))}/>کالا سالم است و به موجودی برگردد</label></div>}
+          return <div className="return-line" key={line.id}><label className="return-line-toggle"><input type="checkbox" disabled={line.remaining === 0} checked={!!value} onChange={e => setSelected(current => { const next = { ...current }; if (e.target.checked) next[line.id] = { quantity: line.remaining, restock: !!line.productId }; else delete next[line.id]; return next; })}/><span><strong>{line.nameSnapshot}</strong><small>فروخته‌شده {line.quantity} · قبلاً برگشته {line.returnedQuantity} · قابل مرجوع {line.remaining}</small></span></label>
+            {value && <div className="return-line-controls"><label>تعداد برگشتی<div className="return-stepper"><button type="button" aria-label={`کم کردن ${line.nameSnapshot}`} onClick={() => setSelected(current => ({ ...current, [line.id]: { ...value, quantity: Math.max(1, value.quantity - 1) } }))}>−</button><input type="number" min="1" max={line.remaining} value={value.quantity} onChange={e => setSelected(current => ({ ...current, [line.id]: { ...value, quantity: Number(e.target.value) } }))}/><button type="button" aria-label={`افزودن ${line.nameSnapshot}`} onClick={() => setSelected(current => ({ ...current, [line.id]: { ...value, quantity: Math.min(line.remaining, value.quantity + 1) } }))}>＋</button></div></label>{line.productId ? <label className="return-restock"><input type="checkbox" checked={value.restock} onChange={e => setSelected(current => ({ ...current, [line.id]: { ...value, restock: e.target.checked } }))}/>کالا سالم است و به موجودی برگردد</label> : <small className="return-no-stock">این قلم در انبار ثبت نیست؛ مرجوعی بدون تغییر موجودی ثبت می‌شود.</small>}</div>}
           </div>;
         })}</div>
         <label>دلیل مرجوعی<input value={reason} maxLength={500} onChange={e => setReason(e.target.value)} placeholder="مثلاً مغایرت رنگ یا انصراف مشتری"/></label>

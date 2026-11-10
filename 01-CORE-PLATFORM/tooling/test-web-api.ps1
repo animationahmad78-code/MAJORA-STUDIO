@@ -114,9 +114,15 @@ try {
   $photoSaved = PutJson "/merchant/products/$($product.id)/photo" @{dataUrl=$png} $ownerSession
   $photoResponse = Invoke-WebRequest "$base/api/merchant/products/$($product.id)/photo" -WebSession $ownerSession
   if (-not $photoSaved.hasPhoto -or $photoResponse.Headers['Content-Type'] -notlike 'image/png*' -or $photoResponse.RawContentLength -lt 50) { throw 'Product photo save/read failed' }
-  $customer = PostJson '/merchant/customers' @{name='مشتری آزمون';phone='09120000000'} $ownerSession
+  $customer = PostJson '/merchant/customers' @{name='مشتری آزمون';phone='09120000000';address='مشهد';occupation='فروشنده';acquisitionSource='معرفی';referrerPhone='09121111111';notes='مشتری وفادار'} $ownerSession
+  if ($customer.address -ne 'مشهد' -or $customer.acquisitionSource -ne 'معرفی') { throw 'Optional customer profile was not stored' }
   $invoiceBody = @{idempotencyKey="invoice-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='partial';paidRial=200000;lines=@(@{productId=$product.id;quantity=2})}
   $invoice = PostJson '/merchant/invoices' $invoiceBody $ownerSession
+  $customerStatuses = Invoke-RestMethod "$base/api/merchant/customers/with-status" -WebSession $ownerSession
+  $customerWithStatus = $customerStatuses | Where-Object id -eq $customer.id | Select-Object -First 1
+  if ($customerWithStatus.status -ne 'receivable' -or $customerWithStatus.receivableRial -ne 800000) { throw 'Customer payment badge disagrees with invoice receivable' }
+  $updatedCustomer = PutJson "/merchant/customers/$($customer.id)" @{name='مشتری آزمون';phone='09120000000';address='تهران';occupation='فروشنده';acquisitionSource='معرفی';referrerPhone='09121111111';notes='به‌روز'} $ownerSession
+  if ($updatedCustomer.address -ne 'تهران') { throw 'Customer profile update failed' }
   if ($invoice.number -ne 1 -or $invoice.totalRial -ne 1000000) { throw 'Invoice total/number mismatch' }
   $brand.storeName = 'نام جدید فروشگاه'
   $brand = PutJson "/admin/tenants/$($tenant.id)/invoice-brand" @{brand=$brand;reason='آزمون ثبات برند فاکتور قبلی'} $adminSession
@@ -168,6 +174,15 @@ try {
   if (@($returns).Count -ne 1 -or $returns[0].invoiceNumber -ne 1) { throw 'Return list mismatch' }
   $financeAfterReturn = Invoke-RestMethod "$base/api/merchant/accounting/overview" -WebSession $ownerSession
   if ($financeAfterReturn.revenueRial -ne 500000 -or $financeAfterReturn.returnsRial -ne 500000 -or $financeAfterReturn.refundedRial -ne 500000 -or $financeAfterReturn.refundDueRial -ne 0) { throw 'Return accounting overview mismatch' }
+  $dashboardAfterReturn = Invoke-RestMethod "$base/api/merchant/dashboard" -WebSession $ownerSession
+  $advisorAfterReturn = Invoke-RestMethod "$base/api/merchant/advisor" -WebSession $ownerSession
+  $chatAfterReturn = PostJson '/merchant/advisor/ask' @{question='فروش و مانده چقدر است؟'} $ownerSession
+  if ($dashboardAfterReturn.sales30Rial -ne $financeAfterReturn.revenueRial -or
+      $advisorAfterReturn.salesRial -ne $financeAfterReturn.revenueRial -or
+      $chatAfterReturn.facts.salesRial -ne $financeAfterReturn.revenueRial -or
+      $dashboardAfterReturn.receivable30Rial -ne $financeAfterReturn.customerReceivableRial -or
+      $advisorAfterReturn.outstandingRial -ne $financeAfterReturn.customerReceivableRial -or
+      $chatAfterReturn.facts.outstandingRial -ne $financeAfterReturn.customerReceivableRial) { throw 'Dashboard, accounting and advisor disagree after return/refund' }
   $returnedRevisionBlocked = $false
   try { $null = PostJson "/merchant/invoices/$($invoice.id)/revisions" @{expectedRevision=1;reason='نباید مرجوعی را تغییر دهد';customerName='مشتری آزمون';customerPhone='09120000000';lines=@(@{lineId=$returnLineId;productId=$product.id;name='کیف چرم آزمون';unitPriceRial=500000;quantity=2;discountRial=0})} $ownerSession } catch { $returnedRevisionBlocked = $_.Exception.Response.StatusCode -eq 409 }
   if (-not $returnedRevisionBlocked) { throw 'Invoice with returns was revised' }
@@ -250,7 +265,7 @@ try {
   if (@($otherProducts).Count -ne 0) { throw 'Tenant data leaked' }
   $null = PostJson '/merchant/customers' @{name='=DANGEROUS(1)';phone='09125550000'} $ownerSession
   $csv = Invoke-WebRequest "$base/api/merchant/customers/export.csv" -WebSession $ownerSession
-  if ($csv.Content -notmatch "'=DANGEROUS" -or $csv.Content -notmatch 'مشتری آزمون' -or $csv.Content -match 'مشتری دوم') { throw 'Customer CSV escaping or tenant isolation failed' }
+  if ($csv.Content -notmatch "'=DANGEROUS" -or $csv.Content -notmatch 'مشتری آزمون' -or $csv.Content -match 'مشتری دوم' -or $csv.Content -notmatch 'ردیف,نام و نام خانوادگی,شماره تماس') { throw 'Customer CSV escaping, columns, or tenant isolation failed' }
   $crossPhotoBlocked = $false
   try { $null = Invoke-WebRequest "$base/api/merchant/products/$($product.id)/photo" -WebSession $otherSession } catch { $crossPhotoBlocked = $_.Exception.Response.StatusCode -eq 404 }
   if (-not $crossPhotoBlocked) { throw 'Cross-tenant product photo read was not blocked' }
@@ -390,14 +405,73 @@ try {
   if (@($reactivated).Count -lt 1) { throw 'Reactivated tenant did not regain access' }
   $merchantSubscriptions = Invoke-RestMethod "$base/api/merchant/subscription" -WebSession $ownerSession
   if (@($merchantSubscriptions | Where-Object id -eq $subscription.id).Count -ne 1) { throw 'Admin and merchant subscription views disagree' }
+  $adminUsers = Invoke-RestMethod "$base/api/admin/users" -WebSession $adminSession
+  if (@($adminUsers).Count -ne (Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession).users -or
+      @($adminUsers | Where-Object username -eq "staff_$id").Count -ne 1) { throw 'Admin user list and overview disagree' }
+  $staffActivity = Invoke-RestMethod "$base/api/merchant/activity" -WebSession $ownerSession
+  if (@($staffActivity | Where-Object action -eq 'invoice.issue').Count -lt 1) { throw 'Owner activity history omitted invoice' }
+  $adminActivity = Invoke-RestMethod "$base/api/admin/activity?tenantId=$($tenant.id)" -WebSession $adminSession
+  if (@($adminActivity | Where-Object action -eq 'invoice.issue').Count -lt 1) { throw 'Admin activity history omitted tenant invoice' }
+  $activityDenied = $false
+  try { $null = Invoke-RestMethod "$base/api/merchant/activity" -WebSession $staffSession } catch { $activityDenied = $_.Exception.Response.StatusCode -eq 403 }
+  if (-not $activityDenied) { throw 'Staff could read owner activity history' }
+  $renamedStaff = "renamed_$id"
+  $null = PutJson "/merchant/staff/$($staff.id)/username" @{username=$renamedStaff} $ownerSession
+  $oldNameBlocked = $false
+  try { $null = PostJson '/auth/login' @{username="staff_$id";password=$staffPass} ([Microsoft.PowerShell.Commands.WebRequestSession]::new()) $true } catch { $oldNameBlocked = $_.Exception.Response.StatusCode -eq 401 }
+  if (-not $oldNameBlocked) { throw 'Old staff username still worked' }
+  $oldStaffSessionValid = $true
+  try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession } catch { $oldStaffSessionValid = $_.Exception.Response.StatusCode -ne 401 }
+  if ($oldStaffSessionValid) { throw 'Staff rename left old session valid' }
+  $null = PostJson '/auth/login' @{username=$renamedStaff;password=$staffPass} $staffSession $true
+  $staffNewPassword = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(20))
+  $null = PostJson "/merchant/staff/$($staff.id)/reset-password" @{newPassword=$staffNewPassword} $ownerSession
+  $oldStaffSessionValid = $true
+  try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession } catch { $oldStaffSessionValid = $_.Exception.Response.StatusCode -ne 401 }
+  if ($oldStaffSessionValid) { throw 'Owner password reset left old session valid' }
+  $null = PostJson '/auth/login' @{username=$renamedStaff;password=$staffNewPassword} $staffSession $true
+  $null = PutJson '/admin/billing' @{cardNumber='1111222233334444';cardHolder='MAJORA TEST'} $adminSession
+  $billing = Invoke-RestMethod "$base/api/merchant/billing" -WebSession $ownerSession
+  if ($billing.cardNumber -ne '1111222233334444') { throw 'Merchant billing account missing' }
+  $promo = PostJson '/admin/promo-codes' @{code="TEST_$($id.Substring(0,8))";percent=10;startsAt=[datetime]::UtcNow.AddDays(-1).ToString('o');expiresAt=[datetime]::UtcNow.AddDays(7).ToString('o');enabled=$true} $adminSession
+  $quote = Invoke-RestMethod "$base/api/merchant/subscription/quote?planId=$($plan.id)&code=$($promo.code)" -WebSession $ownerSession
+  if ($quote.basePriceRial -ne 1000000 -or $quote.totalRial -ne 900000 -or $quote.discountPercent -ne 10) { throw 'Promo quote calculation mismatch' }
+  $invalidPromoBlocked = $false
+  try { $null = Invoke-RestMethod "$base/api/merchant/subscription/quote?planId=$($plan.id)&code=INVALID" -WebSession $ownerSession } catch { $invalidPromoBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $invalidPromoBlocked) { throw 'Invalid promo code was accepted' }
+  $staleOrderBlocked = $false
+  try { $null = PostJson '/merchant/subscription/orders' @{planId=$plan.id;idempotencyKey="stale-order-$id";promoCode=$promo.code;receiptDataUrl=$png;expectedTotalRial=1000000} $ownerSession } catch { $staleOrderBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $staleOrderBlocked) { throw 'Subscription order accepted an outdated quoted amount' }
+  $orderBody = @{planId=$plan.id;idempotencyKey="order-$id";promoCode=$promo.code;receiptDataUrl=$png;expectedTotalRial=900000}
+  $order = PostJson '/merchant/subscription/orders' $orderBody $ownerSession
+  $orderAgain = PostJson '/merchant/subscription/orders' $orderBody $ownerSession
+  if ($orderAgain.id -ne $order.id -or $order.totalRial -ne 900000) { throw 'Subscription order idempotency or price failed' }
+  $pendingOrders = Invoke-RestMethod "$base/api/admin/subscription-orders" -WebSession $adminSession
+  if (@($pendingOrders | Where-Object id -eq $order.id).Count -ne 1) { throw 'Admin cannot see pending subscription order' }
+  $receipt = Invoke-WebRequest "$base/api/admin/subscription-orders/$($order.id)/receipt" -WebSession $adminSession
+  if ($receipt.StatusCode -ne 200 -or $receipt.Headers['Content-Type'] -notmatch 'image/png') { throw 'Uploaded receipt could not be viewed' }
+  $orderApproved = PostJson "/admin/subscription-orders/$($order.id)/decision" @{decision='approve'} $adminSession
+  if ($orderApproved.status -ne 'paid') { throw 'Subscription order was not approved' }
+  $merchantSubscriptions = Invoke-RestMethod "$base/api/merchant/subscription" -WebSession $ownerSession
+  if (@($merchantSubscriptions | Where-Object id -eq $orderApproved.subscriptionId).Count -ne 1) { throw 'Approved order did not create visible subscription' }
+  $secondApprovalBlocked = $false
+  try { $null = PostJson "/admin/subscription-orders/$($order.id)/decision" @{decision='approve'} $adminSession } catch { $secondApprovalBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $secondApprovalBlocked) { throw 'Subscription order approved twice' }
+  $crossOrders = Invoke-RestMethod "$base/api/merchant/subscription/orders" -WebSession $otherSession
+  if (@($crossOrders | Where-Object id -eq $order.id).Count -ne 0) { throw 'Subscription order leaked across tenants' }
+  $newSku = "NEW-$id"
+  $newPurchase = PostJson '/merchant/accounting/purchases' @{idempotencyKey="new-stock-$id";supplierName='تأمین‌کنندهٔ جدید';supplierInvoiceNumber='N-1';paidRial=0;lines=@(@{productId=$null;quantity=2;unitCostRial=120000;newProduct=@{name='کالای تازه';sku=$newSku;category='کیف/چرم';priceRial=180000}})} $ownerSession
+  if ($newPurchase.totalRial -ne 240000) { throw 'Purchase with a new product has wrong total' }
+  $createdStock = Invoke-RestMethod "$base/api/merchant/products?q=$newSku" -WebSession $ownerSession
+  if (@($createdStock).Count -ne 1 -or $createdStock[0].stock -ne 2 -or $createdStock[0].priceRial -ne 180000) { throw 'New product was not registered and stocked atomically' }
   $replacementPassword = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(20))
   $null = PostJson "/admin/users/$($staff.id)/reset-password" @{newPassword=$replacementPassword} $adminSession
   $oldStaffSessionValid = $true
   try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession } catch { $oldStaffSessionValid = $_.Exception.Response.StatusCode -ne 401 }
   if ($oldStaffSessionValid) { throw 'Password reset left old session valid' }
-  $null = PostJson '/auth/login' @{username="staff_$id";password=$replacementPassword} $staffSession $true
+  $null = PostJson '/auth/login' @{username=$renamedStaff;password=$replacementPassword} $staffSession $true
   $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession
-  Write-Output 'PASS: 20 consecutive tenants, invalid form then successful retry, conflict retry, separate admin/merchant cookies, password reset revocation, subscription creation/retry/merchant visibility, brand authorization/snapshot, AI fallback, product/photo, customer/CSV, invoice revision/history/stock/payment guard/isolation, cheque issue/photo/clear/return/overview/tenant isolation, price-quote/selective discount/manual lines/proforma conversion, returns/refund/idempotency/accounting, price batch/revert/isolation, archive/restore/open balance guard, purchase/expense/cost estimate, staff role, CSRF, suspension/reactivation'
+  Write-Output 'PASS: 20 tenants; idempotent subscriptions/orders; promo quote and receipt approval; username and password reset session revocation; staff/admin activity; customer profile and receivable badge; purchase-created stock; existing invoice, return, cheque, AI fallback, brand, archive, isolation and CSRF scenarios'
 } finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
   Write-Output "Test log: $log"

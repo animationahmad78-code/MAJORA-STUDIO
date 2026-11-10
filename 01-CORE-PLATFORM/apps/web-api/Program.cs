@@ -51,7 +51,7 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
 builder.Services.AddAuthorization();
 builder.Services.AddRateLimiter(o => o.AddPolicy("login", context => RateLimitPartition.GetFixedWindowLimiter(
     context.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => new FixedWindowRateLimiterOptions
-    { PermitLimit = 10, Window = TimeSpan.FromMinutes(5), QueueLimit = 0 })));
+    { PermitLimit = 15, Window = TimeSpan.FromMinutes(5), QueueLimit = 0 })));
 builder.Services.AddScoped<IPasswordHasher<AppUser>, PasswordHasher<AppUser>>();
 builder.Services.AddHttpClient();
 builder.Services.AddHttpClient("ai", client => client.Timeout = TimeSpan.FromSeconds(25))
@@ -147,6 +147,7 @@ static IResult Fail(string message, int status = 400) => Results.Json(new {
     error = message
 }, statusCode: status);
 static void Audit(MajoraDb db, ClaimsPrincipal p, Guid? tenantId, string action, string entity, Guid id, string detail = "") => db.Audit.Add(new AuditEntry { ActorId = UserId(p), TenantId = tenantId, Action = action, EntityType = entity, EntityId = id.ToString(), Detail = detail });
+static long DiscountedPrice(long price, decimal percent) => checked(price - (long)decimal.Round(price * percent / 100m, 0, MidpointRounding.AwayFromZero));
 static bool ValidCheque(ChequeRequest body) =>
     body.Direction is "received" or "issued" && !string.IsNullOrWhiteSpace(body.Party) && body.Party.Trim().Length <= 200 &&
     !string.IsNullOrWhiteSpace(body.Serial) && body.Serial.Trim().Length <= 80 &&
@@ -303,16 +304,101 @@ admin.MapPost("/ai-provider/test", async (MajoraDb db, IDataProtectionProvider p
 admin.MapGet("/plans", async (MajoraDb db) => Results.Ok(await db.Plans.OrderBy(x => x.MonthlyRial).ToListAsync()));
 admin.MapPost("/plans", async (PlanRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (string.IsNullOrWhiteSpace(body.Name) || body.MonthlyRial < 0 || body.MaxUsers < 1) return Fail("مشخصات طرح نامعتبر است.");
-    var plan = new Plan { Name = body.Name.Trim(), MonthlyRial = body.MonthlyRial, MaxUsers = body.MaxUsers };
+    if (string.IsNullOrWhiteSpace(body.Name) || body.MonthlyRial < 0 || body.MaxUsers < 1 ||
+        (body.Description?.Length ?? 0) > 500 || (body.Features?.Count ?? 0) > 20 ||
+        body.Features?.Any(x => string.IsNullOrWhiteSpace(x) || x.Length > 150) == true) return Fail("مشخصات طرح نامعتبر است.");
+    var plan = new Plan { Name = body.Name.Trim(), Description = body.Description?.Trim() ?? "",
+        FeaturesJson = JsonSerializer.Serialize(body.Features?.Select(x => x.Trim()).ToArray() ?? []),
+        MonthlyRial = body.MonthlyRial, MaxUsers = body.MaxUsers, Enabled = body.Enabled };
     db.Plans.Add(plan); Audit(db, c.User, null, "plan.create", "plan", plan.Id); await db.SaveChangesAsync(); return Results.Created($"/api/admin/plans/{plan.Id}", plan);
 });
 admin.MapPut("/plans/{id:guid}", async (Guid id, PlanRequest body, MajoraDb db, HttpContext c) =>
 {
     var plan = await db.Plans.FindAsync(id); if (plan is null) return Results.NotFound();
-    if (string.IsNullOrWhiteSpace(body.Name) || body.MonthlyRial < 0 || body.MaxUsers < 1) return Fail("مشخصات طرح نامعتبر است.");
-    plan.Name = body.Name.Trim(); plan.MonthlyRial = body.MonthlyRial; plan.MaxUsers = body.MaxUsers; plan.Enabled = body.Enabled;
+    if (string.IsNullOrWhiteSpace(body.Name) || body.MonthlyRial < 0 || body.MaxUsers < 1 ||
+        (body.Description?.Length ?? 0) > 500 || (body.Features?.Count ?? 0) > 20 ||
+        body.Features?.Any(x => string.IsNullOrWhiteSpace(x) || x.Length > 150) == true) return Fail("مشخصات طرح نامعتبر است.");
+    plan.Name = body.Name.Trim(); plan.Description = body.Description?.Trim() ?? "";
+    plan.FeaturesJson = JsonSerializer.Serialize(body.Features?.Select(x => x.Trim()).ToArray() ?? []);
+    plan.MonthlyRial = body.MonthlyRial; plan.MaxUsers = body.MaxUsers; plan.Enabled = body.Enabled;
     Audit(db, c.User, null, "plan.update", "plan", id); await db.SaveChangesAsync(); return Results.Ok(plan);
+});
+admin.MapGet("/promo-codes", async (MajoraDb db) => Results.Ok(await db.PromoCodes.AsNoTracking().OrderByDescending(x => x.ExpiresAt).ToListAsync()));
+admin.MapPost("/promo-codes", async (PromoCodeRequest body, MajoraDb db, HttpContext c) =>
+{
+    var code = body.Code?.Trim().ToUpperInvariant();
+    if (string.IsNullOrWhiteSpace(code) || !System.Text.RegularExpressions.Regex.IsMatch(code, "^[A-Z0-9_-]{3,40}$") ||
+        body.Percent <= 0 || body.Percent > 100 || body.ExpiresAt <= body.StartsAt)
+        return Fail("کد، درصد یا بازهٔ اعتبار تخفیف نامعتبر است.");
+    if (await db.PromoCodes.AnyAsync(x => x.Code == code)) return Fail("کد تخفیف تکراری است.", 409);
+    var promo = new PromoCode { Code = code, Percent = body.Percent, StartsAt = body.StartsAt.ToUniversalTime(),
+        ExpiresAt = body.ExpiresAt.ToUniversalTime(), Enabled = body.Enabled };
+    db.PromoCodes.Add(promo); Audit(db, c.User, null, "promo.create", "promo", promo.Id);
+    try { await db.SaveChangesAsync(); } catch (DbUpdateException) { return Fail("کد تخفیف تکراری است.", 409); }
+    return Results.Created($"/api/admin/promo-codes/{promo.Id}", promo);
+});
+admin.MapPut("/promo-codes/{id:guid}", async (Guid id, PromoCodeRequest body, MajoraDb db, HttpContext c) =>
+{
+    var promo = await db.PromoCodes.SingleOrDefaultAsync(x => x.Id == id); if (promo is null) return Results.NotFound();
+    var code = body.Code?.Trim().ToUpperInvariant();
+    if (string.IsNullOrWhiteSpace(code) || !System.Text.RegularExpressions.Regex.IsMatch(code, "^[A-Z0-9_-]{3,40}$") ||
+        body.Percent <= 0 || body.Percent > 100 || body.ExpiresAt <= body.StartsAt) return Fail("کد یا بازهٔ تخفیف نامعتبر است.");
+    if (await db.PromoCodes.AnyAsync(x => x.Code == code && x.Id != id)) return Fail("کد تخفیف تکراری است.", 409);
+    promo.Code = code; promo.Percent = body.Percent; promo.StartsAt = body.StartsAt.ToUniversalTime();
+    promo.ExpiresAt = body.ExpiresAt.ToUniversalTime(); promo.Enabled = body.Enabled;
+    Audit(db, c.User, null, "promo.update", "promo", id);
+    try { await db.SaveChangesAsync(); } catch (DbUpdateException) { return Fail("کد تخفیف تکراری است.", 409); }
+    return Results.Ok(promo);
+});
+admin.MapGet("/billing", async (MajoraDb db) => Results.Ok(await db.PlatformBilling.AsNoTracking().SingleOrDefaultAsync(x => x.Id == 1)
+    ?? new PlatformBilling()));
+admin.MapPut("/billing", async (BillingRequest body, MajoraDb db, HttpContext c) =>
+{
+    var number = new string((body.CardNumber ?? "").Where(char.IsAsciiDigit).ToArray());
+    if (number.Length != 16 || string.IsNullOrWhiteSpace(body.CardHolder) || body.CardHolder.Length > 120)
+        return Fail("شماره کارت یا نام دارنده معتبر نیست.");
+    var billing = await db.PlatformBilling.SingleOrDefaultAsync(x => x.Id == 1);
+    if (billing is null) { billing = new PlatformBilling(); db.PlatformBilling.Add(billing); }
+    billing.CardNumber = number; billing.CardHolder = body.CardHolder.Trim();
+    Audit(db, c.User, null, "billing.update", "billing", Guid.Empty);
+    await db.SaveChangesAsync(); return Results.Ok(billing);
+});
+admin.MapGet("/subscription-orders", async (MajoraDb db) => Results.Ok(await db.SubscriptionOrders.AsNoTracking()
+    .OrderByDescending(x => x.CreatedAt).Take(100)
+    .Select(x => new { x.Id, x.TenantId, TenantName = db.Tenants.Where(t => t.Id == x.TenantId).Select(t => t.Name).FirstOrDefault(),
+        x.PlanNameSnapshot, x.PromoCodeSnapshot, x.BasePriceRial, x.TotalRial, x.Status, x.PaymentMethod,
+        HasReceipt = x.ReceiptBytes != null, x.CreatedAt, x.ReviewedAt }).ToListAsync()));
+admin.MapGet("/subscription-orders/{id:guid}/receipt", async (Guid id, MajoraDb db, HttpContext c) =>
+{
+    var order = await db.SubscriptionOrders.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id);
+    if (order?.ReceiptBytes is null || order.ReceiptContentType is null) return Results.NotFound();
+    c.Response.Headers.XContentTypeOptions = "nosniff";
+    c.Response.Headers.CacheControl = "private, no-store";
+    return Results.File(order.ReceiptBytes, order.ReceiptContentType);
+});
+admin.MapPost("/subscription-orders/{id:guid}/decision", async (Guid id, SubscriptionDecision body, MajoraDb db, HttpContext c) =>
+{
+    if (body.Decision is not ("approve" or "reject")) return Fail("تصمیم تأیید یا رد لازم است.");
+    await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    var order = await db.SubscriptionOrders.SingleOrDefaultAsync(x => x.Id == id);
+    if (order is null) return Results.NotFound();
+    if (order.Status != "pending_approval") return Fail("این درخواست در انتظار تأیید نیست.", 409);
+    order.ReviewedAt = DateTime.UtcNow;
+    if (body.Decision == "approve")
+    {
+        var tenant = await db.Tenants.SingleOrDefaultAsync(x => x.Id == order.TenantId);
+        if (tenant is null) return Results.NotFound();
+        var latestEnd = await db.Subscriptions.Where(x => x.TenantId == order.TenantId && x.PaymentStatus == "paid")
+            .OrderByDescending(x => x.EndsAt).Select(x => (DateTime?)x.EndsAt).FirstOrDefaultAsync();
+        var start = latestEnd is DateTime end && end > DateTime.UtcNow ? end : DateTime.UtcNow;
+        var sub = new Subscription { TenantId = order.TenantId, PlanId = order.PlanId, StartsAt = start,
+            EndsAt = start.AddMonths(1), PaymentStatus = "paid", PriceRialSnapshot = order.TotalRial,
+            Note = $"order={order.Id};promo={order.PromoCodeSnapshot}" };
+        db.Subscriptions.Add(sub); order.SubscriptionId = sub.Id; order.Status = "paid";
+        Audit(db, c.User, order.TenantId, "subscription-order.approve", "subscription-order", id, $"subscription={sub.Id}");
+    }
+    else { order.Status = "rejected"; Audit(db, c.User, order.TenantId, "subscription-order.reject", "subscription-order", id); }
+    await db.SaveChangesAsync(); await tx.CommitAsync(); return Results.Ok(new { order.Id, order.Status, order.SubscriptionId });
 });
 admin.MapGet("/tenants", async (MajoraDb db) => Results.Ok(await db.Tenants.OrderBy(x => x.Name).Select(x => new { x.Id, x.Name, x.Slug, x.Enabled, x.BrandColor, x.LogoUrl, Subscription = db.Subscriptions.Where(s => s.TenantId == x.Id).OrderByDescending(s => s.EndsAt).Select(s => new { s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot }).FirstOrDefault() }).ToListAsync()));
 admin.MapPost("/tenants", async (TenantRequest body, MajoraDb db, IPasswordHasher<AppUser> hasher, IWebHostEnvironment host, HttpContext c) =>
@@ -416,6 +502,32 @@ admin.MapPost("/tenants/{id:guid}/subscription", async (Guid id, SubscriptionReq
     return Results.Created($"/api/admin/tenants/{id}/subscription", sub);
 });
 admin.MapGet("/tenants/{id:guid}/users", async (Guid id, MajoraDb db) => Results.Ok(await db.Users.Where(x => x.TenantId == id).Select(x => new { x.Id, x.Username, x.DisplayName, x.Role, x.Enabled }).ToListAsync()));
+admin.MapGet("/users", async (MajoraDb db) => Results.Ok(await db.Users.AsNoTracking()
+    .GroupJoin(db.Tenants.AsNoTracking(), u => u.TenantId, t => (Guid?)t.Id,
+        (u, tenants) => new { u, tenants })
+    .SelectMany(x => x.tenants.DefaultIfEmpty(), (x, tenant) => new {
+        x.u.Id, x.u.Username, x.u.DisplayName, x.u.Role, x.u.Enabled,
+        x.u.TenantId, TenantName = tenant == null ? "MAJORA" : tenant.Name
+    }).OrderBy(x => x.TenantName).ThenBy(x => x.Username).ToListAsync()));
+admin.MapPut("/users/{id:guid}/username", async (Guid id, UsernameUpdate body, MajoraDb db, HttpContext c) =>
+{
+    var newName = body.Username?.Trim();
+    if (string.IsNullOrWhiteSpace(newName) || newName.Length > 100) return Fail("نام کاربری باید بین ۱ تا ۱۰۰ نویسه باشد.");
+    var user = await db.Users.SingleOrDefaultAsync(x => x.Id == id && x.Role != "platform_admin");
+    if (user is null) return Results.NotFound();
+    if (user.Username == newName) return Results.Ok(new { user.Id, user.Username });
+    if (await db.Users.AnyAsync(x => x.Username == newName)) return Fail("این نام کاربری قبلاً استفاده شده است.", 409);
+    var oldName = user.Username; user.Username = newName; user.AuthVersion++;
+    Audit(db, c.User, user.TenantId, "user.username.admin-update", "user", id, $"old={oldName};new={newName}");
+    try { await db.SaveChangesAsync(); } catch (DbUpdateException) { return Fail("این نام کاربری هم‌زمان ثبت شده است.", 409); }
+    return Results.Ok(new { user.Id, user.Username });
+});
+admin.MapGet("/activity", async (Guid? tenantId, int? page, MajoraDb db) => Results.Ok(await db.Audit.AsNoTracking()
+    .Where(x => tenantId == null || x.TenantId == tenantId)
+    .OrderByDescending(x => x.At).Skip(Math.Max(0, (page ?? 1) - 1) * 100).Take(100)
+    .Join(db.Users.AsNoTracking(), a => a.ActorId, u => u.Id,
+        (a, u) => new { a.Id, a.TenantId, a.At, a.Action, a.EntityType, a.EntityId, a.Detail, ActorName = u.Username })
+    .ToListAsync()));
 admin.MapPost("/users/{id:guid}/reset-password", async (Guid id, PasswordReset body, MajoraDb db, IPasswordHasher<AppUser> hasher, HttpContext c) =>
 {
     if (body.NewPassword.Length < 12) return Fail("رمز جدید باید حداقل ۱۲ نویسه باشد.");
@@ -430,13 +542,81 @@ merchant.AddEndpointFilter(async (invocation, next) =>
     var c = invocation.HttpContext;
     if (!c.User.HasClaim(x => x.Type == "tenant")) return Fail("این بخش برای حساب فروشگاه است.", 403);
     var db = c.RequestServices.GetRequiredService<MajoraDb>();
-    if (!await Active(db, TenantId(c.User)) && !c.Request.Path.Value!.EndsWith("/subscription", StringComparison.Ordinal)) return Fail("اشتراک فعال نیست.", 403);
+    var subscriptionSelfService = c.Request.Path.StartsWithSegments("/api/merchant/subscription") ||
+        c.Request.Path.StartsWithSegments("/api/merchant/plans") ||
+        c.Request.Path.StartsWithSegments("/api/merchant/billing");
+    if (!await Active(db, TenantId(c.User)) && !subscriptionSelfService) return Fail("اشتراک فعال نیست.", 403);
     return await next(invocation);
 });
 merchant.MapGet("/subscription", async (MajoraDb db, HttpContext c) =>
 {
     var tid = TenantId(c.User);
     return Results.Ok(await db.Subscriptions.Where(s => s.TenantId == tid).Join(db.Plans, s => s.PlanId, p => p.Id, (s,p) => new { s.Id, Plan = p.Name, s.StartsAt, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot, p.MaxUsers }).OrderByDescending(s => s.EndsAt).ToListAsync());
+});
+merchant.MapGet("/plans", async (MajoraDb db) => Results.Ok(await db.Plans.AsNoTracking()
+    .Where(x => x.Enabled).OrderBy(x => x.MonthlyRial).ToListAsync()));
+merchant.MapGet("/billing", async (MajoraDb db) => Results.Ok(await db.PlatformBilling.AsNoTracking().SingleOrDefaultAsync(x => x.Id == 1)
+    ?? new PlatformBilling()));
+merchant.MapGet("/subscription/quote", async (Guid planId, string? code, MajoraDb db) =>
+{
+    var plan = await db.Plans.AsNoTracking().SingleOrDefaultAsync(x => x.Id == planId && x.Enabled);
+    if (plan is null) return Results.NotFound();
+    var normalized = code?.Trim().ToUpperInvariant() ?? "";
+    decimal discount = 0;
+    if (normalized.Length > 0)
+    {
+        var now = DateTime.UtcNow;
+        var promo = await db.PromoCodes.AsNoTracking().SingleOrDefaultAsync(x => x.Code == normalized && x.Enabled && x.StartsAt <= now && x.ExpiresAt > now);
+        if (promo is null) return Fail("کد تخفیف معتبر نیست یا منقضی شده است.", 409);
+        discount = promo.Percent;
+    }
+    return Results.Ok(new { plan.Id, plan.Name, basePriceRial = plan.MonthlyRial, discountPercent = discount,
+        totalRial = DiscountedPrice(plan.MonthlyRial, discount), promoCode = normalized });
+});
+merchant.MapGet("/subscription/orders", async (MajoraDb db, HttpContext c) =>
+{
+    var tid = TenantId(c.User);
+    return Results.Ok(await db.SubscriptionOrders.AsNoTracking().Where(x => x.TenantId == tid)
+        .OrderByDescending(x => x.CreatedAt).Take(50)
+        .Select(x => new { x.Id, x.PlanNameSnapshot, x.PromoCodeSnapshot, x.BasePriceRial, x.TotalRial,
+            x.Status, x.PaymentMethod, x.CreatedAt, x.ReviewedAt }).ToListAsync());
+});
+merchant.MapPost("/subscription/orders", async (SubscriptionOrderRequest body, MajoraDb db, HttpContext c) =>
+{
+    if (Role(c.User) != "owner") return Results.Forbid();
+    if (string.IsNullOrWhiteSpace(body.IdempotencyKey) || body.IdempotencyKey.Length > 100) return Fail("شناسهٔ درخواست نامعتبر است.");
+    if (!ProductPhotos.TryDecode(body.ReceiptDataUrl ?? "", out var contentType, out var bytes))
+        return Fail("تصویر رسید باید JPEG، PNG یا WebP معتبر و کمتر از یک مگابایت باشد.");
+    var tid = TenantId(c.User);
+    await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    var existing = await db.SubscriptionOrders.SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == body.IdempotencyKey);
+    if (existing is not null) return existing.PlanId == body.PlanId && existing.PromoCodeSnapshot == (body.PromoCode?.Trim().ToUpperInvariant() ?? "")
+        ? Results.Ok(new { existing.Id, existing.Status, existing.TotalRial }) : Fail("شناسهٔ درخواست برای سفارش دیگری استفاده شده است.", 409);
+    if (await db.SubscriptionOrders.CountAsync(x => x.TenantId == tid && x.Status == "pending_approval") >= 5)
+        return Fail("پنج درخواست در انتظار بررسی دارید؛ پس از تعیین وضعیت یکی از آن‌ها دوباره تلاش کنید.", 409);
+    var billing = await db.PlatformBilling.AsNoTracking().SingleOrDefaultAsync(x => x.Id == 1);
+    if (billing is null || billing.CardNumber.Length == 0) return Fail("اطلاعات واریز هنوز در پنل ماژورا تنظیم نشده است.", 409);
+    var plan = await db.Plans.AsNoTracking().SingleOrDefaultAsync(x => x.Id == body.PlanId && x.Enabled);
+    if (plan is null) return Results.NotFound();
+    var normalized = body.PromoCode?.Trim().ToUpperInvariant() ?? "";
+    decimal discount = 0;
+    if (normalized.Length > 0)
+    {
+        var now = DateTime.UtcNow;
+        var promo = await db.PromoCodes.AsNoTracking().SingleOrDefaultAsync(x => x.Code == normalized && x.Enabled && x.StartsAt <= now && x.ExpiresAt > now);
+        if (promo is null) return Fail("کد تخفیف معتبر نیست یا منقضی شده است.", 409);
+        discount = promo.Percent;
+    }
+    var total = DiscountedPrice(plan.MonthlyRial, discount);
+    if (body.ExpectedTotalRial != total) return Fail("مبلغ طرح یا تخفیف تغییر کرده است؛ مبلغ را دوباره بررسی کنید.", 409);
+    var order = new SubscriptionOrder { TenantId = tid, PlanId = plan.Id, PlanNameSnapshot = plan.Name,
+        IdempotencyKey = body.IdempotencyKey, PromoCodeSnapshot = normalized, DiscountPercentSnapshot = discount,
+        BasePriceRial = plan.MonthlyRial, TotalRial = total,
+        ReceiptBytes = bytes, ReceiptContentType = contentType, Status = "pending_approval" };
+    db.SubscriptionOrders.Add(order); Audit(db, c.User, tid, "subscription-order.submit", "subscription-order", order.Id);
+    try { await db.SaveChangesAsync(); await tx.CommitAsync(); }
+    catch (DbUpdateException) { return Fail("سفارش هم‌زمان ثبت شد؛ فهرست درخواست‌ها را تازه کنید.", 409); }
+    return Results.Created($"/api/merchant/subscription/orders/{order.Id}", new { order.Id, order.Status, order.TotalRial });
 });
 merchant.MapGet("/workspace", async (MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var tenant = await db.Tenants.SingleAsync(t => t.Id == tid); var profile = await db.InvoiceBrands.AsNoTracking().SingleOrDefaultAsync(x => x.TenantId == tid); return Results.Ok(new { tenant.Name, tenant.Slug, LogoUrl = profile?.LogoDataUrl ?? tenant.LogoUrl, tenant.BrandColor }); });
 merchant.MapGet("/invoice-brand", async (MajoraDb db, HttpContext c) =>
@@ -450,12 +630,10 @@ merchant.MapPut("/invoice-brand", () => Results.Forbid());
 merchant.MapGet("/dashboard", async (MajoraDb db, HttpContext c) =>
 {
     var tid = TenantId(c.User); var since = DateTime.UtcNow.AddDays(-30);
-    var invoices = await db.Invoices.Where(x => x.TenantId == tid && x.Status == "issued" && x.PaymentStatus != "proforma" && x.IssuedAt >= since).ToListAsync();
-    var returns30 = await db.SalesReturns.Where(x => x.TenantId == tid && x.CreatedAt >= since).SumAsync(x => x.AmountRial);
+    var sales = await FinanceMath.LoadSalesMetricsAsync(db, tid, since);
     var receipts30 = await db.Payments.Where(x => x.TenantId == tid && x.ReceivedAt >= since).SumAsync(x => x.AmountRial);
     var refunds30 = await db.Refunds.Where(x => x.TenantId == tid && x.RefundedAt >= since).SumAsync(x => x.AmountRial);
-    var openInvoices = await db.Invoices.Where(x => x.TenantId == tid && x.Status == "issued" && x.PaymentStatus != "proforma").ToListAsync();
-    return Results.Ok(new { sales30Rial = invoices.Sum(x => x.TotalRial) - returns30, received30Rial = receipts30 - refunds30, receivable30Rial = openInvoices.Sum(FinanceMath.Receivable), refundDueRial = openInvoices.Sum(FinanceMath.RefundDue), invoiceCount30 = invoices.Count, customers = await db.Customers.CountAsync(x => x.TenantId == tid && !x.Archived), products = await db.Products.CountAsync(x => x.TenantId == tid && !x.Archived), lowStock = await db.Products.CountAsync(x => x.TenantId == tid && !x.Archived && x.Stock <= 3), overdue = await db.Reminders.CountAsync(x => x.TenantId == tid && !x.Done && x.DueAt <= DateTime.UtcNow), openCheques = await db.Cheques.CountAsync(x => x.TenantId == tid && x.Status == "open"), dueCheques = await db.Cheques.CountAsync(x => x.TenantId == tid && x.Status == "open" && x.DueAt <= DateTime.UtcNow) });
+    return Results.Ok(new { sales30Rial = sales.NetSalesRial, received30Rial = receipts30 - refunds30, receivable30Rial = sales.ReceivableRial, refundDueRial = sales.RefundDueRial, invoiceCount30 = sales.InvoiceCount, customers = await db.Customers.CountAsync(x => x.TenantId == tid && !x.Archived), products = await db.Products.CountAsync(x => x.TenantId == tid && !x.Archived), lowStock = await db.Products.CountAsync(x => x.TenantId == tid && !x.Archived && x.Stock <= 3), overdue = await db.Reminders.CountAsync(x => x.TenantId == tid && !x.Done && x.DueAt <= DateTime.UtcNow), openCheques = await db.Cheques.CountAsync(x => x.TenantId == tid && x.Status == "open"), dueCheques = await db.Cheques.CountAsync(x => x.TenantId == tid && x.Status == "open" && x.DueAt <= DateTime.UtcNow) });
 });
 merchant.MapGet("/products/meta", async (MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var products = db.Products.Where(x => x.TenantId == tid && !x.Archived); return Results.Ok(new { count = await products.CountAsync(), categories = await products.Select(x => x.Category).Distinct().OrderBy(x => x).ToListAsync() }); });
 merchant.MapGet("/products", async (string? q, string? category, int? page, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Products.Where(x => x.TenantId == tid && !x.Archived && (q == null || x.Name.Contains(q) || x.Sku.Contains(q)) && (string.IsNullOrEmpty(category) || x.Category == category)).OrderBy(x => x.Name).Skip(Math.Max(0, (page ?? 1) - 1) * 50).Take(50).ToListAsync()); });
@@ -606,6 +784,29 @@ merchant.MapPost("/price-batches/{id:guid}/revert", async (Guid id, MajoraDb db,
     return Results.Ok(new { batch.Id, batch.RevertedAt });
 });
 merchant.MapGet("/customers", async (string? q, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Customers.Where(x => x.TenantId == tid && !x.Archived && (q == null || x.Name.Contains(q) || x.Phone.Contains(q))).OrderByDescending(x => x.CreatedAt).Take(100).ToListAsync()); });
+merchant.MapGet("/customers/with-status", async (string? q, MajoraDb db, HttpContext c) =>
+{
+    var tid = TenantId(c.User);
+    var customers = await db.Customers.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived &&
+        (q == null || x.Name.Contains(q) || x.Phone.Contains(q))).OrderByDescending(x => x.CreatedAt).Take(100).ToListAsync();
+    var ids = customers.Select(x => x.Id).ToArray();
+    var invoices = await db.Invoices.AsNoTracking().Where(x => x.TenantId == tid && x.CustomerId != null && ids.Contains(x.CustomerId.Value))
+        .Select(x => new { x.Id, x.CustomerId, x.Status, x.PaymentStatus, x.TotalRial, x.ReturnedRial, x.PaidRial, x.RefundedRial }).ToListAsync();
+    var invoiceIds = invoices.Select(x => x.Id).ToArray();
+    var returnedCheques = await db.Cheques.AsNoTracking().Where(x => x.TenantId == tid && x.InvoiceId != null &&
+        invoiceIds.Contains(x.InvoiceId.Value) && x.Status == "returned").Select(x => x.InvoiceId!.Value).ToListAsync();
+    return Results.Ok(customers.Select(customer =>
+    {
+        var related = invoices.Where(x => x.CustomerId == customer.Id).ToList();
+        var receivable = related.Where(x => x.Status == "issued" && x.PaymentStatus != "proforma")
+            .Sum(x => Math.Max(0, x.TotalRial - x.ReturnedRial - x.PaidRial + x.RefundedRial));
+        var status = related.Any(x => returnedCheques.Contains(x.Id)) ? "returned_cheque" : receivable > 0 ? "receivable" :
+            related.Any(x => x.Status == "issued" && x.PaymentStatus != "proforma") ? "settled" :
+            related.Any() ? "proforma" : "no_sales";
+        return new { customer.Id, customer.Name, customer.Phone, customer.Address, customer.Occupation,
+            customer.AcquisitionSource, customer.ReferrerPhone, customer.Notes, status, receivableRial = receivable };
+    }).ToList());
+});
 merchant.MapGet("/customers/export.csv", async (MajoraDb db, HttpContext c) =>
 {
     if (!CanWrite(c.User)) return Results.Forbid();
@@ -617,8 +818,9 @@ merchant.MapGet("/customers/export.csv", async (MajoraDb db, HttpContext c) =>
         if (safe.Length > 0 && "=+-@\t".Contains(safe[0])) safe = "'" + safe;
         return "\"" + safe.Replace("\"", "\"\"") + "\"";
     }
-    var csv = new StringBuilder("نام و نام خانوادگی,شماره تماس\r\n");
-    foreach (var customer in customers) csv.Append(Cell(customer.Name)).Append(',').Append(Cell(customer.Phone)).Append("\r\n");
+    var csv = new StringBuilder("ردیف,نام و نام خانوادگی,شماره تماس\r\n");
+    for (var index = 0; index < customers.Count; index++)
+        csv.Append(index + 1).Append(',').Append(Cell(customers[index].Name)).Append(',').Append(Cell(customers[index].Phone)).Append("\r\n");
     var bytes = Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes(csv.ToString())).ToArray();
     return Results.File(bytes, "text/csv; charset=utf-8", $"majora-customers-{DateTime.UtcNow:yyyyMMdd}.csv");
 });
@@ -677,8 +879,31 @@ merchant.MapPost("/archive/{kind}/{id:guid}/restore", async (string kind, Guid i
 });
 merchant.MapPost("/customers", async (CustomerRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (string.IsNullOrWhiteSpace(body.Name)) return Fail("نام مشتری لازم است.");
-    var customer = new Customer { TenantId = TenantId(c.User), Name = body.Name.Trim(), Phone = body.Phone.Trim() }; db.Customers.Add(customer); Audit(db, c.User, customer.TenantId, "customer.create", "customer", customer.Id); await db.SaveChangesAsync(); return Results.Created($"/api/merchant/customers/{customer.Id}", customer);
+    if (string.IsNullOrWhiteSpace(body.Name) || body.Name.Length > 200 || (body.Phone?.Length ?? 0) > 30 ||
+        (body.Address?.Length ?? 0) > 500 || (body.Occupation?.Length ?? 0) > 120 ||
+        (body.AcquisitionSource?.Length ?? 0) > 120 || (body.ReferrerPhone?.Length ?? 0) > 30 ||
+        (body.Notes?.Length ?? 0) > 1000) return Fail("اطلاعات مشتری نامعتبر یا بیش از حد طولانی است.");
+    var customer = new Customer { TenantId = TenantId(c.User), Name = body.Name.Trim(), Phone = body.Phone?.Trim() ?? "",
+        Address = body.Address?.Trim() ?? "", Occupation = body.Occupation?.Trim() ?? "",
+        AcquisitionSource = body.AcquisitionSource?.Trim() ?? "", ReferrerPhone = body.ReferrerPhone?.Trim() ?? "",
+        Notes = body.Notes?.Trim() ?? "" };
+    db.Customers.Add(customer); Audit(db, c.User, customer.TenantId, "customer.create", "customer", customer.Id);
+    await db.SaveChangesAsync(); return Results.Created($"/api/merchant/customers/{customer.Id}", customer);
+});
+merchant.MapPut("/customers/{id:guid}", async (Guid id, CustomerRequest body, MajoraDb db, HttpContext c) =>
+{
+    if (!CanWrite(c.User)) return Results.Forbid();
+    if (string.IsNullOrWhiteSpace(body.Name) || body.Name.Length > 200 || (body.Phone?.Length ?? 0) > 30 ||
+        (body.Address?.Length ?? 0) > 500 || (body.Occupation?.Length ?? 0) > 120 ||
+        (body.AcquisitionSource?.Length ?? 0) > 120 || (body.ReferrerPhone?.Length ?? 0) > 30 ||
+        (body.Notes?.Length ?? 0) > 1000) return Fail("اطلاعات مشتری نامعتبر یا بیش از حد طولانی است.");
+    var tid = TenantId(c.User); var customer = await db.Customers.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && !x.Archived);
+    if (customer is null) return Results.NotFound();
+    customer.Name = body.Name.Trim(); customer.Phone = body.Phone?.Trim() ?? "";
+    customer.Address = body.Address?.Trim() ?? ""; customer.Occupation = body.Occupation?.Trim() ?? "";
+    customer.AcquisitionSource = body.AcquisitionSource?.Trim() ?? ""; customer.ReferrerPhone = body.ReferrerPhone?.Trim() ?? "";
+    customer.Notes = body.Notes?.Trim() ?? "";
+    Audit(db, c.User, tid, "customer.update", "customer", id); await db.SaveChangesAsync(); return Results.Ok(customer);
 });
 merchant.MapGet("/invoices", async (string? q, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Invoices.Where(x => x.TenantId == tid && !x.Archived && (q == null || x.CustomerName.Contains(q) || x.CustomerPhone.Contains(q) || x.Number.ToString() == q)).OrderByDescending(x => x.IssuedAt).Take(100).Select(x => new { x.Id, x.Number, x.Revision, x.CustomerName, x.CustomerPhone, x.IssuedAt, x.TotalRial, x.PaidRial, x.ReturnedRial, x.RefundedRial, x.PaymentStatus, x.Status }).ToListAsync()); });
 merchant.MapGet("/invoices/{id:guid}", async (Guid id, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var invoice = await db.Invoices.Include(x => x.Lines).SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid); return invoice is null ? Results.NotFound() : Results.Ok(invoice); });
@@ -1014,6 +1239,42 @@ merchant.MapGet("/reminders", async (MajoraDb db, HttpContext c) => { var tid = 
 merchant.MapPost("/reminders", async (ReminderRequest body, MajoraDb db, HttpContext c) => { if (string.IsNullOrWhiteSpace(body.Title)) return Fail("عنوان یادآور لازم است."); var r = new Reminder { TenantId = TenantId(c.User), Title = body.Title.Trim(), DueAt = body.DueAt }; db.Reminders.Add(r); Audit(db, c.User, r.TenantId, "reminder.create", "reminder", r.Id); await db.SaveChangesAsync(); return Results.Created($"/api/merchant/reminders/{r.Id}", r); });
 merchant.MapPost("/reminders/{id:guid}/done", async (Guid id, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var r = await db.Reminders.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid); if (r is null) return Results.NotFound(); r.Done = true; Audit(db, c.User, r.TenantId, "reminder.done", "reminder", id); await db.SaveChangesAsync(); return Results.NoContent(); });
 merchant.MapGet("/staff", async (MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Users.Where(x => x.TenantId == tid).Select(x => new { x.Id, x.Username, x.DisplayName, x.Role, x.Enabled }).ToListAsync()); });
+merchant.MapGet("/activity", async (int? page, MajoraDb db, HttpContext c) =>
+{
+    if (Role(c.User) != "owner") return Results.Forbid();
+    var tid = TenantId(c.User);
+    return Results.Ok(await db.Audit.AsNoTracking().Where(x => x.TenantId == tid)
+        .OrderByDescending(x => x.At).Skip(Math.Max(0, (page ?? 1) - 1) * 100).Take(100)
+        .Join(db.Users.AsNoTracking().Where(x => x.TenantId == tid), a => a.ActorId, u => u.Id,
+            (a, u) => new { a.Id, a.At, a.Action, a.EntityType, a.EntityId, a.Detail, ActorName = u.Username })
+        .ToListAsync());
+});
+merchant.MapPut("/staff/{id:guid}/username", async (Guid id, UsernameUpdate body, MajoraDb db, HttpContext c) =>
+{
+    if (Role(c.User) != "owner") return Results.Forbid();
+    var newName = body.Username?.Trim();
+    if (string.IsNullOrWhiteSpace(newName) || newName.Length > 100) return Fail("نام کاربری باید بین ۱ تا ۱۰۰ نویسه باشد.");
+    var tid = TenantId(c.User);
+    var user = await db.Users.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && x.Role != "owner");
+    if (user is null) return Results.NotFound();
+    if (user.Username == newName) return Results.Ok(new { user.Id, user.Username });
+    if (await db.Users.AnyAsync(x => x.Username == newName)) return Fail("این نام کاربری قبلاً استفاده شده است.", 409);
+    var oldName = user.Username; user.Username = newName; user.AuthVersion++;
+    Audit(db, c.User, tid, "staff.username.update", "user", id, $"old={oldName};new={newName}");
+    try { await db.SaveChangesAsync(); } catch (DbUpdateException) { return Fail("این نام کاربری هم‌زمان ثبت شده است.", 409); }
+    return Results.Ok(new { user.Id, user.Username });
+});
+merchant.MapPost("/staff/{id:guid}/reset-password", async (Guid id, PasswordReset body, MajoraDb db, IPasswordHasher<AppUser> hasher, HttpContext c) =>
+{
+    if (Role(c.User) != "owner") return Results.Forbid();
+    if (string.IsNullOrWhiteSpace(body.NewPassword) || body.NewPassword.Length < 12) return Fail("رمز جدید باید حداقل ۱۲ نویسه باشد.");
+    var tid = TenantId(c.User);
+    var user = await db.Users.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && x.Role != "owner");
+    if (user is null) return Results.NotFound();
+    user.PasswordHash = hasher.HashPassword(user, body.NewPassword); user.AuthVersion++;
+    Audit(db, c.User, tid, "password.owner-reset", "user", id);
+    await db.SaveChangesAsync(); return Results.NoContent();
+});
 merchant.MapPost("/staff", async (StaffRequest body, MajoraDb db, IPasswordHasher<AppUser> hasher, HttpContext c) =>
 {
     if (Role(c.User) != "owner") return Results.Forbid();
@@ -1048,12 +1309,12 @@ merchant.MapGet("/accounting/overview", async (MajoraDb db, HttpContext c) =>
     var purchases = await db.Purchases.Where(x => x.TenantId == tid && x.PurchasedAt >= since).ToListAsync();
     var expenses = await db.Expenses.Where(x => x.TenantId == tid && !x.Voided && x.IncurredAt >= since).ToListAsync();
     var costComplete = sales.SelectMany(x => x.Lines).All(x => x.CostKnown) && returns.SelectMany(x => x.Lines).All(x => x.CostKnown);
-    var returnsRial = returns.Sum(x => x.AmountRial);
-    var revenue = checked(sales.Sum(x => x.TotalRial) - returnsRial);
+    var metrics = FinanceMath.SummarizeSales(sales, returns.Sum(x => x.AmountRial), openInvoices);
+    var revenue = metrics.NetSalesRial;
     var cogs = costComplete ? checked(sales.SelectMany(x => x.Lines).Sum(x => checked(x.UnitCostRialSnapshot * x.Quantity)) - returns.SelectMany(x => x.Lines).Sum(x => checked(x.UnitCostRialSnapshot * x.Quantity))) : (long?)null;
     var received = await db.Payments.Where(x => x.TenantId == tid && x.ReceivedAt >= since).SumAsync(x => x.AmountRial);
     var refunded = await db.Refunds.Where(x => x.TenantId == tid && x.RefundedAt >= since).SumAsync(x => x.AmountRial);
-    return Results.Ok(new { periodDays = 30, revenueRial = revenue, returnsRial, receivedRial = received - refunded, refundedRial = refunded, customerReceivableRial = openInvoices.Sum(FinanceMath.Receivable), refundDueRial = openInvoices.Sum(FinanceMath.RefundDue), purchasesRial = purchases.Sum(x => x.TotalRial), supplierPayableRial = purchases.Sum(x => x.TotalRial - x.PaidRial), expensesRial = expenses.Sum(x => x.AmountRial), costComplete, costOfGoodsSoldRial = cogs, estimatedOperatingRial = cogs is null ? null : (long?)(revenue - cogs.Value - expenses.Sum(x => x.AmountRial)), note = "برآورد ۳۰روزهٔ عملیاتی است؛ مالیات، استهلاک و ماندهٔ ابتدای دوره در آن نیست. طلب و بازپرداخت، ماندهٔ باز همهٔ فاکتورهاست." });
+    return Results.Ok(new { periodDays = 30, revenueRial = revenue, returnsRial = metrics.ReturnsRial, receivedRial = received - refunded, refundedRial = refunded, customerReceivableRial = metrics.ReceivableRial, refundDueRial = metrics.RefundDueRial, purchasesRial = purchases.Sum(x => x.TotalRial), supplierPayableRial = purchases.Sum(x => x.TotalRial - x.PaidRial), expensesRial = expenses.Sum(x => x.AmountRial), costComplete, costOfGoodsSoldRial = cogs, estimatedOperatingRial = cogs is null ? null : (long?)(revenue - cogs.Value - expenses.Sum(x => x.AmountRial)), note = "برآورد ۳۰روزهٔ عملیاتی است؛ مالیات، استهلاک و ماندهٔ ابتدای دوره در آن نیست. طلب و بازپرداخت، ماندهٔ باز همهٔ فاکتورهاست." });
 });
 merchant.MapGet("/accounting/cheques", async (string? q, string? status, string? direction, MajoraDb db, HttpContext c) =>
 {
@@ -1154,10 +1415,26 @@ merchant.MapPost("/accounting/purchases", async (PurchaseRequest body, MajoraDb 
     var existing = await db.Purchases.SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == body.IdempotencyKey);
     if (existing is not null) return Results.Ok(new { existing.Id, existing.TotalRial });
     var purchase = new Purchase { TenantId = tid, SupplierName = body.SupplierName.Trim(), SupplierInvoiceNumber = body.SupplierInvoiceNumber?.Trim() ?? "", IdempotencyKey = body.IdempotencyKey };
+    var newSkus = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     foreach (var item in body.Lines)
     {
         if (item.Quantity < 1 || item.Quantity > 1_000_000 || item.UnitCostRial < 0) return Fail("تعداد یا فی خرید نامعتبر است.");
-        var product = await db.Products.SingleOrDefaultAsync(x => x.Id == item.ProductId && x.TenantId == tid && !x.Archived); if (product is null) return Fail("کالای خرید یافت نشد.");
+        if ((item.ProductId is null) == (item.NewProduct is null)) return Fail("برای هر ردیف، کالای موجود یا مشخصات کالای جدید را انتخاب کنید.");
+        Product? product;
+        if (item.NewProduct is NewPurchaseProduct next)
+        {
+            var sku = next.Sku?.Trim() ?? "";
+            if (string.IsNullOrWhiteSpace(next.Name) || next.Name.Length > 300 || sku.Length is < 1 or > 100 ||
+                next.PriceRial < 0 || next.Category?.Length > 200 || !newSkus.Add(sku) ||
+                await db.Products.AnyAsync(x => x.TenantId == tid && x.Sku == sku))
+                return Fail("نام، شناسه، دسته یا قیمت کالای جدید نامعتبر یا تکراری است.", 409);
+            product = new Product { TenantId = tid, Name = next.Name.Trim(), Sku = sku,
+                Category = next.Category?.Trim() ?? "", PriceRial = next.PriceRial, Stock = 0 };
+            db.Products.Add(product);
+            Audit(db, c.User, tid, "product.create-from-purchase", "product", product.Id);
+        }
+        else product = await db.Products.SingleOrDefaultAsync(x => x.Id == item.ProductId && x.TenantId == tid && !x.Archived);
+        if (product is null) return Fail("کالای خرید یافت نشد.");
         var lineTotal = checked(item.Quantity * item.UnitCostRial); purchase.TotalRial = checked(purchase.TotalRial + lineTotal);
         purchase.Lines.Add(new PurchaseLine { ProductId = product.Id, NameSnapshot = product.Name, Quantity = item.Quantity, UnitCostRial = item.UnitCostRial, TotalRial = lineTotal });
         if (product.Stock == 0) { product.AverageCostRial = item.UnitCostRial; product.CostKnown = true; }
@@ -1203,22 +1480,21 @@ merchant.MapPost("/accounting/expenses/{id:guid}/void", async (Guid id, MajoraDb
 merchant.MapGet("/advisor", async (MajoraDb db, HttpContext c) =>
 {
     var tid = TenantId(c.User); var date = DateTime.UtcNow.AddDays(-30);
-    var invoices = await db.Invoices.Where(x => x.TenantId == tid && x.Status == "issued" && x.PaymentStatus != "proforma" && x.IssuedAt >= date).ToListAsync();
+    var sales = await FinanceMath.LoadSalesMetricsAsync(db, tid, date);
     var purchases = await db.Purchases.Where(x => x.TenantId == tid && x.PurchasedAt >= date).ToListAsync();
     var expenses = await db.Expenses.Where(x => x.TenantId == tid && !x.Voided && x.IncurredAt >= date).ToListAsync();
     var lowStock = await db.Products.Where(x => x.TenantId == tid && !x.Archived && x.Stock <= 3).OrderBy(x => x.Stock).Take(5).Select(x => new { x.Name, x.Stock }).ToListAsync();
-    var outstanding = invoices.Sum(FinanceMath.Receivable);
-    return Results.Ok(new { periodDays = 30, invoices = invoices.Count, salesRial = invoices.Sum(x => x.TotalRial - x.ReturnedRial), outstandingRial = outstanding, purchasesRial = purchases.Sum(x => x.TotalRial), supplierPayableRial = purchases.Sum(x => x.TotalRial - x.PaidRial), expensesRial = expenses.Sum(x => x.AmountRial), lowStock, suggestions = new[] { outstanding > 0 ? "ماندهٔ فاکتورها را بر اساس تاریخ سررسید پیگیری کنید." : "ماندهٔ باز ثبت‌شده‌ای در ۳۰ روز اخیر دیده نمی‌شود.", lowStock.Count > 0 ? "برای کالاهای کم‌موجودی نقطهٔ سفارش تعریف کنید." : "موجودی بحرانی ثبت‌شده‌ای دیده نمی‌شود.", purchases.Sum(x=>x.TotalRial-x.PaidRial)>0 ? "بدهی تأمین‌کنندگان را با وصول مطالبات هماهنگ کنید." : "بدهی خرید ثبت‌شده‌ای در ۳۰ روز اخیر دیده نمی‌شود." }, note = "این تحلیل فقط از داده‌های ثبت‌شده استفاده می‌کند و جای رسیدگی حسابداری تخصصی را نمی‌گیرد." });
+    return Results.Ok(new { periodDays = 30, invoices = sales.InvoiceCount, salesRial = sales.NetSalesRial, outstandingRial = sales.ReceivableRial, purchasesRial = purchases.Sum(x => x.TotalRial), supplierPayableRial = purchases.Sum(x => x.TotalRial - x.PaidRial), expensesRial = expenses.Sum(x => x.AmountRial), lowStock, suggestions = new[] { sales.ReceivableRial > 0 ? "ماندهٔ فاکتورها را بر اساس تاریخ سررسید پیگیری کنید." : "ماندهٔ باز ثبت‌شده‌ای دیده نمی‌شود.", lowStock.Count > 0 ? "برای کالاهای کم‌موجودی نقطهٔ سفارش تعریف کنید." : "موجودی بحرانی ثبت‌شده‌ای دیده نمی‌شود.", purchases.Sum(x=>x.TotalRial-x.PaidRial)>0 ? "بدهی تأمین‌کنندگان را با وصول مطالبات هماهنگ کنید." : "بدهی خرید ثبت‌شده‌ای در ۳۰ روز اخیر دیده نمی‌شود." }, note = "این تحلیل فقط از داده‌های ثبت‌شده استفاده می‌کند و جای رسیدگی حسابداری تخصصی را نمی‌گیرد." });
 });
 merchant.MapPost("/advisor/ask", async (AdvisorQuestion body, MajoraDb db, HttpContext c, IHttpClientFactory clients, IConfiguration config, IDataProtectionProvider protection) =>
 {
     if (string.IsNullOrWhiteSpace(body.Question) || body.Question.Length > 1000) return Fail("پرسش باید بین ۱ تا ۱۰۰۰ نویسه باشد.");
     var tid = TenantId(c.User); var since = DateTime.UtcNow.AddDays(-30);
-    var invoices = await db.Invoices.Where(x => x.TenantId == tid && x.Status == "issued" && x.PaymentStatus != "proforma" && x.IssuedAt >= since).ToListAsync();
+    var sales = await FinanceMath.LoadSalesMetricsAsync(db, tid, since);
     var purchases = await db.Purchases.Where(x => x.TenantId == tid && x.PurchasedAt >= since).Select(x => new { x.TotalRial, x.PaidRial }).ToListAsync();
     var expenses = await db.Expenses.Where(x => x.TenantId == tid && !x.Voided && x.IncurredAt >= since).Select(x => x.AmountRial).ToListAsync();
     var lowStock = await db.Products.Where(x => x.TenantId == tid && !x.Archived && x.Stock <= 3).CountAsync();
-    var facts = new { periodDays = 30, invoiceCount = invoices.Count, salesRial = invoices.Sum(x => x.TotalRial - x.ReturnedRial), outstandingRial = invoices.Sum(FinanceMath.Receivable), refundDueRial = invoices.Sum(FinanceMath.RefundDue), purchasesRial = purchases.Sum(x => x.TotalRial), supplierPayableRial = purchases.Sum(x => x.TotalRial - x.PaidRial), expensesRial = expenses.Sum(), lowStockCount = lowStock };
+    var facts = new { periodDays = 30, invoiceCount = sales.InvoiceCount, salesRial = sales.NetSalesRial, outstandingRial = sales.ReceivableRial, refundDueRial = sales.RefundDueRial, purchasesRial = purchases.Sum(x => x.TotalRial), supplierPayableRial = purchases.Sum(x => x.TotalRial - x.PaidRial), expensesRial = expenses.Sum(), lowStockCount = lowStock };
     var profile = await db.AiProviderProfiles.AsNoTracking().SingleOrDefaultAsync(x => x.Id == 1);
     var endpoint = profile is null ? config["MAJORA_AI_ENDPOINT"] : profile.Enabled ? profile.Endpoint : null;
     var model = profile is null ? config["MAJORA_AI_MODEL"] : profile.Enabled ? profile.Model : null;
@@ -1251,7 +1527,12 @@ app.MapFallbackToFile("index.html");
 app.Run();
 
 public sealed record LoginRequest(string Username, string Password);
-public sealed record PlanRequest(string Name, long MonthlyRial, int MaxUsers, bool Enabled = true);
+public sealed record PlanRequest(string Name, long MonthlyRial, int MaxUsers, bool Enabled = true, string? Description = null, List<string>? Features = null);
+public sealed record PromoCodeRequest(string Code, decimal Percent, DateTime StartsAt, DateTime ExpiresAt, bool Enabled = true);
+public sealed record BillingRequest(string CardNumber, string CardHolder);
+public sealed record SubscriptionOrderRequest(Guid PlanId, string IdempotencyKey, string? PromoCode, string? ReceiptDataUrl, long ExpectedTotalRial);
+public sealed record SubscriptionDecision(string Decision);
+public sealed record UsernameUpdate(string Username);
 public sealed record TenantRequest(string Name, string Slug, string OwnerUsername, string OwnerName, string OwnerPassword, string? BrandColor, bool ClassicPreset = false);
 public sealed record TenantUpdate(string Name, bool Enabled, string? BrandColor, string? LogoUrl);
 public sealed record AdminInvoiceBrandUpdate(InvoiceBrandUpdate Brand, string Reason);
@@ -1259,7 +1540,8 @@ public sealed record SubscriptionRequest(Guid PlanId, DateTime StartsAt, DateTim
 public sealed record ProductRequest(string Name, string Sku, string Category, long PriceRial, long Stock, long? AverageCostRial = null, string? PhotoDataUrl = null);
 public sealed record ProductPhotoRequest(string DataUrl);
 public sealed record PriceBatchRequest(string IdempotencyKey, decimal Percent, bool AllProducts, List<Guid>? ProductIds);
-public sealed record CustomerRequest(string Name, string Phone);
+public sealed record CustomerRequest(string Name, string Phone, string? Address = null, string? Occupation = null,
+    string? AcquisitionSource = null, string? ReferrerPhone = null, string? Notes = null);
 public sealed record InvoiceRequest(string IdempotencyKey, Guid? CustomerId, string CustomerName, string CustomerPhone, string PaymentStatus, long PaidRial, DateTime? DueAt, List<InvoiceLineRequest> Lines, long? ExpectedTotalRial = null, ChequeRequest? Cheque = null);
 public sealed record ChequeRequest(string Direction, string Party, string Serial, string Bank, long AmountRial, DateTime DueAt, string? SayadId, string? IssuerNationalId, string? BeneficiaryNationalId, string RegistrationStatus, string? Note, bool ShowDetails = false, bool ShowImage = false, string? PhotoDataUrl = null);
 public sealed record ChequeStatusRequest(string Status);
@@ -1278,5 +1560,6 @@ public sealed record AiProviderRequest(bool Enabled, string Endpoint, string Mod
 public sealed record PasswordChange(string CurrentPassword, string NewPassword);
 public sealed record PasswordReset(string NewPassword);
 public sealed record PurchaseRequest(string IdempotencyKey, string SupplierName, string? SupplierInvoiceNumber, long PaidRial, DateTime? DueAt, List<PurchaseLineRequest> Lines);
-public sealed record PurchaseLineRequest(Guid ProductId, long Quantity, long UnitCostRial);
+public sealed record PurchaseLineRequest(Guid? ProductId, long Quantity, long UnitCostRial, NewPurchaseProduct? NewProduct = null);
+public sealed record NewPurchaseProduct(string Name, string Sku, string? Category, long PriceRial);
 public sealed record ExpenseRequest(string Category, string? Description, long AmountRial);
