@@ -35,15 +35,15 @@ jobs:
         shell: pwsh
         working-directory: 01-CORE-PLATFORM
         run: |
-          dotnet publish apps/web-api/Majora.WebApi.csproj -c Release -r win-x64 --self-contained false -o ../../output/web-win-x64
-          dotnet publish apps/web-api/Majora.WebApi.csproj -c Release -r linux-x64 --self-contained false -o ../../output/web-linux-x64
-          ./tooling/test-web-package.ps1 -PublishDirectory (Resolve-Path ../../output/web-win-x64).Path -DotnetRoot (Split-Path (Get-Command dotnet).Source)
+          dotnet publish apps/web-api/Majora.WebApi.csproj -c Release -r win-x64 --self-contained false -o ../output/web-win-x64
+          dotnet publish apps/web-api/Majora.WebApi.csproj -c Release -r linux-x64 --self-contained false -o ../output/web-linux-x64
+          ./tooling/test-web-package.ps1 -PublishDirectory (Resolve-Path ../output/web-win-x64).Path -DotnetRoot (Split-Path (Get-Command dotnet).Source)
       - name: Generate reviewed SQL Server migration candidate
         shell: pwsh
         working-directory: 01-CORE-PLATFORM
         run: |
-          dotnet tool install dotnet-ef --version 10.0.14 --tool-path ../../output/tools
-          & ../../output/tools/dotnet-ef.exe migrations script --idempotent --project apps/web-api/Majora.WebApi.csproj --startup-project apps/web-api/Majora.WebApi.csproj --context MajoraDb --output ../../output/majora-sqlserver-migrations.sql
+          dotnet tool install dotnet-ef --version 10.0.14 --tool-path ../output/tools
+          & ../output/tools/dotnet-ef.exe migrations script --idempotent --project apps/web-api/Majora.WebApi.csproj --startup-project apps/web-api/Majora.WebApi.csproj --context MajoraDb --output ../output/majora-sqlserver-migrations.sql
       - uses: actions/upload-artifact@v4
         with:
           name: MAJORA-web-win-x64-candidate
