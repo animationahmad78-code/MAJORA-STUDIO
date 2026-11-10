@@ -1005,7 +1005,27 @@ merchant.MapPut("/customers/{id:guid}", async (Guid id, CustomerRequest body, Ma
     customer.Notes = body.Notes?.Trim() ?? "";
     Audit(db, c.User, tid, "customer.update", "customer", id); await db.SaveChangesAsync(); return Results.Ok(customer);
 });
-merchant.MapGet("/invoices", async (string? q, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Invoices.Where(x => x.TenantId == tid && !x.Archived && (q == null || x.CustomerName.Contains(q) || x.CustomerPhone.Contains(q) || x.Number.ToString() == q)).OrderByDescending(x => x.IssuedAt).Take(100).Select(x => new { x.Id, x.Number, x.Revision, x.CustomerName, x.CustomerPhone, x.IssuedAt, x.TotalRial, x.PaidRial, x.ReturnedRial, x.RefundedRial, x.PaymentStatus, x.Status }).ToListAsync()); });
+merchant.MapGet("/invoices", async (string? q, string? field, int? page, MajoraDb db, HttpContext c) =>
+{
+    var tid = TenantId(c.User);
+    var currentPage = Math.Clamp(page ?? 1, 1, 100_000);
+    var source = db.Invoices.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived);
+    if (!string.IsNullOrWhiteSpace(q))
+    {
+        var search = q.Trim();
+        source = field switch
+        {
+            "number" => source.Where(x => x.Number.ToString() == search),
+            "customer" => source.Where(x => x.CustomerName.Contains(search)),
+            "phone" => source.Where(x => x.CustomerPhone.Contains(search)),
+            _ => source.Where(x => x.CustomerName.Contains(search) || x.CustomerPhone.Contains(search) || x.Number.ToString() == search)
+        };
+    }
+    return Results.Ok(await source.OrderByDescending(x => x.IssuedAt).ThenByDescending(x => x.Id)
+        .Skip((currentPage - 1) * 50).Take(50)
+        .Select(x => new { x.Id, x.Number, x.Revision, x.CustomerName, x.CustomerPhone, x.IssuedAt,
+            x.TotalRial, x.PaidRial, x.ReturnedRial, x.RefundedRial, x.PaymentStatus, x.Status }).ToListAsync());
+});
 merchant.MapGet("/invoices/{id:guid}", async (Guid id, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var invoice = await db.Invoices.Include(x => x.Lines).SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid); return invoice is null ? Results.NotFound() : Results.Ok(invoice); });
 merchant.MapGet("/invoices/{id:guid}/cheque", async (Guid id, MajoraDb db, HttpContext c) =>
 {
@@ -1014,7 +1034,7 @@ merchant.MapGet("/invoices/{id:guid}/cheque", async (Guid id, MajoraDb db, HttpC
     var cheque = await db.Cheques.AsNoTracking().Where(x => x.InvoiceId == id && x.TenantId == tid)
         .Select(x => new { x.Id, x.Serial, x.Bank, x.AmountRial, x.DueAt, x.SayadId, x.IssuerNationalId,
             x.BeneficiaryNationalId, x.RegistrationStatus, x.Status, x.ShowDetails, x.ShowImage, HasPhoto = x.PhotoBytes != null }).SingleOrDefaultAsync();
-    return Results.Ok(cheque);
+    return cheque is null ? Results.Text("null", "application/json") : Results.Json(cheque);
 });
 merchant.MapGet("/invoices/{id:guid}/revisions", async (Guid id, MajoraDb db, HttpContext c) =>
 {

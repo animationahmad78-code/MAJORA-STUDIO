@@ -53,16 +53,24 @@ export function InvoicePreview({ id, close, snapshot }: { id: string; close: () 
     setInvoice(snapshot ?? null); setCheque(null); setChequeError(''); setError(''); setBrandError('');
     setLoading(!snapshot); setChequeReady(!!snapshot);
     if (!snapshot) {
-      void Promise.allSettled([
-        api<InvoiceRecord>(`/merchant/invoices/${id}`),
-        api<InvoiceCheque | null>(`/merchant/invoices/${id}/cheque`)
-      ]).then(([invoiceResult, chequeResult]) => {
+      void api<InvoiceRecord>(`/merchant/invoices/${id}`).then(record => {
         if (!active) return;
-        setLoading(false); setChequeReady(true);
-        if (invoiceResult.status === 'fulfilled') setInvoice(invoiceResult.value);
-        else setError(invoiceResult.reason instanceof Error ? invoiceResult.reason.message : 'فاکتور دریافت نشد. دوباره تلاش کنید.');
-        if (chequeResult.status === 'fulfilled') setCheque(chequeResult.value);
-        else setChequeError('مشخصات چک دریافت نشد. اگر این فاکتور چکی است، برای خروجی کامل دوباره تلاش کنید.');
+        setInvoice(record);
+        setLoading(false);
+        if (record.paymentStatus !== 'cheque') { setChequeReady(true); return; }
+        void api<InvoiceCheque | null>(`/merchant/invoices/${id}/cheque`)
+          .then(value => {
+            if (!active) return;
+            if (value) setCheque(value);
+            else setChequeError('پروندهٔ چک این فاکتور پیدا نشد. برای خروجی کامل، دوباره دریافت کنید.');
+          })
+          .catch(() => { if (active) setChequeError('مشخصات چک دریافت نشد. برای خروجی کامل دوباره تلاش کنید.'); })
+          .finally(() => { if (active) setChequeReady(true); });
+      }).catch(reason => {
+        if (!active) return;
+        setLoading(false);
+        setChequeReady(true);
+        setError(reason instanceof Error ? reason.message : 'فاکتور دریافت نشد. دوباره تلاش کنید.');
       });
     }
     void api<BrandView>('/merchant/invoice-brand').then(value => { if (active) setFallbackBrand(value); })

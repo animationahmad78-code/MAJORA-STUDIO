@@ -9,6 +9,11 @@ import './invoices.css';
 export function Invoices({ run, onReturn, onCheque, initialId, onInitialViewed }: { run: (action: () => Promise<unknown>, success?: string) => Promise<void>; onReturn: (id: string) => void; onCheque: () => void; initialId?: string | null; onInitialViewed?: () => void }) {
   const [items, setItems] = useState<Invoice[]>([]);
   const [query, setQuery] = useState('');
+  const [field, setField] = useState('all');
+  const [page, setPage] = useState(1);
+  const [loadError, setLoadError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [reloadKey, setReloadKey] = useState(0);
   const [selected, setSelected] = useState<Invoice | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [revising, setRevising] = useState<string | null>(null);
@@ -16,12 +21,24 @@ export function Invoices({ run, onReturn, onCheque, initialId, onInitialViewed }
   const [method, setMethod] = useState('transfer');
   const [paying, setPaying] = useState(false);
   const paymentKey = useRef(crypto.randomUUID());
-  const load = () => api<Invoice[]>(`/merchant/invoices?q=${encodeURIComponent(query)}`).then(setItems);
-  useEffect(() => { void load().catch(() => {}); }, [query]);
-  useEffect(() => { if (initialId) { setPreview(initialId); onInitialViewed?.(); } }, [initialId]);
+  const listUrl = `/merchant/invoices?q=${encodeURIComponent(query)}&field=${field}&page=${page}`;
+  const load = () => api<Invoice[]>(listUrl).then(setItems);
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setLoadError('');
+    setItems([]);
+    void api<Invoice[]>(listUrl)
+      .then(data => { if (active) setItems(data); })
+      .catch(error => { if (active) setLoadError(error instanceof Error ? error.message : 'فهرست فاکتورها دریافت نشد.'); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [query, field, page, reloadKey]);
+  useEffect(() => { if (initialId) { setQuery(''); setField('all'); setPage(1); setPreview(initialId); onInitialViewed?.(); } }, [initialId]);
   return <><div className="page-intro"><h2>فاکتورها و مانده‌ها</h2><p>شماره، نام یا تلفن مشتری را جست‌وجو کنید؛ دریافت وجه و مرجوعی از همین فهرست در دسترس‌اند.</p></div>
-    <section className="card"><div className="card-head"><h2>فهرست فاکتورها</h2><input className="search" value={query} onChange={e => setQuery(e.target.value)} placeholder="شماره، نام یا تلفن" aria-label="جست‌وجوی فاکتور"/></div>
-      {items.length ? <div className="list">{items.map(invoice => <div className="list-row invoice-list-row" key={invoice.id}>
+    <section className="card"><div className="card-head"><h2>فهرست فاکتورها</h2><div className="invoice-search"><select aria-label="نوع جست‌وجوی فاکتور" value={field} onChange={e => { setField(e.target.value); setPage(1); }}><option value="all">همهٔ فیلدها</option><option value="number">شمارهٔ فاکتور</option><option value="customer">نام مشتری</option><option value="phone">تلفن مشتری</option></select><input className="search" value={query} onChange={e => { setQuery(e.target.value); setPage(1); }} placeholder="شماره، نام یا تلفن" aria-label="جست‌وجوی فاکتور"/></div></div>
+      {loadError && <div role="alert" className="field-error">فهرست فاکتورها دریافت نشد: {loadError} <button type="button" onClick={() => setReloadKey(value => value + 1)}>تلاش دوباره</button></div>}
+      {loading && !items.length ? <div className="empty" role="status">در حال دریافت فاکتورها…</div> : items.length ? <div className="list">{items.map(invoice => <div className="list-row invoice-list-row" key={invoice.id}>
         <div className={'status-dot ' + invoice.paymentStatus} aria-hidden="true"/>
         <div><strong>{invoice.paymentStatus === 'proforma' ? 'پیش‌فاکتور' : 'فاکتور'} {invoice.number} · {invoice.customerName}</strong> <PaymentBadge status={invoice.paymentStatus}/><small>{dateFa(invoice.issuedAt)}{invoice.revision > 1 ? ` · نسخهٔ ${invoice.revision}` : ''}</small></div>
         <div className="money"><b>{rial(invoice.totalRial - invoice.returnedRial)}</b><small>{invoice.paymentStatus === 'proforma' ? 'بدون بدهی؛ هنوز فروش قطعی نشده است' : `مانده: ${rial(receivable(invoice))}${refundDue(invoice) > 0 ? ` · بازپرداخت: ${rial(refundDue(invoice))}` : ''}`}</small></div>
@@ -34,7 +51,8 @@ export function Invoices({ run, onReturn, onCheque, initialId, onInitialViewed }
           {invoice.status === 'issued' && invoice.paymentStatus !== 'proforma' && invoice.paymentStatus !== 'cheque' && receivable(invoice) > 0 && <button onClick={() => { paymentKey.current = crypto.randomUUID(); setSelected(invoice); setAmount(''); }}>ثبت دریافت</button>}
           {invoice.customerPhone && <a href={`tel:${invoice.customerPhone.replace(/[^+\d]/g, '')}`}>تماس با مشتری</a>}
         </div>
-      </div>)}</div> : <div className="empty">فاکتوری پیدا نشد.</div>}</section>
+      </div>)}</div> : !loadError && <div className="empty">فاکتوری پیدا نشد.</div>}
+      {!loadError && <div className="price-pager"><button disabled={loading || page === 1} onClick={() => setPage(value => value - 1)}>صفحهٔ قبل</button><span>صفحهٔ {page}</span><button disabled={loading || items.length < 50} onClick={() => setPage(value => value + 1)}>صفحهٔ بعد</button></div>}</section>
     {selected && <div className="modal-backdrop" onClick={() => !paying && setSelected(null)}><div className="modal" role="dialog" aria-modal="true" aria-label="ثبت دریافت" onClick={e => e.stopPropagation()}><h2>دریافت فاکتور {selected.number}</h2><p>ماندهٔ قابل دریافت: {rial(receivable(selected))}</p><label>مبلغ دریافتی (ریال)<RialInput value={amount} onValueChange={setAmount} placeholder="مبلغ دریافتی" required/></label><label>روش دریافت<select value={method} onChange={e => setMethod(e.target.value)}><option value="transfer">واریز بانکی</option><option value="cash">نقد</option><option value="card">کارت‌به‌کارت</option></select></label><div className="form-actions"><button className="primary" disabled={paying || !Number.isSafeInteger(Number(amount)) || Number(amount) < 1 || Number(amount) > receivable(selected)} onClick={() => { if (paying) return; setPaying(true); void run(async () => { await api(`/merchant/invoices/${selected.id}/payments`, 'POST', { idempotencyKey: paymentKey.current, amountRial: Number(amount), method }); paymentKey.current = crypto.randomUUID(); setSelected(null); await load(); }, 'دریافت ثبت شد.').finally(() => setPaying(false)); }}>{paying ? 'در حال ثبت…' : 'ثبت دریافت واقعی'}</button><button disabled={paying} onClick={() => setSelected(null)}>انصراف</button></div></div></div>}
     {preview && <InvoicePreview id={preview} close={() => setPreview(null)}/>}
     {revising && <InvoiceRevisionEditor id={revising} close={() => setRevising(null)} saved={() => { setRevising(null); void load(); }}/>}

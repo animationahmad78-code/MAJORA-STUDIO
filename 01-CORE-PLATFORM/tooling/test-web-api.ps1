@@ -373,6 +373,15 @@ try {
   if (-not $staleQuoteBlocked) { throw 'Stale sale quote was accepted after price change' }
   $issuedDetail = Invoke-RestMethod "$base/api/merchant/invoices/$($invoice.id)" -WebSession $ownerSession
   if ($issuedDetail.lines[0].unitPriceRial -ne 500000) { throw 'Past invoice price snapshot changed' }
+  $invoicePage = Invoke-RestMethod "$base/api/merchant/invoices?page=1" -WebSession $ownerSession
+  $invoiceSearch = Invoke-RestMethod "$base/api/merchant/invoices?q=$($invoice.number)&field=number&page=1" -WebSession $ownerSession
+  $emptyInvoicePage = Invoke-RestMethod "$base/api/merchant/invoices?page=2" -WebSession $ownerSession
+  if (@($invoicePage | Where-Object id -eq $invoice.id).Count -ne 1 -or @($invoiceSearch).Count -ne 1 -or
+      $invoiceSearch[0].id -ne $invoice.id -or @($emptyInvoicePage | Where-Object { $null -ne $_ }).Count -ne 0) {
+    throw "Invoice list search or pagination failed: pageMatches=$(@($invoicePage | Where-Object id -eq $invoice.id).Count), searchCount=$(@($invoiceSearch).Count), searchId=$($invoiceSearch[0].id), expected=$($invoice.id), page2=$(@($emptyInvoicePage | Where-Object { $null -ne $_ }).Count)"
+  }
+  $ordinaryCheque = Invoke-WebRequest "$base/api/merchant/invoices/$($invoice.id)/cheque" -WebSession $ownerSession
+  if ($ordinaryCheque.StatusCode -ne 200 -or ([string]$ordinaryCheque.Content).Trim() -ne 'null') { throw "Ordinary invoice unexpectedly has a cheque: status=$($ordinaryCheque.StatusCode), body=$($ordinaryCheque.Content)" }
   $crossPriceBlocked = $false
   try { $null = PostJson "/merchant/price-batches/$($priceBatch.id)/revert" @{} $otherSession } catch { $crossPriceBlocked = $_.Exception.Response.StatusCode -eq 404 }
   if (-not $crossPriceBlocked) { throw 'Cross-tenant price batch revert was not blocked' }
