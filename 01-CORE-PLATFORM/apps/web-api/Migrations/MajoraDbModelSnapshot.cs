@@ -461,6 +461,10 @@ namespace Majora.WebApi.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("SocialLinksJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<string>("SocialTelegram")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");

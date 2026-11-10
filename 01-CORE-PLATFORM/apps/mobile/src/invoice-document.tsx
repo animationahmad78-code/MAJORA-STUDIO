@@ -1,13 +1,31 @@
 import { formatRial } from '@majora/domain';
 import type { InvoiceReceipt } from '@majora/database';
+import { siInstagram, siTelegram, siWhatsapp, siX } from 'simple-icons';
 import './invoice-document.css';
 
 export type PaperSize = 'a4' | 'a5';
 export type InvoiceBrand = {
   storeName: string; slogan: string; phone: string; address: string; card: string; cardHolder: string;
   note: string; conditions: string[]; socialTelegram: string; socialInstagram: string; socialContact: string;
+  socialLinks?: { platform: string; text: string; enabled: boolean }[];
 };
 type Props = { brand: InvoiceBrand; receipt: InvoiceReceipt; mono: boolean; paper: PaperSize; logo: string; chequePhoto?: string; revisionLabel?: string };
+
+const socialSymbols: Record<string, { label: string; path?: string; short: string }> = {
+  telegram: { label: 'تلگرام', path: siTelegram.path, short: 'ت' },
+  instagram: { label: 'اینستاگرام', path: siInstagram.path, short: 'ا' },
+  whatsapp: { label: 'واتساپ', path: siWhatsapp.path, short: 'و' },
+  bale: { label: 'بله', short: 'ب' }, rubika: { label: 'روبیکا', short: 'ر' },
+  eitaa: { label: 'ایتا', short: 'ای' }, linkedin: { label: 'لینکدین', short: 'in' },
+  x: { label: 'ایکس', path: siX.path, short: 'X' },
+  website: { label: 'وب‌سایت', short: '🌐' }, phone: { label: 'تلفن', short: '☎' }
+};
+
+function SocialIcon({ platform }: { platform: string }) {
+  const symbol = socialSymbols[platform] ?? { label: 'راه ارتباطی', short: '●' };
+  return symbol.path ? <svg className="inv-social-icon" viewBox="0 0 24 24" aria-label={symbol.label} role="img"><path fill="currentColor" d={symbol.path}/></svg>
+    : <span className="inv-social-icon inv-social-letter" aria-label={symbol.label} role="img">{symbol.short}</span>;
+}
 
 export function pageLines<T extends { name: string }>(lines: T[], paper: PaperSize, extraSummaryRows = 0): T[][] {
   // Reserve the bottom of the last sheet for terms, totals and signatures.
@@ -51,6 +69,11 @@ export function InvoiceDocument({ brand, receipt, mono, paper, logo, chequePhoto
   const proforma = receipt.paymentStatus === 'proforma';
   const discount = receipt.discountRial ?? receipt.lines.reduce((sum, line) => sum + (line.discountRial ?? 0), 0);
   const subtotal = receipt.subtotalRial ?? receipt.totalRial + discount;
+  const socialLinks = brand.socialLinks ?? [
+    { platform: 'telegram', text: brand.socialTelegram, enabled: true },
+    { platform: 'instagram', text: brand.socialInstagram, enabled: true },
+    { platform: 'telegram', text: brand.socialContact, enabled: true }
+  ];
   return <div className={`invoice-document ${paper} ${mono ? 'mono' : ''}`} dir="rtl">
     {chunks.map((lines, pageIndex) => {
       const last = pageIndex === chunks.length - 1;
@@ -79,7 +102,7 @@ export function InvoiceDocument({ brand, receipt, mono, paper, logo, chequePhoto
           <div className="inv-summary"><div><span>جمع کل</span><b>{formatRial(subtotal)}</b></div><div><span>تخفیف</span><b>{formatRial(discount)}</b></div><div><span>هزینه ارسال</span><b>{formatRial(receipt.shippingRial ?? 0)}</b></div><div className="inv-grand"><span>مبلغ نهایی</span><b>{formatRial(receipt.totalRial)}</b></div>{returned > 0 && <><div><span>مرجوعی ثبت‌شده</span><b>{formatRial(returned)}</b></div><div><span>خالص پس از مرجوعی</span><b>{formatRial(netTotal)}</b></div></>}<div><span>مبلغ پرداختی</span><b>{formatRial(receipt.paidRial ?? 0)}</b></div>{refunded > 0 && <div><span>بازپرداخت‌شده</span><b>{formatRial(refunded)}</b></div>}<div><span>مانده</span><b>{formatRial(receipt.balanceRial ?? Math.max(0, netTotal - netPaid))}</b></div>{refundDue > 0 && <div><span>بازپرداخت باز</span><b>{formatRial(refundDue)}</b></div>}<div className="inv-sign">امضای خریدار</div><div className="inv-sign">امضای فروشنده</div></div>
           <div className="inv-conditions">{proforma ? <><h3>پیش‌فاکتور</h3><p>این سند پیشنهاد فروش است. کالا تحویل نشده و پرداختی ثبت نشده است. فروش و کسر موجودی پس از تأیید و تبدیل این سند به فاکتور قطعی انجام می‌شود.</p></> : <><h3>شرایط فروش و تحویل کالا</h3><ol>{brand.conditions.map((text, index) => <li key={index}>{text}</li>)}</ol><strong>لطفاً پیش از تأیید سفارش، مشخصات و تعداد کالاها را بررسی فرمایید.</strong><p>با تشکر از اعتماد و همکاری شما.</p></>}</div>
         </div>}
-        <footer className="inv-social"><span>➤ {brand.socialTelegram}</span><span>◎ {brand.socialInstagram}</span><span>➤ {brand.socialContact}</span></footer>
+        <footer className="inv-social">{socialLinks.filter(link => link.enabled && link.text.trim()).slice(0, 4).map((link, index) => <span className="inv-social-entry" key={index}><SocialIcon platform={link.platform}/><b dir="auto">{link.text}</b></span>)}</footer>
       </section>;
     })}
     {annex && receipt.cheque && <section className="invoice-paper inv-cheque-annex" data-invoice-page aria-label={`ضمیمهٔ چک فاکتور ${receipt.number}`}>

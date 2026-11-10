@@ -1,6 +1,5 @@
 import './majora-about.css';
 
-const logo = '/brand/majora-logo.png';
 const benefits = [
   { title: 'خطای کمتر', description: 'کاهش خطاهای انسانی و افزایش دقت', icon: '✓', tone: 'mint' },
   { title: 'سرعت بیشتر', description: 'انجام سریع‌تر کارها و صرفه‌جویی در زمان', icon: 'ϟ', tone: 'blue' },
@@ -11,7 +10,7 @@ const audiences = [
   { title: 'فروشگاهی', icon: '🛒' }, { title: 'شرکتی', icon: '▦' }, { title: 'تولیدی', icon: '▥' },
   { title: 'خدماتی', icon: '♧' }, { title: 'پروژه‌ای', icon: '▤' }
 ];
-export function MajoraAbout({ onBack }: { onBack: () => void }) {
+export function MajoraAbout({ onBack, logo = '/brand/majora-logo.png' }: { onBack: () => void; logo?: string }) {
   return <section className="majora-about" dir="rtl" aria-label="درباره ماژورا">
     <header className="majora-about-head"><h1>درباره ماژورا</h1><button onClick={onBack} aria-label="بازگشت">‹</button></header>
     <div className="majora-about-hero">

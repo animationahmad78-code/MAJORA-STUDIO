@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, dateFa, rial, refundDue, receivable, type Invoice, type InvoiceDetail, type SalesReturn } from './api';
 import { PaymentBadge } from './payment-badge';
+import { RialInput } from './rial-input';
 import './returns.css';
 
 type Selection = { quantity: number; restock: boolean };
@@ -13,7 +14,7 @@ export function Returns({ initialId, onTargetUsed }: { initialId: string | null;
   const [invoice, setInvoice] = useState<InvoiceDetail | null>(null);
   const [selected, setSelected] = useState<Record<string, Selection>>({});
   const [reason, setReason] = useState('');
-  const [refundAmount, setRefundAmount] = useState(0);
+  const [refundAmount, setRefundAmount] = useState('');
   const [refundMethod, setRefundMethod] = useState('transfer');
   const [refundReference, setRefundReference] = useState('');
   const [busy, setBusy] = useState(false);
@@ -36,7 +37,7 @@ export function Returns({ initialId, onTargetUsed }: { initialId: string | null;
     if (!selectedId) { setInvoice(null); return; }
     setSelected({}); setReason('');
     void api<InvoiceDetail>(`/merchant/invoices/${selectedId}`).then(item => {
-      setInvoice(item); setRefundAmount(refundDue(item)); setError('');
+      setInvoice(item); setRefundAmount(String(refundDue(item))); setError('');
     }).catch(e => setError(e.message));
   }, [selectedId]);
 
@@ -58,7 +59,7 @@ export function Returns({ initialId, onTargetUsed }: { initialId: string | null;
       await api(`/merchant/invoices/${invoice.id}/returns`, 'POST', { idempotencyKey: returnKey.current, reason: reason.trim(), lines });
       returnKey.current = crypto.randomUUID();
       const updated = await api<InvoiceDetail>(`/merchant/invoices/${invoice.id}`);
-      setInvoice(updated); setRefundAmount(refundDue(updated)); setSelected({}); setReason('');
+      setInvoice(updated); setRefundAmount(String(refundDue(updated))); setSelected({}); setReason('');
       await refreshLists();
       setNotice('مرجوعی ثبت شد. مانده به‌روزرسانی شد؛ فقط کالاهای انتخاب‌شده برای بازگشت به انبار، موجودی را تغییر دادند.');
     } catch (e) { setError(e instanceof Error ? e.message : 'ثبت مرجوعی انجام نشد.'); }
@@ -66,16 +67,16 @@ export function Returns({ initialId, onTargetUsed }: { initialId: string | null;
   };
   const saveRefund = async () => {
     if (!invoice || due === 0 || busy) return;
-    if (!Number.isSafeInteger(refundAmount) || refundAmount < 1 || refundAmount > due) {
+    if (!Number.isSafeInteger(Number(refundAmount)) || Number(refundAmount) < 1 || Number(refundAmount) > due) {
       setError('مبلغ بازپرداخت باید از صفر بیشتر و حداکثر برابر طلب مشتری باشد.'); return;
     }
     if (!window.confirm('فقط وجهی را ثبت کنید که واقعاً به مشتری بازپرداخت شده است. ادامه می‌دهید؟')) return;
     setBusy(true); setError(''); setNotice('');
     try {
-      await api(`/merchant/invoices/${invoice.id}/refunds`, 'POST', { idempotencyKey: refundKey.current, amountRial: refundAmount, method: refundMethod, reference: refundReference });
+      await api(`/merchant/invoices/${invoice.id}/refunds`, 'POST', { idempotencyKey: refundKey.current, amountRial: Number(refundAmount), method: refundMethod, reference: refundReference });
       refundKey.current = crypto.randomUUID();
       const updated = await api<InvoiceDetail>(`/merchant/invoices/${invoice.id}`);
-      setInvoice(updated); setRefundAmount(refundDue(updated)); setRefundReference('');
+      setInvoice(updated); setRefundAmount(String(refundDue(updated))); setRefundReference('');
       await refreshLists();
       setNotice('بازپرداخت ثبت شد و ماندهٔ مشتری به‌روزرسانی شد.');
     } catch (e) { setError(e instanceof Error ? e.message : 'ثبت بازپرداخت انجام نشد.'); }
@@ -105,7 +106,7 @@ export function Returns({ initialId, onTargetUsed }: { initialId: string | null;
         <label>دلیل مرجوعی<input value={reason} maxLength={500} onChange={e => setReason(e.target.value)} placeholder="مثلاً مغایرت رنگ یا انصراف مشتری"/></label>
         <div className="return-submit"><span>مبلغ این مرجوعی: <strong>{rial(returnTotal)}</strong></span><button className="primary" disabled={busy || !picked.length || !reason.trim()} onClick={() => void saveReturn()}>{busy ? 'در حال ثبت…' : 'ثبت مرجوعی'}</button></div>
       </section>
-      {due > 0 && <section className="card refund-card"><h2>بازپرداخت به مشتری</h2><p>این مبلغ فقط پس از پرداخت واقعی ثبت شود. تا آن زمان در پیگیری‌های باز می‌ماند.</p><div className="form-grid"><label>مبلغ بازپرداخت (ریال)<input type="number" min="1" max={due} value={refundAmount} onChange={e => setRefundAmount(Number(e.target.value))}/></label><label>روش پرداخت<select value={refundMethod} onChange={e => setRefundMethod(e.target.value)}><option value="transfer">واریز بانکی</option><option value="cash">نقد</option><option value="card">کارت‌به‌کارت</option></select></label><label>شماره پیگیری (اختیاری)<input value={refundReference} onChange={e => setRefundReference(e.target.value)}/></label></div><button className="primary" disabled={busy} onClick={() => void saveRefund()}>ثبت وجه بازپرداخت‌شده</button></section>}
+      {due > 0 && <section className="card refund-card"><h2>بازپرداخت به مشتری</h2><p>این مبلغ فقط پس از پرداخت واقعی ثبت شود. تا آن زمان در پیگیری‌های باز می‌ماند.</p><div className="form-grid"><label>مبلغ بازپرداخت (ریال)<RialInput value={refundAmount} onValueChange={setRefundAmount} required/></label><label>روش پرداخت<select value={refundMethod} onChange={e => setRefundMethod(e.target.value)}><option value="transfer">واریز بانکی</option><option value="cash">نقد</option><option value="card">کارت‌به‌کارت</option></select></label><label>شماره پیگیری (اختیاری)<input value={refundReference} onChange={e => setRefundReference(e.target.value)}/></label></div><button className="primary" disabled={busy} onClick={() => void saveRefund()}>ثبت وجه بازپرداخت‌شده</button></section>}
       </> : <div className="card empty">برای ثبت مرجوعی، فاکتور را از فهرست انتخاب کنید.</div>}</div>
     </div>
     <section className="card"><div className="card-head"><h2>سوابق مرجوعی</h2></div>{history.length ? <div className="list">{history.map(item => <div className="list-row" key={item.id}><div><strong>فاکتور {item.invoiceNumber} · {item.customerName}</strong><small>{dateFa(item.createdAt)} · {item.reason}</small></div><b>{rial(item.amountRial)}</b><button onClick={() => setSelectedId(item.invoiceId)}>دیدن فاکتور</button></div>)}</div> : <p className="empty">هنوز مرجوعی ثبت نشده است.</p>}</section>

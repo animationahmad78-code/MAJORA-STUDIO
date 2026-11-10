@@ -4,15 +4,19 @@ using System.Text;
 
 namespace Majora.WebApi;
 
+public sealed record InvoiceSocialLink(string Platform, string Text, bool Enabled);
+
 public sealed record InvoiceBrandView(
     int Revision, string StoreName, string Slogan, string Phone, string Address,
     string Card, string CardHolder, string Note, List<string> Conditions,
-    string SocialTelegram, string SocialInstagram, string SocialContact, string? LogoDataUrl);
+    string SocialTelegram, string SocialInstagram, string SocialContact, string? LogoDataUrl,
+    List<InvoiceSocialLink> SocialLinks);
 
 public sealed record InvoiceBrandUpdate(
     int Revision, string StoreName, string Slogan, string Phone, string Address,
     string Card, string CardHolder, string Note, List<string> Conditions,
-    string SocialTelegram, string SocialInstagram, string SocialContact, string? LogoDataUrl);
+    string SocialTelegram, string SocialInstagram, string SocialContact, string? LogoDataUrl,
+    List<InvoiceSocialLink>? SocialLinks = null);
 
 public static class InvoiceBrand
 {
@@ -41,17 +45,35 @@ public static class InvoiceBrand
         profile.SocialTelegram = "@CLASSICBAG33662880";
         profile.SocialInstagram = "@CLASSIC_STORE_GALLERY";
         profile.SocialContact = "@CLASSIC33662795";
+        profile.SocialLinksJson = JsonSerializer.Serialize(new[] {
+            new InvoiceSocialLink("telegram", profile.SocialTelegram, true),
+            new InvoiceSocialLink("instagram", profile.SocialInstagram, true),
+            new InvoiceSocialLink("telegram", profile.SocialContact, true)
+        }, WebJson);
         var logoPath = webRoot is null ? null : Path.Combine(webRoot, "store-logo-gold.png");
         if (logoPath is not null && File.Exists(logoPath))
             profile.LogoDataUrl = "data:image/png;base64," + Convert.ToBase64String(File.ReadAllBytes(logoPath));
         return profile;
     }
 
-    public static InvoiceBrandView View(InvoiceBrandProfile profile) => new(
-        profile.Revision, profile.StoreName, profile.Slogan, profile.Phone, profile.Address,
-        profile.Card, profile.CardHolder, profile.Note,
-        JsonSerializer.Deserialize<List<string>>(profile.ConditionsJson) ?? [],
-        profile.SocialTelegram, profile.SocialInstagram, profile.SocialContact, profile.LogoDataUrl);
+    public static InvoiceBrandView View(InvoiceBrandProfile profile)
+    {
+        List<InvoiceSocialLink> socialLinks;
+        try { socialLinks = JsonSerializer.Deserialize<List<InvoiceSocialLink>>(profile.SocialLinksJson, WebJson) ?? []; }
+        catch (JsonException) { socialLinks = []; }
+        if (socialLinks.Count == 0 && (profile.SocialTelegram.Length > 0 || profile.SocialInstagram.Length > 0 || profile.SocialContact.Length > 0))
+        {
+            socialLinks = [
+                new("telegram", profile.SocialTelegram, profile.SocialTelegram.Length > 0),
+                new("instagram", profile.SocialInstagram, profile.SocialInstagram.Length > 0),
+                new("telegram", profile.SocialContact, profile.SocialContact.Length > 0)
+            ];
+        }
+        return new(profile.Revision, profile.StoreName, profile.Slogan, profile.Phone, profile.Address,
+            profile.Card, profile.CardHolder, profile.Note,
+            JsonSerializer.Deserialize<List<string>>(profile.ConditionsJson) ?? [],
+            profile.SocialTelegram, profile.SocialInstagram, profile.SocialContact, profile.LogoDataUrl, socialLinks);
+    }
 
     public static string Snapshot(InvoiceBrandProfile profile) => JsonSerializer.Serialize(View(profile), WebJson);
 
@@ -67,10 +89,16 @@ public static class InvoiceBrand
             input.Note, input.SocialTelegram, input.SocialInstagram, input.SocialContact };
         if (fields.Any(x => x is null || x.Length > 1000) || input.Conditions is null || input.Conditions.Count > 12 ||
             input.Conditions.Any(x => x is null || x.Length > 1500)) return "متن فاکتور بیش از حد مجاز است.";
+        if (input.SocialLinks is { Count: > 4 } || input.SocialLinks?.Any(x => x is null ||
+            !AllowedPlatforms.Contains(x.Platform) || x.Text is null || x.Text.Length > 90 ||
+            (x.Enabled && string.IsNullOrWhiteSpace(x.Text))) == true)
+            return "حداکثر چهار راه ارتباطی با نوع و متن معتبر وارد کنید.";
         if (!string.IsNullOrEmpty(input.LogoDataUrl) && !IsValidLogo(input.LogoDataUrl))
             return "لوگو باید PNG، JPEG یا WebP و حداکثر یک مگابایت باشد.";
         return null;
     }
+
+    private static readonly HashSet<string> AllowedPlatforms = ["telegram", "instagram", "whatsapp", "bale", "rubika", "eitaa", "linkedin", "x", "website", "phone"];
 
     private static bool IsValidLogo(string dataUrl)
     {
@@ -100,6 +128,8 @@ public static class InvoiceBrand
         target.Note = input.Note.Trim(); target.ConditionsJson = JsonSerializer.Serialize(input.Conditions.Select(x => x.Trim()));
         target.SocialTelegram = input.SocialTelegram.Trim(); target.SocialInstagram = input.SocialInstagram.Trim();
         target.SocialContact = input.SocialContact.Trim(); target.LogoDataUrl = input.LogoDataUrl;
+        if (input.SocialLinks is not null)
+            target.SocialLinksJson = JsonSerializer.Serialize(input.SocialLinks.Select(x => x with { Text = x.Text.Trim() }), WebJson);
         target.Revision++; target.UpdatedAt = DateTime.UtcNow;
     }
 }

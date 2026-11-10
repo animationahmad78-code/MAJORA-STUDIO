@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { JalaliDateField, isoToJalaliDate, jalaliToIsoDate } from '../../mobile/src/jalali-date';
 import { api, dateFa, rial } from './api';
-import { rialDigits } from './invoice-quote';
 import { InvoicePreview } from './invoice-preview';
+import { RialInput } from './rial-input';
 import './cheques.css';
 
 export type ChequeRecord = {
@@ -24,7 +24,10 @@ export const blankCheque = (party = ''): ChequeDraft => ({ direction: 'received'
 const registrationLabels: Record<Registration, string> = { unknown: 'بررسی‌نشده', unregistered: 'ثبت‌نشده', registered: 'ثبت‌شده به اعلام صادرکننده', confirmed: 'تأییدشده به اعلام گیرنده' };
 const statusLabels: Record<ChequeRecord['status'], string> = { open: 'در انتظار وصول', cleared: 'وصول‌شده', returned: 'برگشتی', cancelled: 'باطل‌شده' };
 const statusLabel = (item: ChequeRecord) => item.direction === 'issued' && item.status === 'open' ? 'در انتظار پرداخت' : item.direction === 'issued' && item.status === 'cleared' ? 'پاس‌شده' : statusLabels[item.status];
-const toDigits = (value: string) => rialDigits(value).slice(0, 16);
+const identifierDigits = (value: string, length: number) => value
+  .replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 1776))
+  .replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 1632))
+  .replace(/\D/g, '').slice(0, length);
 
 export function chequePayload(draft: ChequeDraft, invoiceTotal?: number, existingPhoto = false) {
   const amountRial = Number(draft.amount);
@@ -71,9 +74,9 @@ export function ChequeFields({ draft, setDraft, standalone = false, existingPhot
   };
   return <div className="cheque-fields">
     {standalone && <label>نوع چک<select value={draft.direction} onChange={e => set('direction', e.target.value as ChequeDraft['direction'])}><option value="received">دریافتی</option><option value="issued">پرداختی</option></select></label>}
-    <div className="form-grid"><label>طرف حساب<input value={draft.party} maxLength={200} onChange={e => set('party', e.target.value)}/></label><label>شماره چک<input value={draft.serial} maxLength={80} onChange={e => set('serial', e.target.value)}/></label><label>بانک<input value={draft.bank} maxLength={120} onChange={e => set('bank', e.target.value)}/></label><label>مبلغ چک (ریال)<input inputMode="numeric" dir="ltr" value={draft.amount ? Number(draft.amount).toLocaleString('en-US') : ''} onChange={e => set('amount', toDigits(e.target.value))}/></label></div>
+    <div className="form-grid"><label>طرف حساب<input value={draft.party} maxLength={200} onChange={e => set('party', e.target.value)}/></label><label>شماره چک<input value={draft.serial} maxLength={80} onChange={e => set('serial', e.target.value)}/></label><label>بانک<input value={draft.bank} maxLength={120} onChange={e => set('bank', e.target.value)}/></label><label>مبلغ چک (ریال)<RialInput value={draft.amount} onValueChange={value => set('amount', value)} required/></label></div>
     <JalaliDateField label="سررسید چک (شمسی)" value={draft.due} onChange={value => set('due', value)}/>
-    <div className="form-grid"><label>شناسه صیادی ۱۶ رقمی<input inputMode="numeric" dir="ltr" value={draft.sayadId} onChange={e => set('sayadId', toDigits(e.target.value))} maxLength={16}/></label><label>کد ملی صادرکننده<input inputMode="numeric" dir="ltr" value={draft.issuerNationalId} onChange={e => set('issuerNationalId', toDigits(e.target.value).slice(0, 10))} maxLength={10}/></label><label>کد ملی ذی‌نفع<input inputMode="numeric" dir="ltr" value={draft.beneficiaryNationalId} onChange={e => set('beneficiaryNationalId', toDigits(e.target.value).slice(0, 10))} maxLength={10}/></label><label>وضعیت ثبت، طبق اعلام کاربر<select value={draft.registrationStatus} onChange={e => set('registrationStatus', e.target.value as Registration)}>{Object.entries(registrationLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label></div>
+    <div className="form-grid"><label>شناسه صیادی ۱۶ رقمی<input inputMode="numeric" dir="ltr" value={draft.sayadId} onChange={e => set('sayadId', identifierDigits(e.target.value, 16))} maxLength={16}/></label><label>کد ملی صادرکننده<input inputMode="numeric" dir="ltr" value={draft.issuerNationalId} onChange={e => set('issuerNationalId', identifierDigits(e.target.value, 10))} maxLength={10}/></label><label>کد ملی ذی‌نفع<input inputMode="numeric" dir="ltr" value={draft.beneficiaryNationalId} onChange={e => set('beneficiaryNationalId', identifierDigits(e.target.value, 10))} maxLength={10}/></label><label>وضعیت ثبت، طبق اعلام کاربر<select value={draft.registrationStatus} onChange={e => set('registrationStatus', e.target.value as Registration)}>{Object.entries(registrationLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label></div>
     <label>یادداشت<input value={draft.note} maxLength={500} onChange={e => set('note', e.target.value)}/></label>
     <div className="cheque-photo-inputs"><label>انتخاب تصویر چک<input type="file" accept="image/jpeg,image/png,image/webp" onChange={e => selectPhoto(e.target.files?.[0])}/></label><label>عکاسی با دوربین<input type="file" accept="image/*" capture="environment" onChange={e => selectPhoto(e.target.files?.[0])}/></label></div>
     {draft.photoDataUrl ? <img className="cheque-photo-preview" src={draft.photoDataUrl} alt="پیش‌نمایش تصویر چک"/> : existingPhoto ? <p className="hint">تصویر قبلی در پرونده محفوظ است.</p> : null}
@@ -82,8 +85,14 @@ export function ChequeFields({ draft, setDraft, standalone = false, existingPhot
   </div>;
 }
 
-export function Cheques() {
-  const [items, setItems] = useState<ChequeRecord[]>([]); const [query, setQuery] = useState(''); const [filter, setFilter] = useState('all');
+function ChequeCorrection({ item, busy, apply }: { item: ChequeRecord; busy: boolean; apply: (item: ChequeRecord, status: ChequeRecord['status'], reason: string) => Promise<void> }) {
+  const [status, setStatus] = useState<ChequeRecord['status']>('open');
+  const [reason, setReason] = useState('');
+  return <details className="cheque-correction"><summary>اصلاح وضعیت ثبت‌شده</summary><label>وضعیت درست<select value={status} onChange={e => setStatus(e.target.value as ChequeRecord['status'])}>{Object.entries(statusLabels).filter(([value]) => value !== item.status).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>دلیل اصلاح<input value={reason} onChange={e => setReason(e.target.value)} maxLength={500} required placeholder="مثلاً اعلام اشتباه وصول" /></label><button type="button" disabled={busy || !reason.trim()} onClick={() => void apply(item, status, reason)}>ثبت اصلاح با سابقه</button></details>;
+}
+
+export function Cheques({ initialQuery = '' }: { initialQuery?: string }) {
+  const [items, setItems] = useState<ChequeRecord[]>([]); const [query, setQuery] = useState(initialQuery); const [filter, setFilter] = useState('all');
   const [directionFilter, setDirectionFilter] = useState('all');
   const [draft, setDraft] = useState<ChequeDraft>(blankCheque); const [editing, setEditing] = useState<ChequeRecord | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -93,6 +102,7 @@ export function Cheques() {
   const [overview, setOverview] = useState<{ groups: { direction: string; status: string; count: number; amountRial: number }[]; overdueReceivedCount: number; overdueIssuedCount: number } | null>(null);
   const load = async () => { const [records, totals] = await Promise.all([api<ChequeRecord[]>(`/merchant/accounting/cheques?q=${encodeURIComponent(query)}&status=${filter}&direction=${directionFilter}`), api<NonNullable<typeof overview>>('/merchant/accounting/cheques/overview')]); setItems(records); setOverview(totals); };
   useEffect(() => { void load().catch(e => setError(e instanceof Error ? e.message : 'چک‌ها دریافت نشدند.')); }, [query, filter, directionFilter]);
+  useEffect(() => { if (initialQuery) { setQuery(initialQuery); setFilter('all'); setDirectionFilter('all'); } }, [initialQuery]);
   useEffect(() => { if (showForm) formRef.current?.scrollIntoView({ block: 'start' }); }, [showForm, editing?.id]);
   const edit = (item: ChequeRecord) => { setEditing(item); setShowForm(true); setDraft({ direction: item.direction, party: item.party, serial: item.serial, bank: item.bank, amount: String(item.amountRial),
     due: isoToJalaliDate(item.dueAt), sayadId: item.sayadId, issuerNationalId: item.issuerNationalId,
@@ -104,9 +114,9 @@ export function Cheques() {
     else await api('/merchant/accounting/cheques', 'POST', payload);
     setEditing(null); setShowForm(false); setDraft(blankCheque()); await load(); setNotice('پروندهٔ چک ذخیره شد.');
   } catch (e) { setError(e instanceof Error ? e.message : 'ثبت چک انجام نشد.'); } finally { setBusy(false); } };
-  const mark = async (item: ChequeRecord, status: ChequeRecord['status']) => {
+  const mark = async (item: ChequeRecord, status: ChequeRecord['status'], reason = '') => {
     if (busy || !window.confirm(status === 'cleared' ? item.direction === 'received' ? `وصول واقعی چک ${item.serial} تأیید و وجه آن در فاکتور ثبت شود؟` : `پرداخت واقعی چک ${item.serial} را تأیید می‌کنید؟ این پروندهٔ مستقل هنوز به خرید یا دفترکل متصل نیست.` : `وضعیت چک ${item.serial} به «${statusLabels[status]}» تغییر کند؟`)) return;
-    setBusy(true); setError(''); setNotice(''); try { await api(`/merchant/accounting/cheques/${item.id}/status`, 'POST', { status }); await load(); setNotice('وضعیت چک ثبت شد.'); }
+    setBusy(true); setError(''); setNotice(''); try { await api(`/merchant/accounting/cheques/${item.id}/status`, 'POST', { status, reason }); await load(); setNotice('وضعیت چک ثبت شد.'); }
     catch (e) { setError(e instanceof Error ? e.message : 'تغییر وضعیت انجام نشد.'); } finally { setBusy(false); }
   };
   const groupAmount = (direction: ChequeRecord['direction'], status: ChequeRecord['status']) => overview?.groups.find(item => item.direction === direction && item.status === status)?.amountRial ?? 0;
@@ -119,7 +129,7 @@ export function Cheques() {
       { direction: 'issued', status: 'cleared', label: 'پرداختی پاس‌شده', overdue: 0 }
     ] as const).map(group => <button key={`${group.direction}-${group.status}`} className={`cheque-${group.status}`} onClick={() => { setDirectionFilter(group.direction); setFilter(group.status); }}><small>{group.label}{group.overdue ? ` · ${group.overdue} سررسیده` : ''}</small><strong>{rial(groupAmount(group.direction, group.status))}</strong></button>)}</div>
     <section className="card"><div className="card-head"><h2>فهرست چک‌ها</h2><div className="cheque-search"><input type="search" value={query} onChange={e => setQuery(e.target.value)} placeholder="نام، شماره چک، بانک، شناسه"/><select aria-label="نوع چک" value={directionFilter} onChange={e => setDirectionFilter(e.target.value)}><option value="all">هر دو نوع</option><option value="received">دریافتی</option><option value="issued">پرداختی</option></select><select aria-label="وضعیت چک" value={filter} onChange={e => setFilter(e.target.value)}><option value="all">همهٔ وضعیت‌ها</option>{Object.entries(statusLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><button className="primary" onClick={() => { setEditing(null); setDraft(blankCheque()); setShowForm(true); }}>＋ چک تازه</button></div></div>
-      {items.length ? <div className="cheque-list">{items.map(item => <article key={item.id} className={`cheque-row cheque-${item.status}`}><div><strong>{item.party} · {item.serial}</strong><small>{item.direction === 'received' ? 'دریافتی' : 'پرداختی'} · {item.bank} · سررسید {dateFa(item.dueAt)}</small><small>صیاد: {item.sayadId || 'وارد نشده'} · {registrationLabels[item.registrationStatus]}</small></div><div className="cheque-row-total"><b>{rial(item.amountRial)}</b><span>{statusLabel(item)}</span></div><div className="cheque-row-actions">{item.invoiceId && <button onClick={() => setPreview(item.invoiceId!)}>فاکتور {item.invoiceNumber}</button>}{item.hasPhoto && <a href={`/api/merchant/accounting/cheques/${item.id}/photo`} target="_blank" rel="noreferrer">تصویر چک</a>}{item.status === 'open' && <><button onClick={() => edit(item)}>ویرایش</button><button disabled={busy} onClick={() => void mark(item, 'cleared')}>{item.direction === 'received' ? 'وصول شد' : 'پاس شد'}</button><button disabled={busy} onClick={() => void mark(item, 'returned')}>برگشتی</button><button disabled={busy} onClick={() => void mark(item, 'cancelled')}>باطل</button></>}</div></article>)}</div> : <div className="empty">پرونده‌ای با این فیلتر پیدا نشد.</div>}
+      {items.length ? <div className="cheque-list">{items.map(item => <article key={item.id} className={`cheque-row cheque-${item.status}`}><div><strong>{item.party} · {item.serial}</strong><small>{item.direction === 'received' ? 'دریافتی' : 'پرداختی'} · {item.bank} · سررسید {dateFa(item.dueAt)}</small><small>صیاد: {item.sayadId || 'وارد نشده'} · {registrationLabels[item.registrationStatus]}</small></div><div className="cheque-row-total"><b>{rial(item.amountRial)}</b><span>{statusLabel(item)}</span></div><div className="cheque-row-actions">{item.invoiceId && <button onClick={() => setPreview(item.invoiceId!)}>فاکتور {item.invoiceNumber}</button>}{item.hasPhoto && <a href={`/api/merchant/accounting/cheques/${item.id}/photo`} target="_blank" rel="noreferrer">تصویر چک</a>}{item.status === 'open' ? <><button onClick={() => edit(item)}>ویرایش</button><button disabled={busy} onClick={() => void mark(item, 'cleared')}>{item.direction === 'received' ? 'وصول شد' : 'پاس شد'}</button><button disabled={busy} onClick={() => void mark(item, 'returned')}>برگشتی</button><button disabled={busy} onClick={() => void mark(item, 'cancelled')}>باطل</button></> : <ChequeCorrection item={item} busy={busy} apply={mark}/>}</div></article>)}</div> : <div className="empty">پرونده‌ای با این فیلتر پیدا نشد.</div>}
     </section>{preview && <InvoicePreview id={preview} close={() => setPreview(null)}/>}
     {showForm && <section ref={formRef} className="card"><div className="card-head"><h2>{editing ? `ویرایش چک ${editing.serial}` : 'ثبت چک مستقل'}</h2><button onClick={() => { setEditing(null); setDraft(blankCheque()); setShowForm(false); }}>بستن فرم</button></div><ChequeFields draft={draft} setDraft={setDraft} standalone={!editing?.invoiceId} existingPhoto={!!editing?.hasPhoto}/><button className="primary" disabled={busy} onClick={() => void save()}>{busy ? 'در حال ذخیره…' : editing ? 'ذخیره تغییرات چک' : 'ثبت چک'}</button></section>}
   </>;

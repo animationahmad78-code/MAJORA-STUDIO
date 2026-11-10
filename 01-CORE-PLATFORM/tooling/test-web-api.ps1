@@ -97,9 +97,25 @@ try {
   if ($advisorFallback.source -ne 'rules') { throw 'Disabled AI provider did not use local fallback' }
   $brand = Invoke-RestMethod "$base/api/merchant/invoice-brand" -WebSession $ownerSession
   if ($brand.storeName -ne 'کیف و کمربند کلاسیک' -or @($brand.conditions).Count -ne 6 -or -not $brand.logoDataUrl.StartsWith('data:image/png;base64,')) { throw 'Classic invoice brand preset missing' }
+  $brand.phone = '051-33662794 | 0910-500-3669'
+  $brand.socialLinks = @(
+    @{platform='telegram';text='@CLASSICBAG33662880';enabled=$true},
+    @{platform='instagram';text='@CLASSIC_STORE_GALLERY';enabled=$true},
+    @{platform='website';text='classic.example.ir';enabled=$true},
+    @{platform='phone';text='0910-500-3669';enabled=$false}
+  )
+  $brand = PutJson '/merchant/invoice-brand' $brand $ownerSession
+  if ($brand.phone -ne '051-33662794 | 0910-500-3669' -or @($brand.socialLinks).Count -ne 4 -or $brand.socialLinks[2].platform -ne 'website') { throw 'Merchant could not edit invoice contact details' }
+  $tooManySocial = $brand | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+  $tooManySocial.socialLinks = @($tooManySocial.socialLinks) + @(@{platform='x';text='@example';enabled=$true})
+  $socialLimitBlocked = $false
+  try { $null = PutJson '/merchant/invoice-brand' $tooManySocial $ownerSession } catch { $socialLimitBlocked = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $socialLimitBlocked) { throw 'Invoice footer accepted more than four links' }
+  $brand.storeName = 'نام غیرمجاز'
   $merchantBrandBlocked = $false
   try { $null = PutJson '/merchant/invoice-brand' $brand $ownerSession } catch { $merchantBrandBlocked = $_.Exception.Response.StatusCode -eq 403 }
   if (-not $merchantBrandBlocked) { throw 'Merchant changed canonical invoice brand' }
+  $brand.storeName = 'کیف و کمربند کلاسیک'
   $brand.slogan = 'نسخهٔ اول آزمون'
   $brand = PutJson "/admin/tenants/$($tenant.id)/invoice-brand" @{brand=$brand;reason='آزمون تغییر هویت'} $adminSession
   $brandRead = Invoke-RestMethod "$base/api/merchant/invoice-brand" -WebSession $ownerSession
@@ -115,14 +131,24 @@ try {
   $photoResponse = Invoke-WebRequest "$base/api/merchant/products/$($product.id)/photo" -WebSession $ownerSession
   if (-not $photoSaved.hasPhoto -or $photoResponse.Headers['Content-Type'] -notlike 'image/png*' -or $photoResponse.RawContentLength -lt 50) { throw 'Product photo save/read failed' }
   $customer = PostJson '/merchant/customers' @{name='مشتری آزمون';phone='09120000000';address='مشهد';occupation='فروشنده';acquisitionSource='معرفی';referrerPhone='09121111111';notes='مشتری وفادار'} $ownerSession
+  $badPhoneBlocked = $false
+  try { $null = PostJson '/merchant/customers' @{name='شماره اشتباه';phone='0912000000'} $ownerSession } catch { $badPhoneBlocked = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $badPhoneBlocked) { throw 'Short customer phone was accepted' }
+  $persianPhoneCustomer = PutJson "/merchant/customers/$($customer.id)" @{name='مشتری آزمون';phone='۰۹۱۲-۰۰۰-۰۰۰۰';address='مشهد';occupation='فروشنده';acquisitionSource='معرفی';referrerPhone='09121111111';notes='مشتری وفادار'} $ownerSession
+  if ($persianPhoneCustomer.phone -ne '09120000000') { throw 'Persian phone was not normalized' }
   if ($customer.address -ne 'مشهد' -or $customer.acquisitionSource -ne 'معرفی') { throw 'Optional customer profile was not stored' }
   $invoiceBody = @{idempotencyKey="invoice-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='partial';paidRial=200000;lines=@(@{productId=$product.id;quantity=2})}
   $invoice = PostJson '/merchant/invoices' $invoiceBody $ownerSession
+  $noCheque = Invoke-WebRequest "$base/api/merchant/invoices/$($invoice.id)/cheque" -WebSession $ownerSession
+  if ($noCheque.StatusCode -ne 200 -or $noCheque.Content -ne 'null') { throw 'Non-cheque invoice returned unexpected cheque data' }
   $customerStatuses = Invoke-RestMethod "$base/api/merchant/customers/with-status" -WebSession $ownerSession
   $customerWithStatus = $customerStatuses | Where-Object id -eq $customer.id | Select-Object -First 1
   if ($customerWithStatus.status -ne 'receivable' -or $customerWithStatus.receivableRial -ne 800000) { throw 'Customer payment badge disagrees with invoice receivable' }
   $updatedCustomer = PutJson "/merchant/customers/$($customer.id)" @{name='مشتری آزمون';phone='09120000000';address='تهران';occupation='فروشنده';acquisitionSource='معرفی';referrerPhone='09121111111';notes='به‌روز'} $ownerSession
   if ($updatedCustomer.address -ne 'تهران') { throw 'Customer profile update failed' }
+  $reminder = PostJson '/merchant/reminders' @{title='تماس با مشتری';dueAt=[datetime]::UtcNow.AddDays(2).ToString('o')} $ownerSession
+  $editedReminder = PutJson "/merchant/reminders/$($reminder.id)" @{title='پیگیری پرداخت مشتری';dueAt=[datetime]::UtcNow.AddDays(3).ToString('o')} $ownerSession
+  if ($editedReminder.title -ne 'پیگیری پرداخت مشتری') { throw 'Reminder could not be edited' }
   if ($invoice.number -ne 1 -or $invoice.totalRial -ne 1000000) { throw 'Invoice total/number mismatch' }
   $brand.storeName = 'نام جدید فروشگاه'
   $brand = PutJson "/admin/tenants/$($tenant.id)/invoice-brand" @{brand=$brand;reason='آزمون ثبات برند فاکتور قبلی'} $adminSession
@@ -222,6 +248,8 @@ try {
   $chequeDetails = @{direction='received';party='مشتری آزمون';serial='CHK-100';bank='بانک آزمون';amountRial=600000;dueAt=[datetime]::UtcNow.AddDays(5).ToString('o');sayadId='1234567890123456';issuerNationalId='';beneficiaryNationalId='';registrationStatus='unknown';note='آزمون چک';showDetails=$true;showImage=$true;photoDataUrl=$png}
   $chequeInvoiceBody = @{idempotencyKey="cheque-invoice-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='cheque';paidRial=0;lines=@(@{productId=$null;name='قلم چکی';unitPriceRial=1000000;quantity=1});cheque=$chequeDetails}
   $chequeInvoice = PostJson '/merchant/invoices' $chequeInvoiceBody $ownerSession
+  $chequeForPreview = Invoke-RestMethod "$base/api/merchant/invoices/$($chequeInvoice.id)/cheque" -WebSession $ownerSession
+  if ($chequeForPreview.serial -ne 'CHK-100') { throw 'Cheque details for invoice preview failed' }
   $chequeInvoiceAgain = PostJson '/merchant/invoices' $chequeInvoiceBody $ownerSession
   if ($chequeInvoiceAgain.id -ne $chequeInvoice.id) { throw 'Cheque invoice idempotency failed' }
   $chequeList = Invoke-RestMethod "$base/api/merchant/accounting/cheques" -WebSession $ownerSession
@@ -247,6 +275,15 @@ try {
   $doubleClearingBlocked = $false
   try { $null = PostJson "/merchant/accounting/cheques/$($linkedCheque.id)/status" @{status='cleared'} $ownerSession } catch { $doubleClearingBlocked = $_.Exception.Response.StatusCode -eq 409 }
   if (-not $doubleClearingBlocked) { throw 'Cheque cleared twice' }
+  $missingCorrectionReasonBlocked = $false
+  try { $null = PostJson "/merchant/accounting/cheques/$($linkedCheque.id)/status" @{status='open'} $ownerSession } catch { $missingCorrectionReasonBlocked = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $missingCorrectionReasonBlocked) { throw 'Cheque status correction accepted without reason' }
+  $null = PostJson "/merchant/accounting/cheques/$($linkedCheque.id)/status" @{status='open';reason='اصلاح ثبت اشتباه وصول'} $ownerSession
+  $reopenedInvoice = Invoke-RestMethod "$base/api/merchant/invoices/$($chequeInvoice.id)" -WebSession $ownerSession
+  if ($reopenedInvoice.paidRial -ne 0) { throw 'Reopening cleared cheque did not reverse invoice payment' }
+  $null = PostJson "/merchant/accounting/cheques/$($linkedCheque.id)/status" @{status='cleared'} $ownerSession
+  $reclearedInvoice = Invoke-RestMethod "$base/api/merchant/invoices/$($chequeInvoice.id)" -WebSession $ownerSession
+  if ($reclearedInvoice.paidRial -ne 600000) { throw 'Cheque could not be cleared after correction' }
   $returnedCheque = PostJson '/merchant/invoices' @{idempotencyKey="cheque-returned-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='cheque';paidRial=0;lines=@(@{productId=$null;name='قلم چکی دوم';unitPriceRial=200000;quantity=1});cheque=@{direction='received';party='مشتری آزمون';serial='CHK-200';bank='بانک آزمون';amountRial=200000;dueAt=[datetime]::UtcNow.AddDays(7).ToString('o');registrationStatus='unknown'}} $ownerSession
   $allCheques = Invoke-RestMethod "$base/api/merchant/accounting/cheques" -WebSession $ownerSession
   $returnedRecord = @($allCheques | Where-Object { $_.invoiceId -eq $returnedCheque.id })[0]
@@ -433,8 +470,12 @@ try {
       @($adminUsers | Where-Object username -eq "staff_$id").Count -ne 1) { throw 'Admin user list and overview disagree' }
   $staffActivity = Invoke-RestMethod "$base/api/merchant/activity" -WebSession $ownerSession
   if (@($staffActivity | Where-Object action -eq 'invoice.issue').Count -lt 1) { throw 'Owner activity history omitted invoice' }
+  $searchedActivity = Invoke-RestMethod "$base/api/merchant/activity?q=invoice.issue" -WebSession $ownerSession
+  if (@($searchedActivity).Count -lt 1 -or @($searchedActivity | Where-Object action -ne 'invoice.issue').Count -gt 0) { throw 'Owner activity search did not filter across history' }
   $adminActivity = Invoke-RestMethod "$base/api/admin/activity?tenantId=$($tenant.id)" -WebSession $adminSession
   if (@($adminActivity | Where-Object action -eq 'invoice.issue').Count -lt 1) { throw 'Admin activity history omitted tenant invoice' }
+  $adminSearch = Invoke-RestMethod "$base/api/admin/activity?tenantId=$($tenant.id)&q=invoice.issue" -WebSession $adminSession
+  if (@($adminSearch).Count -lt 1 -or @($adminSearch | Where-Object action -ne 'invoice.issue').Count -gt 0) { throw 'Admin activity search did not filter within tenant' }
   $activityDenied = $false
   try { $null = Invoke-RestMethod "$base/api/merchant/activity" -WebSession $staffSession } catch { $activityDenied = $_.Exception.Response.StatusCode -eq 403 }
   if (-not $activityDenied) { throw 'Staff could read owner activity history' }
@@ -487,6 +528,30 @@ try {
   if ($newPurchase.totalRial -ne 240000) { throw 'Purchase with a new product has wrong total' }
   $createdStock = Invoke-RestMethod "$base/api/merchant/products?q=$newSku" -WebSession $ownerSession
   if (@($createdStock).Count -ne 1 -or $createdStock[0].stock -ne 2 -or $createdStock[0].priceRial -ne 180000) { throw 'New product was not registered and stocked atomically' }
+  $categoryProducts = Invoke-RestMethod "$base/api/merchant/products?category=$([uri]::EscapeDataString('کیف'))" -WebSession $ownerSession
+  if (@($categoryProducts | Where-Object id -eq $createdStock[0].id).Count -ne 1) { throw 'Parent category did not include nested products' }
+  $chosenPurchaseDate = [datetime]::UtcNow.AddDays(-2).ToString('o')
+  $deferredPurchase = PostJson '/merchant/accounting/purchases' @{idempotencyKey="deferred-stock-$id";supplierName='تأمین‌کنندهٔ دوم';supplierInvoiceNumber='N-2';paidRial=0;purchasedAt=$chosenPurchaseDate;lines=@(@{productId=$createdStock[0].id;quantity=4;stockQuantity=0;unitCostRial=100000})} $ownerSession
+  $afterDeferred = Invoke-RestMethod "$base/api/merchant/products?q=$newSku" -WebSession $ownerSession
+  if ($deferredPurchase.totalRial -ne 400000 -or $afterDeferred[0].stock -ne 2) { throw 'Deferred purchase incorrectly changed inventory' }
+  $purchaseList = Invoke-RestMethod "$base/api/merchant/accounting/purchases" -WebSession $ownerSession
+  $datedPurchase = @($purchaseList | Where-Object id -eq $deferredPurchase.id)[0]
+  $storedUtc = [datetime]::SpecifyKind([datetime]$datedPurchase.purchasedAt, [DateTimeKind]::Utc)
+  if ([math]::Abs(($storedUtc - [DateTimeOffset]::Parse($chosenPurchaseDate).UtcDateTime).TotalSeconds) -gt 1) { throw "Manual purchase date was not preserved: expected $chosenPurchaseDate, got $($datedPurchase.purchasedAt)" }
+  $invalidStockBlocked = $false
+  try { $null = PostJson '/merchant/accounting/purchases' @{idempotencyKey="invalid-stock-$id";supplierName='نامعتبر';paidRial=0;lines=@(@{productId=$createdStock[0].id;quantity=2;stockQuantity=3;unitCostRial=100000})} $ownerSession } catch { $invalidStockBlocked = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $invalidStockBlocked) { throw 'Purchase accepted more received stock than purchased quantity' }
+  $quickPriceProduct = PutJson "/merchant/products/$($createdStock[0].id)/price" @{expectedPriceRial=180000;newPriceRial=190000} $ownerSession
+  if ($quickPriceProduct.priceRial -ne 190000 -or $quickPriceProduct.stock -ne 2) { throw 'Quick price edit changed inventory or failed' }
+  $staleQuickPriceBlocked = $false
+  try { $null = PutJson "/merchant/products/$($createdStock[0].id)/price" @{expectedPriceRial=180000;newPriceRial=200000} $ownerSession } catch { $staleQuickPriceBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $staleQuickPriceBlocked) { throw 'Stale quick price edit overwrote current price' }
+  $searchOwn = Invoke-RestMethod "$base/api/merchant/search?q=$([uri]::EscapeDataString($newSku))" -WebSession $ownerSession
+  $searchOther = Invoke-RestMethod "$base/api/merchant/search?q=$([uri]::EscapeDataString($newSku))" -WebSession $otherSession
+  if (@($searchOwn | Where-Object id -eq $createdStock[0].id).Count -ne 1 -or @($searchOther).Count -ne 0) { throw 'Global search did not isolate tenant data' }
+  $expense = PostJson '/merchant/accounting/expenses' @{category='حمل';description='ارسال اولیه';amountRial=50000;incurredAt=$chosenPurchaseDate} $ownerSession
+  $expenseUpdated = PutJson "/merchant/accounting/expenses/$($expense.id)" @{category='حمل';description='ارسال اصلاح‌شده';amountRial=60000;incurredAt=$chosenPurchaseDate;reason='اصلاح مبلغ سند'} $ownerSession
+  if ($expenseUpdated.amountRial -ne 60000 -or $expenseUpdated.description -ne 'ارسال اصلاح‌شده') { throw 'Expense correction failed' }
   $replacementPassword = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(20))
   $null = PostJson "/admin/users/$($staff.id)/reset-password" @{newPassword=$replacementPassword} $adminSession
   $oldStaffSessionValid = $true

@@ -2,13 +2,14 @@ import { useEffect, useState } from 'react';
 import { JalaliDateField, isoToJalaliDate, jalaliToIsoDate } from '../../mobile/src/jalali-date';
 import { api, rial, type InvoiceDetail, type Product } from './api';
 import { rialDigits } from './invoice-quote';
+import { RialInput } from './rial-input';
+import { normalizedIranPhone } from './phone';
 import { InvoicePreview, type InvoiceRecord } from './invoice-preview';
 import './invoice-revision.css';
 
 type EditLine = { key: string; lineId: string | null; productId: string | null; name: string; price: string; quantity: string; discount: string };
 type Revision = { revisionNo: number; reason: string; recordedAt: string; snapshotJson: string };
 
-const asRial = (value: string) => value ? Number(value).toLocaleString('en-US') : '';
 
 export function InvoiceRevisionEditor({ id, close, saved }: { id: string; close: () => void; saved: () => void }) {
   const [invoice, setInvoice] = useState<InvoiceDetail | null>(null);
@@ -30,7 +31,7 @@ export function InvoiceRevisionEditor({ id, close, saved }: { id: string; close:
       setDate(isoToJalaliDate(current.issuedAt));
       setLines(current.lines.map(line => ({ key: line.id, lineId: line.id, productId: line.productId ?? null,
         name: line.nameSnapshot, price: String(line.unitPriceRial), quantity: String(line.quantity),
-        discount: String(line.unitPriceRial * line.quantity - line.totalRial) })));
+        discount: line.unitPriceRial * line.quantity === line.totalRial ? '' : String(line.unitPriceRial * line.quantity - line.totalRial) })));
     }).catch(e => setError(e instanceof Error ? e.message : 'فاکتور دریافت نشد.'));
   }, [id]);
   useEffect(() => {
@@ -44,8 +45,8 @@ export function InvoiceRevisionEditor({ id, close, saved }: { id: string; close:
   const edit = (key: string, part: keyof EditLine, value: string) => setLines(previous => previous.map(line => line.key === key ? { ...line, [part]: value } : line));
   const totals = lines.map(line => Number(line.price) * Number(line.quantity) - Number(line.discount));
   const total = totals.reduce((sum, value) => sum + value, 0);
-  const valid = !!invoice && !!name.trim() && !!reason.trim() && !!jalaliToIsoDate(date) && lines.length > 0 &&
-    lines.every((line, index) => line.name.trim() && Number.isSafeInteger(Number(line.price)) && Number(line.price) >= 0 &&
+  const valid = !!invoice && !!name.trim() && !!reason.trim() && !!jalaliToIsoDate(date) && normalizedIranPhone(phone) !== null && lines.length > 0 &&
+    lines.every((line, index) => line.name.trim() && line.price !== '' && Number.isSafeInteger(Number(line.price)) && Number(line.price) >= 0 &&
       Number.isSafeInteger(Number(line.quantity)) && Number(line.quantity) >= 1 && Number.isSafeInteger(Number(line.discount)) &&
       Number(line.discount) >= 0 && Number.isSafeInteger(totals[index]) && totals[index] >= 0) &&
     Number.isSafeInteger(total) && total >= invoice.paidRial - invoice.refundedRial;
@@ -70,13 +71,13 @@ export function InvoiceRevisionEditor({ id, close, saved }: { id: string; close:
       <div className="invoice-revision-head"><div><h2>ویرایش فاکتور {invoice?.number ?? ''}</h2><small>نسخهٔ {invoice?.revision ?? '…'} · شماره و نسخه‌های پیشین حفظ می‌شوند</small></div><button onClick={close} disabled={busy} aria-label="بستن ویرایش">بستن</button></div>
       {error && <div className="field-error" role="alert">{error}</div>}
       {invoice ? <div className="invoice-revision-body">
-        <div className="invoice-revision-fields"><label>نام مشتری<input value={name} maxLength={200} onChange={e => setName(e.target.value)}/></label><label>شماره تماس<input value={phone} maxLength={30} inputMode="tel" onChange={e => setPhone(e.target.value)}/></label></div>
+        <div className="invoice-revision-fields"><label>نام مشتری<input value={name} maxLength={200} onChange={e => setName(e.target.value)}/></label><label>شماره تماس<input value={phone} maxLength={30} inputMode="tel" onChange={e => setPhone(e.target.value)} aria-invalid={normalizedIranPhone(phone) === null}/>{normalizedIranPhone(phone) === null && <small className="field-error">شماره تماس باید ۱۱ رقمی باشد.</small>}</label></div>
         <JalaliDateField label="تاریخ فاکتور به شمسی" value={date} onChange={setDate}/>
         <p className="hint">تعداد و قیمت را می‌توانید اصلاح کنید. موجودی کالا و ماندهٔ فاکتور هنگام ثبت دوباره بررسی می‌شوند. فاکتور دارای مرجوعی از این مسیر تغییر نمی‌کند.</p>
         <div className="invoice-revision-lines">{lines.map((line, index) => <div className="invoice-revision-line" key={line.key}>
           <div className="invoice-revision-line-title"><b>ردیف {index + 1}</b><button onClick={() => setLines(previous => previous.filter(item => item.key !== line.key))} disabled={busy || lines.length === 1}>حذف ردیف</button></div>
           <label>شرح کالا<input value={line.name} maxLength={300} onChange={e => edit(line.key, 'name', e.target.value)}/></label>
-          <div className="invoice-revision-fields"><label>تعداد<input value={line.quantity} inputMode="numeric" onChange={e => edit(line.key, 'quantity', rialDigits(e.target.value))}/></label><label>قیمت واحد (ریال)<input value={asRial(line.price)} inputMode="numeric" dir="ltr" onChange={e => edit(line.key, 'price', rialDigits(e.target.value))}/></label><label>تخفیف ردیف (ریال)<input value={asRial(line.discount)} inputMode="numeric" dir="ltr" onChange={e => edit(line.key, 'discount', rialDigits(e.target.value))}/></label></div>
+          <div className="invoice-revision-fields"><label>تعداد<input value={line.quantity} inputMode="numeric" onChange={e => edit(line.key, 'quantity', rialDigits(e.target.value))}/></label><label>قیمت واحد (ریال)<RialInput value={line.price} onValueChange={value => edit(line.key, 'price', value)}/></label><label>تخفیف ردیف (ریال)<RialInput value={line.discount} onValueChange={value => edit(line.key, 'discount', value)}/></label></div>
           <small>جمع ردیف: {Number.isSafeInteger(totals[index]) && totals[index] >= 0 ? rial(totals[index]) : 'نامعتبر'}</small>
         </div>)}</div>
         <div className="invoice-revision-catalog">
@@ -87,10 +88,10 @@ export function InvoiceRevisionEditor({ id, close, saved }: { id: string; close:
               return <div key={product.id}><span><b>{product.name}</b><small>{rial(product.priceRial)} · موجودی {product.stock.toLocaleString('fa-IR')}</small></span>
                 <button disabled={alreadyAdded || product.stock < 1 || busy || lines.length >= 200} onClick={() => setLines(previous => [...previous, {
                   key: crypto.randomUUID(), lineId: null, productId: product.id, name: product.name,
-                  price: String(product.priceRial), quantity: '1', discount: '0' }])}>{alreadyAdded ? 'در فاکتور است' : 'افزودن'}</button></div>;
+                  price: String(product.priceRial), quantity: '1', discount: '' }])}>{alreadyAdded ? 'در فاکتور است' : 'افزودن'}</button></div>;
             }) : <p className="hint">کالایی پیدا نشد.</p>}</div></div>}
         </div>
-        <button onClick={() => setLines(previous => [...previous, { key: crypto.randomUUID(), lineId: null, productId: null, name: '', price: '0', quantity: '1', discount: '0' }])} disabled={busy || lines.length >= 200}>افزودن قلم دستی</button>
+        <button onClick={() => setLines(previous => [...previous, { key: crypto.randomUUID(), lineId: null, productId: null, name: '', price: '', quantity: '1', discount: '' }])} disabled={busy || lines.length >= 200}>افزودن قلم دستی</button>
         <label>دلیل اصلاح فاکتور<input value={reason} maxLength={500} onChange={e => setReason(e.target.value)} placeholder="مثلاً اصلاح تعداد یا قیمت"/></label>
         <details className="invoice-revision-history"><summary>سابقهٔ نسخه‌ها ({history.length || 1})</summary>{history.length ? history.map(entry => {
           const snapshot = JSON.parse(entry.snapshotJson) as InvoiceRecord;
