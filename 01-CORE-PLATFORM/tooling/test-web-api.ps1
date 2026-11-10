@@ -266,6 +266,29 @@ try {
   $null = PostJson '/merchant/customers' @{name='=DANGEROUS(1)';phone='09125550000'} $ownerSession
   $csv = Invoke-WebRequest "$base/api/merchant/customers/export.csv" -WebSession $ownerSession
   if ($csv.Content -notmatch "'=DANGEROUS" -or $csv.Content -notmatch 'مشتری آزمون' -or $csv.Content -match 'مشتری دوم' -or $csv.Content -notmatch 'ردیف,نام و نام خانوادگی,شماره تماس') { throw 'Customer CSV escaping, columns, or tenant isolation failed' }
+  $xlsxFile = Join-Path $env:TEMP "majora-customers-test-$id.xlsx"
+  Invoke-WebRequest "$base/api/merchant/customers/export.xlsx" -WebSession $ownerSession -OutFile $xlsxFile
+  $workbook = [System.IO.Compression.ZipFile]::OpenRead($xlsxFile)
+  try {
+    $sheet = $workbook.GetEntry('xl/worksheets/sheet1.xml')
+    if (-not $sheet) { throw 'Customer Excel export has no worksheet' }
+    $reader = [System.IO.StreamReader]::new($sheet.Open())
+    try { $sheetXml = $reader.ReadToEnd() } finally { $reader.Dispose() }
+  } finally { $workbook.Dispose(); Remove-Item -LiteralPath $xlsxFile -Force }
+  [xml]$sheetDocument = $sheetXml
+  $sheetNs = [System.Xml.XmlNamespaceManager]::new($sheetDocument.NameTable)
+  $sheetNs.AddNamespace('x', 'http://schemas.openxmlformats.org/spreadsheetml/2006/main')
+  $exportedRows = $sheetDocument.SelectNodes('//x:sheetData/x:row', $sheetNs)
+  $phoneCells = $sheetDocument.SelectNodes('//x:sheetData/x:row[position()>1]/x:c[starts-with(@r,"C")]', $sheetNs)
+  $badPhoneCells = @($phoneCells | Where-Object { $_.GetAttribute('t') -ne 'inlineStr' })
+  if ($exportedRows.Count -ne 4 -or $sheetXml -notmatch 'rightToLeft="1"' -or $sheetXml -notmatch '۰۹۱۲|0912' -or
+      $sheetXml -notmatch '=DANGEROUS\(1\)' -or $sheetXml -match 'مشتری دوم' -or
+      $sheetDocument.SelectNodes('//x:f', $sheetNs).Count -gt 0 -or
+      $sheetDocument.SelectSingleNode('//x:row[@r="1"]/x:c[@r="A1"]/x:is/x:t', $sheetNs).InnerText -ne 'ردیف' -or
+      $sheetDocument.SelectSingleNode('//x:row[@r="2"]/x:c[@r="A2"]/x:v', $sheetNs).InnerText -ne '1' -or
+      $badPhoneCells.Count -gt 0) {
+    throw "Customer Excel columns, row numbers, phone text, formula safety, RTL or tenant isolation failed; rows=$($exportedRows.Count), badPhone=$($badPhoneCells.Count)"
+  }
   $crossPhotoBlocked = $false
   try { $null = Invoke-WebRequest "$base/api/merchant/products/$($product.id)/photo" -WebSession $otherSession } catch { $crossPhotoBlocked = $_.Exception.Response.StatusCode -eq 404 }
   if (-not $crossPhotoBlocked) { throw 'Cross-tenant product photo read was not blocked' }

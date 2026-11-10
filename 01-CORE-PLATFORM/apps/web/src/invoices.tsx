@@ -2,12 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { api, dateFa, rial, receivable, refundDue, type Invoice } from './api';
 import { InvoicePreview } from './invoice-preview';
 import { InvoiceRevisionEditor } from './invoice-revision';
+import { PaymentBadge } from './payment-badge';
 import './invoices.css';
-
-const statusLabel: Record<string, string> = {
-  paid: 'تسویه', partial: 'دارای مانده', unpaid: 'تسویه نشده', proforma: 'پیش‌فاکتور',
-  refund_due: 'بازپرداخت باز', returned: 'تماماً مرجوع', cheque: 'چک در انتظار وصول'
-};
 
 export function Invoices({ run, onReturn, onCheque, initialId, onInitialViewed }: { run: (action: () => Promise<unknown>, success?: string) => Promise<void>; onReturn: (id: string) => void; onCheque: () => void; initialId?: string | null; onInitialViewed?: () => void }) {
   const [items, setItems] = useState<Invoice[]>([]);
@@ -26,7 +22,7 @@ export function Invoices({ run, onReturn, onCheque, initialId, onInitialViewed }
     <section className="card"><div className="card-head"><h2>فهرست فاکتورها</h2><input className="search" value={query} onChange={e => setQuery(e.target.value)} placeholder="شماره، نام یا تلفن" aria-label="جست‌وجوی فاکتور"/></div>
       {items.length ? <div className="list">{items.map(invoice => <div className="list-row invoice-list-row" key={invoice.id}>
         <div className={'status-dot ' + invoice.paymentStatus} aria-hidden="true"/>
-        <div><strong>{invoice.paymentStatus === 'proforma' ? 'پیش‌فاکتور' : 'فاکتور'} {invoice.number} · {invoice.customerName}</strong><small>{dateFa(invoice.issuedAt)} · {statusLabel[invoice.paymentStatus] ?? invoice.paymentStatus}{invoice.revision > 1 ? ` · نسخهٔ ${invoice.revision}` : ''}</small></div>
+        <div><strong>{invoice.paymentStatus === 'proforma' ? 'پیش‌فاکتور' : 'فاکتور'} {invoice.number} · {invoice.customerName}</strong> <PaymentBadge status={invoice.paymentStatus}/><small>{dateFa(invoice.issuedAt)}{invoice.revision > 1 ? ` · نسخهٔ ${invoice.revision}` : ''}</small></div>
         <div className="money"><b>{rial(invoice.totalRial - invoice.returnedRial)}</b><small>{invoice.paymentStatus === 'proforma' ? 'بدون بدهی؛ هنوز فروش قطعی نشده است' : `مانده: ${rial(receivable(invoice))}${refundDue(invoice) > 0 ? ` · بازپرداخت: ${rial(refundDue(invoice))}` : ''}`}</small></div>
         <div className="invoice-row-actions"><button onClick={() => setPreview(invoice.id)}>نمایش / چاپ</button>
           {invoice.status === 'issued' && invoice.paymentStatus !== 'cheque' && invoice.returnedRial === 0 && invoice.refundedRial === 0 && <button onClick={() => setRevising(invoice.id)}>ویرایش فاکتور</button>}

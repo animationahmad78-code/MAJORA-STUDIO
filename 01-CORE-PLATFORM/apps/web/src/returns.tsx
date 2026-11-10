@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, dateFa, rial, refundDue, receivable, type Invoice, type InvoiceDetail, type SalesReturn } from './api';
+import { PaymentBadge } from './payment-badge';
 import './returns.css';
 
 type Selection = { quantity: number; restock: boolean };
@@ -89,10 +90,10 @@ export function Returns({ initialId, onTargetUsed }: { initialId: string | null;
       <section className="card return-picker"><div className="card-head"><h2>فاکتور را پیدا کنید</h2></div>
         <label>شمارهٔ فاکتور، نام یا شمارهٔ مشتری<input type="search" value={query} onChange={e => setQuery(e.target.value)} placeholder="جست‌وجوی فاکتور" /></label>
         <div className="return-invoice-list">{invoices.map(item => <button key={item.id} className={selectedId === item.id ? 'selected' : ''} onClick={() => setSelectedId(item.id)}>
-          <strong>فاکتور {item.number} · {item.customerName}</strong><small>{dateFa(item.issuedAt)} · {rial(item.totalRial - item.returnedRial)} خالص</small>
+          <strong>فاکتور {item.number} · {item.customerName}</strong><PaymentBadge status={item.paymentStatus}/><small>{dateFa(item.issuedAt)} · {rial(item.totalRial - item.returnedRial)} خالص</small>
         </button>)}{!invoices.length && <p className="empty">فاکتوری پیدا نشد.</p>}</div>
       </section>
-      <div>{invoice ? <><section className="card"><div className="card-head"><h2>فاکتور {invoice.number} · {invoice.customerName}</h2></div>
+      <div>{invoice ? <><section className="card"><div className="card-head"><h2>فاکتور {invoice.number} · {invoice.customerName} <PaymentBadge status={invoice.paymentStatus}/></h2></div>
         <div className="return-totals"><div><small>فروش اولیه</small><strong>{rial(invoice.totalRial)}</strong></div><div><small>مرجوع‌شده</small><strong>{rial(invoice.returnedRial)}</strong></div><div><small>ماندهٔ دریافتنی</small><strong>{rial(receivable(invoice))}</strong></div><div><small>طلب مشتری</small><strong>{rial(due)}</strong></div></div>
         <div className="return-section-title"><h3>اقلام قابل مرجوع</h3><button type="button" onClick={selectAll} disabled={!available.some(line => line.remaining > 0)}>مرجوع کلِ باقی‌مانده</button></div>
         <div className="return-lines">{available.map(line => {

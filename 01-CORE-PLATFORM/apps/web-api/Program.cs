@@ -824,6 +824,18 @@ merchant.MapGet("/customers/export.csv", async (MajoraDb db, HttpContext c) =>
     var bytes = Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes(csv.ToString())).ToArray();
     return Results.File(bytes, "text/csv; charset=utf-8", $"majora-customers-{DateTime.UtcNow:yyyyMMdd}.csv");
 });
+merchant.MapGet("/customers/export.xlsx", async (MajoraDb db, HttpContext c) =>
+{
+    if (!CanWrite(c.User)) return Results.Forbid();
+    var tid = TenantId(c.User);
+    var customers = await db.Customers.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived)
+        .OrderBy(x => x.Name).ThenBy(x => x.Id).ToListAsync();
+    if (customers.Count > 1_048_575) return Fail("تعداد مشتریان از ظرفیت یک برگهٔ Excel بیشتر است؛ از خروجی CSV استفاده کنید.", 409);
+    var bytes = CustomerWorkbook.Create(customers);
+    c.Response.Headers.CacheControl = "no-store";
+    return Results.File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        $"majora-customers-{DateTime.UtcNow:yyyyMMdd}.xlsx");
+});
 merchant.MapGet("/archive/products", async (string? q, int? page, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Products.AsNoTracking().Where(x => x.TenantId == tid && x.Archived && (q == null || x.Name.Contains(q) || x.Sku.Contains(q))).OrderBy(x => x.Name).Skip(Math.Max(0, (page ?? 1) - 1) * 50).Take(50).ToListAsync()); });
 merchant.MapGet("/archive/customers", async (string? q, int? page, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Customers.AsNoTracking().Where(x => x.TenantId == tid && x.Archived && (q == null || x.Name.Contains(q) || x.Phone.Contains(q))).OrderByDescending(x => x.CreatedAt).Skip(Math.Max(0, (page ?? 1) - 1) * 50).Take(50).ToListAsync()); });
 merchant.MapGet("/archive/invoices", async (string? q, int? page, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Invoices.AsNoTracking().Where(x => x.TenantId == tid && x.Archived && (q == null || x.CustomerName.Contains(q) || x.Number.ToString() == q)).OrderByDescending(x => x.IssuedAt).Skip(Math.Max(0, (page ?? 1) - 1) * 50).Take(50).Select(x => new { x.Id, x.Number, x.CustomerName, x.CustomerPhone, x.IssuedAt, x.TotalRial, x.PaidRial, x.ReturnedRial, x.RefundedRial, x.PaymentStatus, x.Status }).ToListAsync()); });
