@@ -96,8 +96,10 @@ app.Use(async (ctx, next) =>
         var db = ctx.RequestServices.GetRequiredService<MajoraDb>();
         var id = Guid.Parse(ctx.User.FindFirstValue(ClaimTypes.NameIdentifier)!);
         var account = await db.Users.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id);
-        if (account is null || !account.Enabled || account.Role != ctx.User.FindFirstValue(ClaimTypes.Role) || account.TenantId?.ToString() != ctx.User.FindFirstValue("tenant") || account.AuthVersion.ToString() != ctx.User.FindFirstValue("authVersion"))
-        { await ctx.SignOutAsync(); ctx.Response.StatusCode = 401; return; }
+        var panel = ctx.Request.Path.StartsWithSegments("/api/admin") ? "admin" : "merchant";
+        if (account is null || !account.Enabled || account.Role != ctx.User.FindFirstValue(ClaimTypes.Role) || account.TenantId?.ToString() != ctx.User.FindFirstValue("tenant") || account.AuthVersion.ToString() != ctx.User.FindFirstValue("authVersion") ||
+            !await ValidSession(db, ctx.User, panel))
+        { await ctx.SignOutAsync(AuthScheme(panel)); ctx.Response.StatusCode = 401; return; }
     }
     await next();
 });
@@ -172,6 +174,12 @@ using (var scope = app.Services.CreateScope())
                 upgrade.CommandText = "ALTER TABLE InvoiceLines ADD COLUMN Position INTEGER NOT NULL DEFAULT 0";
                 await upgrade.ExecuteNonQueryAsync();
             }
+            using var sessionTable = connection.CreateCommand();
+            sessionTable.CommandText = "CREATE TABLE IF NOT EXISTS AppSessions (Id TEXT NOT NULL PRIMARY KEY, UserId TEXT NOT NULL, TenantId TEXT NULL, Panel TEXT NOT NULL, CreatedAt TEXT NOT NULL, LastSeenAt TEXT NOT NULL, ExpiresAt TEXT NOT NULL, RevokedAt TEXT NULL, UserAgent TEXT NOT NULL, IpAddress TEXT NOT NULL)";
+            await sessionTable.ExecuteNonQueryAsync();
+            using var sessionIndex = connection.CreateCommand();
+            sessionIndex.CommandText = "CREATE INDEX IF NOT EXISTS IX_AppSessions_UserId_ExpiresAt ON AppSessions (UserId, ExpiresAt); CREATE INDEX IF NOT EXISTS IX_AppSessions_TenantId_ExpiresAt ON AppSessions (TenantId, ExpiresAt)";
+            await sessionIndex.ExecuteNonQueryAsync();
         }
         finally { if (openedHere) await connection.CloseAsync(); }
     }
@@ -220,6 +228,25 @@ static Cheque NewCheque(ChequeRequest body, Guid tid, Guid? invoiceId = null) =>
 };
 static async Task<bool> Active(MajoraDb db, Guid tenantId) => await db.Tenants.AnyAsync(t => t.Id == tenantId && t.Enabled) && await db.Subscriptions.AnyAsync(s => s.TenantId == tenantId && s.PaymentStatus == "paid" && s.StartsAt <= DateTime.UtcNow && s.EndsAt > DateTime.UtcNow);
 static string AuthScheme(string panel) => panel == "admin" ? "MajoraAdmin" : CookieAuthenticationDefaults.AuthenticationScheme;
+static async Task RevokeUserSessions(MajoraDb db, Guid userId)
+{
+    var now = DateTime.UtcNow;
+    foreach (var session in await db.AppSessions.Where(x => x.UserId == userId && x.RevokedAt == null).ToListAsync()) session.RevokedAt = now;
+}
+static async Task<bool> ValidSession(MajoraDb db, ClaimsPrincipal principal, string panel)
+{
+    if (!Guid.TryParse(principal.FindFirstValue("sessionId"), out var sessionId) ||
+        !Guid.TryParse(principal.FindFirstValue(ClaimTypes.NameIdentifier), out var userId)) return false;
+    var session = await db.AppSessions.SingleOrDefaultAsync(x => x.Id == sessionId && x.UserId == userId && x.Panel == panel);
+    if (session is null || session.RevokedAt is not null || session.ExpiresAt <= DateTime.UtcNow) return false;
+    if (session.LastSeenAt <= DateTime.UtcNow.AddMinutes(-5))
+    {
+        session.LastSeenAt = DateTime.UtcNow;
+        session.ExpiresAt = DateTime.UtcNow.AddHours(12);
+        await db.SaveChangesAsync();
+    }
+    return true;
+}
 static void Csrf(HttpContext c, string panel)
 {
     var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(24));
@@ -238,7 +265,8 @@ static async Task<AppUser?> AuthenticatedAccount(MajoraDb db, HttpContext c, str
         user.AuthVersion.ToString() != principal.FindFirstValue("authVersion") ||
         user.TenantId?.ToString() != principal.FindFirstValue("tenant") ||
         panel == "admin" && user.Role != "platform_admin" ||
-        panel == "merchant" && user.TenantId is null)
+        panel == "merchant" && user.TenantId is null ||
+        !await ValidSession(db, principal, panel))
     { await c.SignOutAsync(scheme); return null; }
     c.User = principal;
     return user;
@@ -253,7 +281,11 @@ app.MapPost("/api/auth/login", async (LoginRequest body, MajoraDb db, IPasswordH
     if (user.TenantId is Guid tid && !await Active(db, tid)) return Fail("اشتراک این کسب‌وکار فعال نیست. با پشتیبانی ماژورا تماس بگیرید.", 403);
     var panel = user.Role == "platform_admin" ? "admin" : "merchant";
     var scheme = AuthScheme(panel);
-    var claims = new List<Claim> { new(ClaimTypes.NameIdentifier, user.Id.ToString()), new(ClaimTypes.Name, user.DisplayName), new(ClaimTypes.Role, user.Role), new("authVersion", user.AuthVersion.ToString()) };
+    var session = new AppSession { UserId = user.Id, TenantId = user.TenantId, Panel = panel,
+        UserAgent = ctx.Request.Headers.UserAgent.ToString()[..Math.Min(200, ctx.Request.Headers.UserAgent.ToString().Length)],
+        IpAddress = ctx.Connection.RemoteIpAddress?.ToString() ?? "" };
+    db.AppSessions.Add(session); await db.SaveChangesAsync();
+    var claims = new List<Claim> { new(ClaimTypes.NameIdentifier, user.Id.ToString()), new(ClaimTypes.Name, user.DisplayName), new(ClaimTypes.Role, user.Role), new("authVersion", user.AuthVersion.ToString()), new("sessionId", session.Id.ToString()) };
     if (user.TenantId is Guid tenantId) claims.Add(new Claim("tenant", tenantId.ToString()));
     await ctx.SignInAsync(scheme, new ClaimsPrincipal(new ClaimsIdentity(claims, scheme)));
     Csrf(ctx, panel);
@@ -263,6 +295,11 @@ app.MapPost("/api/auth/logout", async (MajoraDb db, HttpContext c) =>
 {
     var panel = c.Request.Headers["X-Majora-Panel"].ToString() == "admin" ? "admin" : "merchant";
     if (await AuthenticatedAccount(db, c, panel) is null) return Results.Unauthorized();
+    if (Guid.TryParse(c.User.FindFirstValue("sessionId"), out var sessionId))
+    {
+        var session = await db.AppSessions.SingleOrDefaultAsync(x => x.Id == sessionId);
+        if (session is not null) { session.RevokedAt = DateTime.UtcNow; await db.SaveChangesAsync(); }
+    }
     await c.SignOutAsync(AuthScheme(panel));
     c.Response.Cookies.Delete(panel == "admin" ? "majora.admin.csrf" : "majora.csrf");
     return Results.NoContent();
@@ -281,10 +318,41 @@ app.MapPost("/api/auth/change-password", async (PasswordChange body, MajoraDb db
     var user = await AuthenticatedAccount(db, c, panel); if (user is null) return Results.Unauthorized();
     if (body.NewPassword.Length < 12 || hasher.VerifyHashedPassword(user, user.PasswordHash, body.CurrentPassword) == PasswordVerificationResult.Failed) return Fail("رمز فعلی نادرست است یا رمز جدید کمتر از ۱۲ نویسه دارد.");
     user.PasswordHash = hasher.HashPassword(user, body.NewPassword); user.AuthVersion++;
+    await RevokeUserSessions(db, user.Id);
     Audit(db, c.User, user.TenantId, "password.change", "user", user.Id); await db.SaveChangesAsync(); await c.SignOutAsync(AuthScheme(panel)); return Results.NoContent();
+});
+app.MapPost("/api/auth/logout-all", async (MajoraDb db, HttpContext c) =>
+{
+    var panel = c.Request.Headers["X-Majora-Panel"].ToString() == "admin" ? "admin" : "merchant";
+    var user = await AuthenticatedAccount(db, c, panel);
+    if (user is null) return Results.Unauthorized();
+    var now = DateTime.UtcNow;
+    foreach (var session in await db.AppSessions.Where(x => x.UserId == user.Id && x.RevokedAt == null).ToListAsync()) session.RevokedAt = now;
+    user.AuthVersion++;
+    Audit(db, c.User, user.TenantId, "session.revoke-all", "user", user.Id);
+    await db.SaveChangesAsync();
+    await c.SignOutAsync(AuthScheme(panel));
+    c.Response.Cookies.Delete(panel == "admin" ? "majora.admin.csrf" : "majora.csrf");
+    return Results.NoContent();
 });
 
 var admin = app.MapGroup("/api/admin").RequireAuthorization(p => p.AddAuthenticationSchemes("MajoraAdmin").RequireRole("platform_admin"));
+admin.MapGet("/tenants/{id:guid}/sessions", async (Guid id, MajoraDb db) =>
+{
+    if (!await db.Tenants.AnyAsync(x => x.Id == id)) return Results.NotFound();
+    var now = DateTime.UtcNow;
+    return Results.Ok(await db.AppSessions.AsNoTracking().Where(x => x.TenantId == id && x.RevokedAt == null && x.ExpiresAt > now)
+        .Join(db.Users.AsNoTracking(), s => s.UserId, u => u.Id, (s, u) => new { s.Id, s.UserId, u.Username, u.DisplayName, u.Role, s.CreatedAt, s.LastSeenAt, s.ExpiresAt, s.UserAgent, s.IpAddress })
+        .OrderByDescending(x => x.LastSeenAt).Take(100).ToListAsync());
+});
+admin.MapPost("/tenants/{id:guid}/sessions/{sessionId:guid}/revoke", async (Guid id, Guid sessionId, MajoraDb db, HttpContext c) =>
+{
+    var session = await db.AppSessions.SingleOrDefaultAsync(x => x.Id == sessionId && x.TenantId == id);
+    if (session is null) return Results.NotFound();
+    session.RevokedAt = DateTime.UtcNow;
+    Audit(db, c.User, id, "session.revoke", "session", sessionId);
+    await db.SaveChangesAsync(); return Results.NoContent();
+});
 admin.MapGet("/overview", async (MajoraDb db) =>
 {
     var now = DateTime.UtcNow;
@@ -589,6 +657,7 @@ admin.MapPut("/users/{id:guid}/username", async (Guid id, UsernameUpdate body, M
     if (user.Username == newName) return Results.Ok(new { user.Id, user.Username });
     if (await db.Users.AnyAsync(x => x.Username == newName)) return Fail("این نام کاربری قبلاً استفاده شده است.", 409);
     var oldName = user.Username; user.Username = newName; user.AuthVersion++;
+    await RevokeUserSessions(db, user.Id);
     Audit(db, c.User, user.TenantId, "user.username.admin-update", "user", id, $"old={oldName};new={newName}");
     try { await db.SaveChangesAsync(); } catch (DbUpdateException) { return Fail("این نام کاربری هم‌زمان ثبت شده است.", 409); }
     return Results.Ok(new { user.Id, user.Username });
@@ -608,6 +677,7 @@ admin.MapPost("/users/{id:guid}/reset-password", async (Guid id, PasswordReset b
     if (body.NewPassword.Length < 12) return Fail("رمز جدید باید حداقل ۱۲ نویسه باشد.");
     var user = await db.Users.FindAsync(id); if (user is null || user.Role == "platform_admin") return Results.NotFound();
     user.PasswordHash = hasher.HashPassword(user, body.NewPassword); user.AuthVersion++;
+    await RevokeUserSessions(db, user.Id);
     Audit(db, c.User, user.TenantId, "password.admin-reset", "user", id); await db.SaveChangesAsync(); return Results.NoContent();
 });
 
@@ -637,6 +707,33 @@ merchant.MapGet("/features", async (MajoraDb db, HttpContext c) =>
     var tenantId = TenantId(c.User);
     var policy = await db.Tenants.AsNoTracking().Where(x => x.Id == tenantId).Select(x => x.DisabledFeaturesJson).SingleAsync();
     return Results.Ok(new { disabled = TenantFeatures.Read(policy) });
+});
+merchant.MapGet("/sessions", async (MajoraDb db, HttpContext c) =>
+{
+    var tid = TenantId(c.User);
+    var userId = UserId(c.User);
+    Guid.TryParse(c.User.FindFirstValue("sessionId"), out var currentSessionId);
+    var now = DateTime.UtcNow;
+    var sessions = db.AppSessions.AsNoTracking().Where(x => x.TenantId == tid && x.RevokedAt == null && x.ExpiresAt > now);
+    if (!CanWrite(c.User)) sessions = sessions.Where(x => x.UserId == userId);
+    return Results.Ok(await sessions.Join(db.Users.AsNoTracking(), s => s.UserId, u => u.Id,
+        (s, u) => new { s.Id, s.UserId, u.Username, u.DisplayName, u.Role, s.CreatedAt, s.LastSeenAt, s.ExpiresAt, s.UserAgent, s.IpAddress, Current = s.Id == currentSessionId })
+        .OrderByDescending(x => x.LastSeenAt).Take(100).ToListAsync());
+});
+merchant.MapPost("/sessions/{id:guid}/revoke", async (Guid id, MajoraDb db, HttpContext c) =>
+{
+    var tid = TenantId(c.User);
+    var session = await db.AppSessions.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid);
+    if (session is null) return Results.NotFound();
+    if (session.UserId != UserId(c.User))
+    {
+        if (!CanWrite(c.User)) return Results.Forbid();
+        var target = await db.Users.SingleAsync(x => x.Id == session.UserId);
+        if (target.Role == "owner" && Role(c.User) != "owner") return Results.Forbid();
+    }
+    session.RevokedAt = DateTime.UtcNow;
+    Audit(db, c.User, tid, "session.revoke", "session", id);
+    await db.SaveChangesAsync(); return Results.NoContent();
 });
 merchant.MapGet("/subscription", async (MajoraDb db, HttpContext c) =>
 {
@@ -1509,6 +1606,7 @@ merchant.MapPut("/staff/{id:guid}/username", async (Guid id, UsernameUpdate body
     if (user.Username == newName) return Results.Ok(new { user.Id, user.Username });
     if (await db.Users.AnyAsync(x => x.Username == newName)) return Fail("این نام کاربری قبلاً استفاده شده است.", 409);
     var oldName = user.Username; user.Username = newName; user.AuthVersion++;
+    await RevokeUserSessions(db, user.Id);
     Audit(db, c.User, tid, "staff.username.update", "user", id, $"old={oldName};new={newName}");
     try { await db.SaveChangesAsync(); } catch (DbUpdateException) { return Fail("این نام کاربری هم‌زمان ثبت شده است.", 409); }
     return Results.Ok(new { user.Id, user.Username });
@@ -1521,6 +1619,7 @@ merchant.MapPost("/staff/{id:guid}/reset-password", async (Guid id, PasswordRese
     var user = await db.Users.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && x.Role != "owner");
     if (user is null) return Results.NotFound();
     user.PasswordHash = hasher.HashPassword(user, body.NewPassword); user.AuthVersion++;
+    await RevokeUserSessions(db, user.Id);
     Audit(db, c.User, tid, "password.owner-reset", "user", id);
     await db.SaveChangesAsync(); return Results.NoContent();
 });
@@ -1546,6 +1645,7 @@ merchant.MapPost("/staff/{id:guid}/enabled", async (Guid id, EnabledRequest body
         if (await db.Users.CountAsync(x => x.TenantId == tid && x.Enabled) >= maxUsers) return Fail("سقف کاربران طرح تکمیل است.", 409);
     }
     user.Enabled = body.Enabled; user.AuthVersion++;
+    await RevokeUserSessions(db, user.Id);
     Audit(db, c.User, user.TenantId, "staff.enabled", "user", id, $"enabled={body.Enabled}");
     await db.SaveChangesAsync(); return Results.NoContent();
 });

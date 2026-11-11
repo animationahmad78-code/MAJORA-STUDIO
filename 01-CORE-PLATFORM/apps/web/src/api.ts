@@ -46,7 +46,10 @@ export async function api<T>(path: string, method = 'GET', data?: unknown): Prom
     if (response.status === 401 && path !== '/auth/me') window.dispatchEvent(new Event('majora:session-changed'));
     throw new ApiError(json.error ?? json.message ?? (response.status === 403 ? 'برای این عملیات دسترسی ندارید.' : `خطای ${response.status}`), response.status, json.errorCode, json.correlationId ?? response.headers.get('X-Correlation-ID') ?? undefined);
   }
-  if (path === '/auth/logout') sessionChanged(panel);
+  if (path === '/auth/logout' || path === '/auth/logout-all') {
+    sessionChanged(panel);
+    if (path === '/auth/logout-all') window.dispatchEvent(new Event('majora:session-changed'));
+  }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }

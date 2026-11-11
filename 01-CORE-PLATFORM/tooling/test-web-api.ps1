@@ -619,7 +619,26 @@ try {
   $orderedRead = Invoke-RestMethod "$base/api/merchant/invoices/$($ordered.id)" -WebSession $ownerSession
   if ((@($orderedRead.lines | ForEach-Object nameSnapshot) -join '|') -ne 'قلم اول|قلم دوم|قلم سوم' -or
       (@($orderedRead.lines | ForEach-Object position) -join '|') -ne '1|2|3') { throw 'Invoice line order was not preserved after database round trip' }
-  Write-Output 'PASS: 20 tenants; idempotent subscriptions/orders; promo quote and receipt approval; username and password reset session revocation; staff/admin activity; customer profile and receivable badge; purchase-created stock; existing invoice, return, cheque, AI fallback, brand, archive, isolation and CSRF scenarios'
+  $activeSessions = Invoke-RestMethod "$base/api/merchant/sessions" -WebSession $ownerSession
+  $staffActive = @($activeSessions | Where-Object userId -eq $staff.id)
+  if ($staffActive.Count -lt 1 -or @($activeSessions | Where-Object current).Count -ne 1) { throw 'Merchant session list or current-session marker failed' }
+  $adminSessions = Invoke-RestMethod "$base/api/admin/tenants/$($tenant.id)/sessions" -WebSession $adminSession
+  if (@($adminSessions | Where-Object id -eq $staffActive[0].id).Count -ne 1) { throw 'Platform owner could not inspect tenant sessions' }
+  $null = PostJson "/admin/tenants/$($tenant.id)/sessions/$($staffActive[0].id)/revoke" @{} $adminSession
+  $revokedStaffValid = $true
+  try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession } catch { $revokedStaffValid = $_.Exception.Response.StatusCode -ne 401 }
+  if ($revokedStaffValid) { throw 'Revoked device cookie remained valid' }
+  $secondOwnerSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+  $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $secondOwnerSession $true
+  $null = Invoke-RestMethod "$base/api/auth/me?panel=merchant" -WebSession $ownerSession
+  $csrfBeforeLogout = $ownerSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value
+  if ([string]::IsNullOrWhiteSpace($csrfBeforeLogout)) { throw 'Merchant CSRF cookie disappeared before logout-all' }
+  $null = Invoke-RestMethod "$base/api/auth/logout-all" -Method Post -WebSession $ownerSession -Headers @{'X-CSRF'=$csrfBeforeLogout;'X-Majora-Panel'='merchant'} -ContentType 'application/json' -Body '{}'
+  $secondOwnerValid = $true
+  try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $secondOwnerSession } catch { $secondOwnerValid = $_.Exception.Response.StatusCode -ne 401 }
+  if ($secondOwnerValid) { throw 'Logout-all left another device session valid' }
+  $null = Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession
+  Write-Output 'PASS: 20 tenants; subscriptions/orders; archive; invoice order; tenant isolation; device/session listing and revocation; logout-all; finance, brand and CSRF scenarios'
 } finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
   Write-Output "Test log: $log"

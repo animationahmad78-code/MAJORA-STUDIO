@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, dateFa } from './api';
+import { AdminSessions, Sessions } from './sessions';
 
 type ManagedUser = { id: string; username: string; displayName: string; role: string; enabled: boolean; tenantId?: string; tenantName?: string };
 type Activity = { id: string; at: string; actorName: string; action: string; entityType: string; entityId: string; detail: string; tenantId?: string };
@@ -15,7 +16,8 @@ const actionLabels: Record<string, string> = {
   'cheque.create': 'چک ثبت کرد', 'cheque.update': 'اطلاعات چک را تغییر داد', 'cheque.status': 'وضعیت چک را تغییر داد',
   'reminder.create': 'یادآور افزود', 'reminder.done': 'یادآور را انجام‌شده کرد',
   'payment.record': 'دریافت وجه ثبت کرد', 'refund.record': 'بازپرداخت ثبت کرد',
-  'sales-return.record': 'مرجوعی ثبت کرد', 'archive.add': 'موردی را بایگانی کرد', 'archive.restore': 'موردی را از بایگانی برگرداند',
+  'sales-return.record': 'مرجوعی ثبت کرد', 'archive.add': 'موردی را بایگانی کرد', 'archive.restore': 'موردی را از بایگانی برگرداند', 'archive.purge': 'مورد بدون سابقه را حذف کرد',
+  'session.revoke': 'دسترسی دستگاهی را قطع کرد', 'session.revoke-all': 'از همهٔ دستگاه‌های خود خارج شد',
   'staff.create': 'حساب همکار ساخت', 'staff.enabled': 'وضعیت همکار را تغییر داد',
   'password.admin-reset': 'رمز کاربر را بازنشانی کرد', 'password.owner-reset': 'رمز همکار را بازنشانی کرد',
   'invoice-brand.admin-update': 'هویت فاکتور را تغییر داد', 'invoice-brand.merchant-update': 'مشخصات فاکتور را تغییر داد',
@@ -103,5 +105,6 @@ export function UserManagement({ admin }: { admin: boolean }) {
       <div className="list">{activity.map(event => <details className="list-row activity-item" key={event.id}><summary><strong>{event.actorName} · {actionLabels[event.action] ?? 'فعالیتی ثبت کرد'}</strong><small>{dateFa(event.at)} · {entityLabels[event.entityType] ?? 'مورد مرتبط'}</small></summary><div><p>شناسه: <code dir="ltr">{event.entityId}</code></p>{event.detail && <p>جزئیات: {readableDetail(event.detail)}</p>}</div></details>)}{!activity.length && <p className="empty">رویدادی مطابق جست‌وجو پیدا نشد.</p>}</div>
       <div className="activity-pager"><button type="button" disabled={activityPage === 1} onClick={() => setActivityPage(n => n - 1)}>صفحهٔ قبل</button><span>صفحهٔ {activityPage.toLocaleString('fa-IR')}</span><button type="button" disabled={activity.length < 100} onClick={() => setActivityPage(n => n + 1)}>صفحهٔ بعد</button></div>
     </section>
+    {admin ? <AdminSessions users={users} /> : <Sessions />}
   </div>;
 }
