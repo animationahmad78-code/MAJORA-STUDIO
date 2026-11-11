@@ -463,14 +463,31 @@ try {
   $staff = PostJson '/merchant/staff' @{username="staff_$id";displayName='فروشنده';password=$staffPass;role='staff'} $ownerSession
   $staffSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
   $null = PostJson '/auth/login' @{username="staff_$id";password=$staffPass} $staffSession $true
+  $costProduct = Invoke-RestMethod "$base/api/merchant/products?q=$($product.sku)" -WebSession $ownerSession | Select-Object -First 1
+  $null = PutJson "/merchant/products/$($product.id)" @{name=$costProduct.name;sku=$costProduct.sku;category=$costProduct.category;priceRial=$costProduct.priceRial;stock=$costProduct.stock;averageCostRial=123456} $ownerSession
+  $ownerCostProduct = Invoke-RestMethod "$base/api/merchant/products?q=$($product.sku)" -WebSession $ownerSession | Select-Object -First 1
+  if ($ownerCostProduct.averageCostRial -ne 123456) { throw 'Owner could not read product cost' }
   $staffInvoice = PostJson '/merchant/invoices' @{idempotencyKey="staff-invoice-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='paid';paidRial=500000;lines=@(@{productId=$product.id;quantity=1})} $staffSession
   if ($staffInvoice.totalRial -ne 500000) { throw 'Staff sale failed' }
+  $ownerCostInvoice = Invoke-RestMethod "$base/api/merchant/invoices/$($staffInvoice.id)" -WebSession $ownerSession
+  if ($ownerCostInvoice.lines[0].unitCostRialSnapshot -ne 123456) { throw 'Owner invoice lost cost snapshot' }
+  $staffCostInvoice = Invoke-RestMethod "$base/api/merchant/invoices/$($staffInvoice.id)" -WebSession $staffSession
+  if ($staffCostInvoice.lines[0].PSObject.Properties.Name -contains 'unitCostRialSnapshot') { throw 'Seller invoice exposed cost snapshot' }
   foreach ($role in @('cashier','warehouse','accountant','viewer')) {
     $roleUser = PostJson '/merchant/staff' @{username="${role}_$id";displayName="Role $role";password=$staffPass;role=$role} $ownerSession
     $roleSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
     $null = PostJson '/auth/login' @{username="${role}_$id";password=$staffPass} $roleSession $true
     $productsForRole = Invoke-RestMethod "$base/api/merchant/products" -WebSession $roleSession
     if (@($productsForRole).Count -lt 1) { throw "Role $role cannot read products" }
+    $roleProduct = $productsForRole | Where-Object id -eq $product.id | Select-Object -First 1
+    if ($role -ne 'accountant' -and $null -ne $roleProduct.averageCostRial) { throw "Role $role read product cost" }
+    if ($role -eq 'accountant' -and $roleProduct.averageCostRial -ne 123456) { throw 'Accountant could not read product cost' }
+    if ($role -in @('cashier','viewer')) {
+      $roleInvoice = Invoke-RestMethod "$base/api/merchant/invoices/$($staffInvoice.id)" -WebSession $roleSession
+      if ($roleInvoice.lines[0].PSObject.Properties.Name -contains 'unitCostRialSnapshot') { throw "Role $role read invoice cost" }
+      $roleRevisions = Invoke-RestMethod "$base/api/merchant/invoices/$($revisionInvoice.id)/revisions" -WebSession $roleSession
+      if (@($roleRevisions).Count -lt 1 -or $roleRevisions[0].snapshotJson -match 'unitCostRialSnapshot') { throw "Role $role read invoice revision cost" }
+    }
     if ($role -eq 'warehouse') {
       $currentProduct = $productsForRole | Where-Object id -eq $product.id | Select-Object -First 1
       $catalogUpdate = @{name=$currentProduct.name;sku=$currentProduct.sku;category=$currentProduct.category;priceRial=$currentProduct.priceRial;stock=$currentProduct.stock}

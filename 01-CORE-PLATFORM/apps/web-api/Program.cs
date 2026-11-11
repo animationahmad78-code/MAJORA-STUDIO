@@ -1024,7 +1024,7 @@ merchant.MapGet("/dashboard", async (MajoraDb db, HttpContext c) =>
     });
 });
 merchant.MapGet("/products/meta", async (MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var products = db.Products.Where(x => x.TenantId == tid && !x.Archived); return Results.Ok(new { count = await products.CountAsync(), categories = await products.Select(x => x.Category).Distinct().OrderBy(x => x).ToListAsync() }); });
-merchant.MapGet("/products", async (string? q, string? category, int? page, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Products.Where(x => x.TenantId == tid && !x.Archived && (q == null || x.Name.Contains(q) || x.Sku.Contains(q)) && (string.IsNullOrEmpty(category) || x.Category == category || x.Category.StartsWith(category + " / ") || x.Category.StartsWith(category + "/"))).OrderBy(x => x.Name).Skip(Math.Max(0, (page ?? 1) - 1) * 50).Take(50).ToListAsync()); });
+merchant.MapGet("/products", async (string? q, string? category, int? page, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var products = await db.Products.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived && (q == null || x.Name.Contains(q) || x.Sku.Contains(q)) && (string.IsNullOrEmpty(category) || x.Category == category || x.Category.StartsWith(category + " / ") || x.Category.StartsWith(category + "/"))).OrderBy(x => x.Name).Skip(Math.Max(0, (page ?? 1) - 1) * 50).Take(50).ToListAsync(); return Results.Ok(products.Select(x => MerchantViews.Product(x, c.User))); });
 merchant.MapPost("/products", async (ProductRequest body, MajoraDb db, HttpContext c) =>
 {
     if (!CanManageCatalog(c.User)) return Results.Forbid();
@@ -1037,7 +1037,7 @@ merchant.MapPost("/products", async (ProductRequest body, MajoraDb db, HttpConte
         product.HasPhoto = true;
         db.ProductPhotos.Add(new ProductPhoto { ProductId = product.Id, TenantId = product.TenantId, ContentType = contentType, Bytes = bytes });
     }
-    db.Products.Add(product); Audit(db, c.User, product.TenantId, "product.create", "product", product.Id); await db.SaveChangesAsync(); return Results.Created($"/api/merchant/products/{product.Id}", product);
+    db.Products.Add(product); Audit(db, c.User, product.TenantId, "product.create", "product", product.Id); await db.SaveChangesAsync(); return Results.Created($"/api/merchant/products/{product.Id}", MerchantViews.Product(product, c.User));
 });
 merchant.MapPut("/products/{id:guid}", async (Guid id, ProductRequest body, MajoraDb db, HttpContext c) =>
 {
@@ -1061,7 +1061,7 @@ merchant.MapPut("/products/{id:guid}", async (Guid id, ProductRequest body, Majo
         }
     }
     if (delta != 0) db.StockMovements.Add(new StockMovement { TenantId = p.TenantId, ProductId = p.Id, Delta = delta, Reason = "manual-adjustment" });
-    Audit(db, c.User, p.TenantId, "product.update", "product", p.Id); await db.SaveChangesAsync(); return Results.Ok(p);
+    Audit(db, c.User, p.TenantId, "product.update", "product", p.Id); await db.SaveChangesAsync(); return Results.Ok(MerchantViews.Product(p, c.User));
 });
 merchant.MapPut("/products/{id:guid}/price", async (Guid id, ProductPriceUpdate body, MajoraDb db, HttpContext c) =>
 {
@@ -1074,7 +1074,7 @@ merchant.MapPut("/products/{id:guid}/price", async (Guid id, ProductPriceUpdate 
     product.PriceRial = body.NewPriceRial; product.UpdatedAt = DateTime.UtcNow;
     Audit(db, c.User, tid, "product.price-update", "product", id,
         JsonSerializer.Serialize(new { oldPriceRial = body.ExpectedPriceRial, newPriceRial = body.NewPriceRial }));
-    await db.SaveChangesAsync(); return Results.Ok(product);
+    await db.SaveChangesAsync(); return Results.Ok(MerchantViews.Product(product, c.User));
 });
 merchant.MapGet("/products/{id:guid}/photo", async (Guid id, MajoraDb db, HttpContext c) =>
 {
@@ -1395,7 +1395,7 @@ merchant.MapGet("/invoices", async (string? q, string? field, int? page, MajoraD
         .Select(x => new { x.Id, x.Number, x.Revision, x.CustomerName, x.CustomerPhone, x.IssuedAt,
             x.TotalRial, x.PaidRial, x.ReturnedRial, x.RefundedRial, x.PaymentStatus, x.Status }).ToListAsync());
 });
-merchant.MapGet("/invoices/{id:guid}", async (Guid id, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var invoice = await db.Invoices.AsNoTracking().Include(x => x.Lines).SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid); if (invoice is null) return Results.NotFound(); invoice.Lines = invoice.Lines.OrderBy(x => x.Position).ThenBy(x => x.Id).ToList(); return Results.Ok(invoice); });
+merchant.MapGet("/invoices/{id:guid}", async (Guid id, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var invoice = await db.Invoices.AsNoTracking().Include(x => x.Lines).SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid); if (invoice is null) return Results.NotFound(); invoice.Lines = invoice.Lines.OrderBy(x => x.Position).ThenBy(x => x.Id).ToList(); return Results.Ok(MerchantViews.CanSeeCost(c.User) ? (object)invoice : MerchantViews.RedactInvoiceCosts(invoice)); });
 merchant.MapGet("/invoices/{id:guid}/cheque", async (Guid id, MajoraDb db, HttpContext c) =>
 {
     var tid = TenantId(c.User);
@@ -1419,8 +1419,13 @@ merchant.MapGet("/invoices/{id:guid}/revisions", async (Guid id, MajoraDb db, Ht
 {
     var tid = TenantId(c.User);
     if (!await db.Invoices.AnyAsync(x => x.Id == id && x.TenantId == tid)) return Results.NotFound();
-    return Results.Ok(await db.InvoiceRevisions.AsNoTracking().Where(x => x.InvoiceId == id && x.TenantId == tid)
-        .OrderByDescending(x => x.RevisionNo).Select(x => new { x.RevisionNo, x.Reason, x.RecordedAt, x.SnapshotJson }).ToListAsync());
+    var revisions = await db.InvoiceRevisions.AsNoTracking().Where(x => x.InvoiceId == id && x.TenantId == tid)
+        .OrderByDescending(x => x.RevisionNo).Select(x => new { x.RevisionNo, x.Reason, x.RecordedAt, x.SnapshotJson }).ToListAsync();
+    return Results.Ok(MerchantViews.CanSeeCost(c.User) ? revisions : revisions.Select(x => new
+    {
+        x.RevisionNo, x.Reason, x.RecordedAt,
+        SnapshotJson = MerchantViews.RedactInvoiceSnapshotCosts(x.SnapshotJson)
+    }));
 });
 merchant.MapPost("/invoices/{id:guid}/revisions", async (Guid id, InvoiceRevisionRequest body, MajoraDb db, HttpContext c) =>
 {
