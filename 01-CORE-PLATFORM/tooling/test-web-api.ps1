@@ -56,18 +56,52 @@ try {
   $null = PutJson '/admin/ai-provider' @{enabled=$false;endpoint='https://api.example.com/v1/chat/completions';model='sample-model'} $adminSession
   $plan = PostJson '/admin/plans' @{name='پایه';monthlyRial=1000000;maxUsers=3} $adminSession
   $ownerPass = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(20))
-  $tenantBody = @{name='فروشگاه آزمون';slug="shop-$($id.Substring(0,8))";ownerUsername="owner_$id";ownerName='مالک آزمون';ownerPassword=$ownerPass;classicPreset=$true}
+  $wrongBrandPresetBlocked = $false
+  try { $null = PostJson '/admin/tenants' @{name='فروشگاه دیگر';slug="wrong-brand-$($id.Substring(0,8))";ownerUsername="wrong_brand_$id";ownerName='مالک دیگر';ownerPassword=$ownerPass;classicPreset=$true} $adminSession } catch { $wrongBrandPresetBlocked = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $wrongBrandPresetBlocked) { throw 'Classic brand and logo could be copied into a different shop' }
+  $tenantBody = @{name='کیف و کمربند کلاسیک';slug="shop-$($id.Substring(0,8))";ownerUsername="owner_$id";ownerName='مالک آزمون';ownerPassword=$ownerPass;classicPreset=$true}
   $tenant = PostJson '/admin/tenants' $tenantBody $adminSession
   $tenantAgain = PostJson '/admin/tenants' $tenantBody $adminSession
   if ($tenantAgain.id -ne $tenant.id) { throw 'Repeated tenant creation was not idempotent' }
   $createdTenantIds = [System.Collections.Generic.HashSet[string]]::new()
   [void]$createdTenantIds.Add($tenant.id.ToString())
+  $provisionedShop = $null
   for ($shopIndex = 2; $shopIndex -le 20; $shopIndex++) {
-    $shop = PostJson '/admin/tenants' @{name="فروشگاه آزمون $shopIndex";slug="shop-$($id.Substring(0,8))-$shopIndex";ownerUsername="owner_$($id)_$shopIndex";ownerName="مالک $shopIndex";ownerPassword=$ownerPass;classicPreset=$false} $adminSession
+    $shopBody = @{name="فروشگاه آزمون $shopIndex";slug="shop-$($id.Substring(0,8))-$shopIndex";ownerUsername="owner_$($id)_$shopIndex";ownerName="مالک $shopIndex";ownerPassword=$ownerPass;classicPreset=$false}
+    if ($shopIndex -eq 20) {
+      $shopBody.planId = $plan.id
+      $shopBody.startsAt = [datetime]::UtcNow.AddDays(-1).ToString('o')
+      $shopBody.endsAt = [datetime]::UtcNow.AddDays(30).ToString('o')
+      $shopBody.paymentStatus = 'pending'
+      $shopBody.brand = @{revision=1;storeName=$shopBody.name;slogan='شعار ویژه';phone='05100000000';address='تهران';card='';cardHolder='';note='';conditions=@('شرط ویژه');socialTelegram='';socialInstagram='';socialContact='';logoDataUrl=$null;socialLinks=@()}
+    }
+    $shop = PostJson '/admin/tenants' $shopBody $adminSession
+    if ($shopIndex -eq 20) {
+      $provisionedShop = $shop
+      $repeatProvision = PostJson '/admin/tenants' $shopBody $adminSession
+      if ($repeatProvision.id -ne $shop.id) { throw 'Atomic tenant provisioning was not idempotent' }
+      $changedProvision = $shopBody | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+      $changedProvision.brand.slogan = 'شعار تغییر یافته'
+      $changedProvisionRejected = $false
+      try { $null = PostJson '/admin/tenants' $changedProvision $adminSession } catch { $changedProvisionRejected = $_.Exception.Response.StatusCode -eq 409 }
+      if (-not $changedProvisionRejected) { throw 'Changed provisioning request was mistaken for an identical retry' }
+      $provisionedBrand = Invoke-RestMethod "$base/api/admin/tenants/$($shop.id)/invoice-brand" -WebSession $adminSession
+      if ($provisionedBrand.storeName -ne $shopBody.name -or $provisionedBrand.slogan -ne 'شعار ویژه' -or $provisionedBrand.phone -ne '05100000000') { throw 'Tenant provisioning did not persist its own brand' }
+    }
     if (-not $createdTenantIds.Add($shop.id.ToString())) { throw 'Consecutive tenant creation reused an ID' }
   }
   $tenantList = Invoke-RestMethod "$base/api/admin/tenants" -WebSession $adminSession
   if (@($tenantList).Count -ne 20) { throw 'Consecutive tenant creation did not produce exactly 20 shops' }
+  $provisionedSubscription = @($tenantList | Where-Object id -eq $provisionedShop.id)[0].subscription
+  if (-not $provisionedSubscription.id -or $provisionedSubscription.paymentStatus -ne 'pending') { throw 'Provisioned subscription was not visible to the owner' }
+  $missingApprovalReason = Invoke-WebRequest "$base/api/admin/tenants/$($provisionedShop.id)/subscriptions/$($provisionedSubscription.id)/approve" -Method Post -WebSession $adminSession -Headers @{'X-CSRF'=$adminSession.Cookies.GetCookies([uri]$base)['majora.admin.csrf'].Value} -ContentType 'application/json' -Body '{"reason":""}' -SkipHttpErrorCheck
+  if ($missingApprovalReason.StatusCode -ne 400) { throw 'Subscription approval without a reason was accepted' }
+  $approvedProvision = PostJson "/admin/tenants/$($provisionedShop.id)/subscriptions/$($provisionedSubscription.id)/approve" @{reason='آزمون بررسی واریز'} $adminSession
+  $approvedProvisionAgain = PostJson "/admin/tenants/$($provisionedShop.id)/subscriptions/$($provisionedSubscription.id)/approve" @{reason='آزمون تکرار درخواست'} $adminSession
+  if ($approvedProvision.paymentStatus -ne 'paid' -or $approvedProvisionAgain.id -ne $approvedProvision.id) { throw 'Pending subscription approval failed or duplicated' }
+  $invalidProvisionSlug = "invalid-provision-$($id.Substring(0,8))"
+  $invalidProvision = Invoke-WebRequest "$base/api/admin/tenants" -Method Post -WebSession $adminSession -Headers @{'X-CSRF'=$adminSession.Cookies.GetCookies([uri]$base)['majora.admin.csrf'].Value} -ContentType 'application/json' -Body (@{name='فروشگاه نامعتبر';slug=$invalidProvisionSlug;ownerUsername="invalid_provision_$id";ownerName='مالک';ownerPassword=$ownerPass;planId=[guid]::NewGuid();startsAt=[datetime]::UtcNow.AddDays(-1).ToString('o');endsAt=[datetime]::UtcNow.AddDays(30).ToString('o');paymentStatus='paid'} | ConvertTo-Json -Compress) -SkipHttpErrorCheck
+  if ($invalidProvision.StatusCode -ne 400 -or @((Invoke-RestMethod "$base/api/admin/tenants" -WebSession $adminSession) | Where-Object slug -eq $invalidProvisionSlug).Count -ne 0) { throw 'Failed provisioning left a partial tenant' }
   $duplicateRejected = $false
   try { $null = PostJson '/admin/tenants' @{name='فروشگاه دیگر';slug=$tenantBody.slug;ownerUsername='different_owner';ownerName='مالک دیگر';ownerPassword=$ownerPass;classicPreset=$false} $adminSession } catch { $duplicateRejected = $_.Exception.Response.StatusCode -eq 409 }
   if (-not $duplicateRejected) { throw 'Conflicting repeated tenant creation was accepted' }
@@ -82,7 +116,7 @@ try {
   $subscriptionAgain = PostJson "/admin/tenants/$($tenant.id)/subscription" $subscriptionBody $adminSession
   if ($subscriptionAgain.id -ne $subscription.id) { throw 'Repeated subscription creation was not idempotent' }
   $adminOverview = Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession
-  if ($adminOverview.tenants -ne 20 -or $adminOverview.activeSubscriptions -ne 1) { throw 'Admin overview active tenant count disagrees with subscription data' }
+  if ($adminOverview.tenants -ne 20 -or $adminOverview.activeSubscriptions -ne 2) { throw 'Admin overview active tenant count disagrees with subscription data' }
   $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $ownerSession $true
   $badOwnerPasswordBlocked = $false
   try { $null = PostJson '/auth/login' @{username="owner_$id";password='wrong-password'} ([Microsoft.PowerShell.Commands.WebRequestSession]::new()) $true } catch { $badOwnerPasswordBlocked = $_.Exception.Response.StatusCode -eq 401 }
@@ -295,6 +329,8 @@ try {
   if (-not $duplicateSayadBlocked) { throw 'Duplicate Sayad identifier was accepted in same tenant' }
   $chequePhoto = Invoke-WebRequest "$base/api/merchant/accounting/cheques/$($linkedCheque.id)/photo" -WebSession $ownerSession
   if ($chequePhoto.Headers['Content-Type'] -notlike 'image/png*') { throw 'Cheque photo could not be read' }
+  $invoiceChequePhoto = Invoke-WebRequest "$base/api/merchant/invoices/$($chequeInvoice.id)/cheque-photo" -WebSession $ownerSession
+  if ($invoiceChequePhoto.Headers['Content-Type'] -notlike 'image/png*') { throw 'Invoice cheque attachment could not be read' }
   $chequePaymentBlocked = $false
   try { $null = PostJson "/merchant/invoices/$($chequeInvoice.id)/payments" @{idempotencyKey="cheque-payment-$id";amountRial=500000;method='cash'} $ownerSession } catch { $chequePaymentBlocked = $_.Exception.Response.StatusCode -eq 409 }
   if (-not $chequePaymentBlocked) { throw 'Open cheque allowed untracked invoice payment' }
@@ -335,6 +371,8 @@ try {
   $null = PostJson '/auth/login' @{username="other_$id";password=$otherPass} $otherSession $true
   $otherProducts = Invoke-RestMethod "$base/api/merchant/products" -WebSession $otherSession
   if (@($otherProducts).Count -ne 0) { throw 'Tenant data leaked' }
+  $otherChequePhoto = Invoke-WebRequest "$base/api/merchant/invoices/$($chequeInvoice.id)/cheque-photo" -WebSession $otherSession -SkipHttpErrorCheck
+  if ($otherChequePhoto.StatusCode -ne 404) { throw 'Invoice cheque attachment crossed tenant boundary' }
   $null = PostJson '/merchant/customers' @{name='=DANGEROUS(1)';phone='09125550000'} $ownerSession
   $csv = Invoke-WebRequest "$base/api/merchant/customers/export.csv" -WebSession $ownerSession
   if ($csv.Content -notmatch "'=DANGEROUS" -or $csv.Content -notmatch 'مشتری آزمون' -or $csv.Content -match 'مشتری دوم' -or $csv.Content -notmatch 'ردیف,نام و نام خانوادگی,شماره تماس') { throw 'Customer CSV escaping, columns, or tenant isolation failed' }
@@ -413,6 +451,8 @@ try {
     if ($role -eq 'cashier') {
       $financeRead = Invoke-WebRequest "$base/api/merchant/accounting/overview" -WebSession $roleSession -SkipHttpErrorCheck
       if ($financeRead.StatusCode -ne 403) { throw 'Cashier role read accounting overview' }
+      $cashierChequePhoto = Invoke-WebRequest "$base/api/merchant/invoices/$($chequeInvoice.id)/cheque-photo" -WebSession $roleSession -SkipHttpErrorCheck
+      if ($cashierChequePhoto.StatusCode -ne 200 -or $cashierChequePhoto.Headers['Content-Type'] -notlike 'image/png*') { throw 'Cashier could not render a cheque invoice attachment' }
       $cashierSearch = Invoke-RestMethod "$base/api/merchant/search?q=OUT-1" -WebSession $roleSession
       if (@($cashierSearch | Where-Object kind -eq 'cheque').Count -gt 0) { throw 'Cashier search exposed a cheque' }
     }

@@ -594,7 +594,7 @@ admin.MapPost("/subscription-orders/{id:guid}/decision", async (Guid id, Subscri
     else { order.Status = "rejected"; Audit(db, c.User, order.TenantId, "subscription-order.reject", "subscription-order", id); }
     await db.SaveChangesAsync(); await tx.CommitAsync(); return Results.Ok(new { order.Id, order.Status, order.SubscriptionId });
 });
-admin.MapGet("/tenants", async (MajoraDb db) => Results.Ok(await db.Tenants.OrderBy(x => x.Name).Select(x => new { x.Id, x.Name, x.Slug, x.Enabled, x.BrandColor, x.LogoUrl, Subscription = db.Subscriptions.Where(s => s.TenantId == x.Id).OrderByDescending(s => s.EndsAt).Select(s => new { s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot }).FirstOrDefault() }).ToListAsync()));
+admin.MapGet("/tenants", async (MajoraDb db) => Results.Ok(await db.Tenants.OrderBy(x => x.Name).Select(x => new { x.Id, x.Name, x.Slug, x.Enabled, x.BrandColor, x.LogoUrl, Subscription = db.Subscriptions.Where(s => s.TenantId == x.Id).OrderByDescending(s => s.EndsAt).Select(s => new { s.Id, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot }).FirstOrDefault() }).ToListAsync()));
 admin.MapGet("/feature-catalog", () => Results.Ok(TenantFeatures.Names.Select(x => new { key = x.Key, name = x.Value, requires = TenantFeatures.Dependencies.GetValueOrDefault(x.Key) ?? [] })));
 admin.MapGet("/tenants/{id:guid}/features", async (Guid id, MajoraDb db) =>
 {
@@ -616,6 +616,10 @@ admin.MapPut("/tenants/{id:guid}/features", async (Guid id, TenantFeatureUpdate 
 });
 admin.MapPost("/tenants", async (TenantRequest body, MajoraDb db, IPasswordHasher<AppUser> hasher, IWebHostEnvironment host, HttpContext c) =>
 {
+    // The preset contains the real Classic store's contacts, card and logo.
+    // Never provision another tenant with that customer's identity.
+    if (body.ClassicPreset && body.Name?.Trim() != "کیف و کمربند کلاسیک")
+        return Fail("اطلاعات و لوگوی آماده فقط برای فروشگاه کیف و کمربند کلاسیک مجاز است. برای فروشگاه دیگر قالب خالی بسازید.");
     if (string.IsNullOrWhiteSpace(body.Name) || body.Name.Length > 200 || string.IsNullOrWhiteSpace(body.Slug) ||
         !System.Text.RegularExpressions.Regex.IsMatch(body.Slug, "^[a-z0-9-]{3,40}$") ||
         string.IsNullOrWhiteSpace(body.OwnerPassword) || body.OwnerPassword.Length < 12 ||
@@ -623,6 +627,22 @@ admin.MapPost("/tenants", async (TenantRequest body, MajoraDb db, IPasswordHashe
         string.IsNullOrWhiteSpace(body.OwnerName) || body.OwnerName.Length > 200 ||
         body.BrandColor is not null && !System.Text.RegularExpressions.Regex.IsMatch(body.BrandColor, "^#[0-9a-fA-F]{6}$"))
         return Fail("نام، شناسه، رنگ یا رمز مالک نامعتبر است؛ رمز حداقل ۱۲ نویسه باشد.");
+    var hasSubscription = body.PlanId is not null || body.StartsAt is not null || body.EndsAt is not null || body.PaymentStatus is not null;
+    Plan? selectedPlan = null;
+    if (hasSubscription)
+    {
+        if (body.PlanId is not Guid planId || body.StartsAt is not DateTime start || body.EndsAt is not DateTime end ||
+            body.PaymentStatus is not ("paid" or "pending") || end <= start || start.Kind != DateTimeKind.Utc || end.Kind != DateTimeKind.Utc)
+            return Fail("طرح، بازه و وضعیت پرداخت اشتراک را کامل و درست وارد کنید.");
+        selectedPlan = await db.Plans.AsNoTracking().SingleOrDefaultAsync(x => x.Id == planId && x.Enabled);
+        if (selectedPlan is null) return Fail("طرح اشتراک انتخاب‌شده فعال یا موجود نیست.");
+    }
+    if (body.Brand is { } suppliedBrand)
+    {
+        if (suppliedBrand.Revision != 1 || suppliedBrand.StoreName.Trim() != body.Name.Trim())
+            return Fail("نام و نسخهٔ قالب باید با هویت همین فروشگاه یکسان باشند.");
+        if (InvoiceBrand.Validate(suppliedBrand) is { } brandError) return Fail(brandError);
+    }
     async Task<IResult?> ExistingResult()
     {
         var existing = await db.Tenants.AsNoTracking().SingleOrDefaultAsync(x => x.Slug == body.Slug);
@@ -630,7 +650,21 @@ admin.MapPost("/tenants", async (TenantRequest body, MajoraDb db, IPasswordHashe
         var owner = await db.Users.AsNoTracking().SingleOrDefaultAsync(x => x.TenantId == existing.Id && x.Role == "owner");
         if (owner?.Username == body.OwnerUsername.Trim() && existing.Name == body.Name.Trim() &&
             hasher.VerifyHashedPassword(owner, owner.PasswordHash, body.OwnerPassword) != PasswordVerificationResult.Failed)
-            return Results.Ok(new { existing.Id, existing.Name, existing.Slug });
+        {
+            var subscriptionMatches = !hasSubscription || await db.Subscriptions.AsNoTracking().AnyAsync(x =>
+                x.TenantId == existing.Id && x.PlanId == body.PlanId && x.StartsAt == body.StartsAt &&
+                x.EndsAt == body.EndsAt && x.PaymentStatus == body.PaymentStatus);
+            var brand = body.Brand is null ? null : await db.InvoiceBrands.AsNoTracking().SingleOrDefaultAsync(x => x.TenantId == existing.Id);
+            var brandMatches = body.Brand is null || brand is not null && brand.StoreName == body.Brand.StoreName.Trim() &&
+                brand.Slogan == body.Brand.Slogan.Trim() && brand.Phone == body.Brand.Phone.Trim() &&
+                brand.Address == body.Brand.Address.Trim() && brand.Card == body.Brand.Card.Trim() &&
+                brand.CardHolder == body.Brand.CardHolder.Trim() && brand.Note == body.Brand.Note.Trim() &&
+                brand.LogoDataUrl == body.Brand.LogoDataUrl &&
+                JsonSerializer.Deserialize<List<string>>(brand.ConditionsJson)?.SequenceEqual(body.Brand.Conditions.Select(x => x.Trim())) == true &&
+                JsonSerializer.Deserialize<List<InvoiceSocialLink>>(brand.SocialLinksJson, new JsonSerializerOptions(JsonSerializerDefaults.Web))?
+                    .SequenceEqual(body.Brand.SocialLinks?.Select(x => x with { Text = x.Text.Trim() }) ?? []) == true;
+            if (subscriptionMatches && brandMatches) return Results.Ok(new { existing.Id, existing.Name, existing.Slug });
+        }
         return Fail("شناسهٔ فروشگاه یا نام کاربری تکراری است.", 409);
     }
     if (await ExistingResult() is { } repeated) return repeated;
@@ -639,7 +673,13 @@ admin.MapPost("/tenants", async (TenantRequest body, MajoraDb db, IPasswordHashe
     var owner = new AppUser { TenantId = tenant.Id, Username = body.OwnerUsername.Trim(), DisplayName = body.OwnerName.Trim(), Role = "owner" };
     owner.PasswordHash = hasher.HashPassword(owner, body.OwnerPassword);
     db.Tenants.Add(tenant); db.Users.Add(owner);
-    db.InvoiceBrands.Add(InvoiceBrand.Create(tenant.Id, tenant.Name, body.ClassicPreset, host.WebRootPath));
+    var brandProfile = InvoiceBrand.Create(tenant.Id, tenant.Name, body.ClassicPreset, host.WebRootPath);
+    if (body.Brand is not null) InvoiceBrand.Apply(brandProfile, body.Brand);
+    db.InvoiceBrands.Add(brandProfile);
+    if (selectedPlan is not null)
+        db.Subscriptions.Add(new Subscription { TenantId = tenant.Id, PlanId = selectedPlan.Id,
+            StartsAt = body.StartsAt!.Value, EndsAt = body.EndsAt!.Value, PaymentStatus = body.PaymentStatus!,
+            PriceRialSnapshot = selectedPlan.MonthlyRial });
     Audit(db, c.User, tenant.Id, "tenant.create", "tenant", tenant.Id);
     try { await db.SaveChangesAsync(); }
     catch (DbUpdateException) { db.ChangeTracker.Clear(); return await ExistingResult() ?? Fail("ثبت هم‌زمان فروشگاه رخ داد؛ دوباره تلاش کنید.", 409); }
@@ -713,6 +753,20 @@ admin.MapPost("/tenants/{id:guid}/subscription", async (Guid id, SubscriptionReq
     db.Subscriptions.Add(sub); Audit(db, c.User, id, "subscription.create", "subscription", sub.Id);
     await db.SaveChangesAsync(); await tx.CommitAsync();
     return Results.Created($"/api/admin/tenants/{id}/subscription", sub);
+});
+admin.MapPost("/tenants/{id:guid}/subscriptions/{subscriptionId:guid}/approve", async (Guid id, Guid subscriptionId, SubscriptionApproval body, MajoraDb db, HttpContext c) =>
+{
+    if (string.IsNullOrWhiteSpace(body.Reason) || body.Reason.Length > 500)
+        return Fail("دلیل یا مرجع بررسی پرداخت را وارد کنید.");
+    var subscription = await db.Subscriptions.SingleOrDefaultAsync(x => x.Id == subscriptionId && x.TenantId == id);
+    if (subscription is null) return Results.NotFound();
+    if (subscription.PaymentStatus == "paid") return Results.Ok(subscription);
+    if (subscription.PaymentStatus != "pending") return Fail("این اشتراک در وضعیت قابل تأیید نیست.", 409);
+    subscription.PaymentStatus = "paid";
+    Audit(db, c.User, id, "subscription.approve", "subscription", subscriptionId,
+        JsonSerializer.Serialize(new { before = "pending", after = "paid", reason = body.Reason.Trim() }));
+    await db.SaveChangesAsync();
+    return Results.Ok(subscription);
 });
 admin.MapGet("/tenants/{id:guid}/users", async (Guid id, MajoraDb db) => Results.Ok(await db.Users.Where(x => x.TenantId == id).Select(x => new { x.Id, x.Username, x.DisplayName, x.Role, x.Enabled }).ToListAsync()));
 admin.MapGet("/users", async (MajoraDb db) => Results.Ok(await db.Users.AsNoTracking()
@@ -1321,6 +1375,16 @@ merchant.MapGet("/invoices/{id:guid}/cheque", async (Guid id, MajoraDb db, HttpC
         .Select(x => new { x.Id, x.Serial, x.Bank, x.AmountRial, x.DueAt, x.SayadId, x.IssuerNationalId,
             x.BeneficiaryNationalId, x.RegistrationStatus, x.Status, x.ShowDetails, x.ShowImage, HasPhoto = x.PhotoBytes != null }).SingleOrDefaultAsync();
     return cheque is null ? Results.Text("null", "application/json") : Results.Json(cheque);
+});
+merchant.MapGet("/invoices/{id:guid}/cheque-photo", async (Guid id, MajoraDb db, HttpContext c) =>
+{
+    var tid = TenantId(c.User);
+    var photo = await db.Cheques.AsNoTracking()
+        .Where(x => x.InvoiceId == id && x.TenantId == tid && x.ShowImage && x.PhotoBytes != null)
+        .Select(x => new { x.PhotoBytes, x.PhotoContentType }).SingleOrDefaultAsync();
+    c.Response.Headers.CacheControl = "no-store";
+    return photo?.PhotoBytes is { } bytes
+        ? Results.File(bytes, photo.PhotoContentType ?? "image/jpeg") : Results.NotFound();
 });
 merchant.MapGet("/invoices/{id:guid}/revisions", async (Guid id, MajoraDb db, HttpContext c) =>
 {
@@ -1999,11 +2063,14 @@ public sealed record BillingRequest(string CardNumber, string CardHolder);
 public sealed record SubscriptionOrderRequest(Guid PlanId, string IdempotencyKey, string? PromoCode, string? ReceiptDataUrl, long ExpectedTotalRial);
 public sealed record SubscriptionDecision(string Decision);
 public sealed record UsernameUpdate(string Username);
-public sealed record TenantRequest(string Name, string Slug, string OwnerUsername, string OwnerName, string OwnerPassword, string? BrandColor, bool ClassicPreset = false);
+public sealed record TenantRequest(string Name, string Slug, string OwnerUsername, string OwnerName, string OwnerPassword,
+    string? BrandColor, bool ClassicPreset = false, InvoiceBrandUpdate? Brand = null,
+    Guid? PlanId = null, DateTime? StartsAt = null, DateTime? EndsAt = null, string? PaymentStatus = null);
 public sealed record TenantUpdate(string Name, bool Enabled, string? BrandColor, string? LogoUrl);
 public sealed record TenantFeatureUpdate(List<string> Disabled);
 public sealed record AdminInvoiceBrandUpdate(InvoiceBrandUpdate Brand, string Reason);
 public sealed record SubscriptionRequest(Guid PlanId, DateTime StartsAt, DateTime EndsAt, string PaymentStatus, long? PriceRial, string? Note);
+public sealed record SubscriptionApproval(string Reason);
 public sealed record ProductRequest(string Name, string Sku, string Category, long PriceRial, long Stock, long? AverageCostRial = null, string? PhotoDataUrl = null);
 public sealed record ArchivePurgeRequest(string Kind, bool All, List<Guid>? Ids);
 public sealed record ProductPriceUpdate(long ExpectedPriceRial, long NewPriceRial);
