@@ -48,6 +48,7 @@ jobs:
           npm ci
           npm run build -w @majora/web
           dotnet build apps/web-api/Majora.WebApi.csproj -c Release
+          dotnet build tooling/sqlite-snapshot/SqliteSnapshot.csproj -c Release
       - name: Exercise tenant and finance API with disposable SQLite data
         working-directory: 01-CORE-PLATFORM
         shell: pwsh

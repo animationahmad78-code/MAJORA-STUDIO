@@ -30,6 +30,7 @@ jobs:
           npm test
           npm run build -w @majora/web
           dotnet build apps/web-api/Majora.WebApi.csproj -c Release
+          dotnet build tooling/sqlite-snapshot/SqliteSnapshot.csproj -c Release
           ./tooling/test-web-api.ps1 -Dotnet (Get-Command dotnet).Source
       - name: Publish Windows and Linux packages
         shell: pwsh
