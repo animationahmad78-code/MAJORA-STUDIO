@@ -466,6 +466,12 @@ try {
     if ($role -eq 'viewer') {
       $invoicesRead = Invoke-WebRequest "$base/api/merchant/invoices" -WebSession $roleSession -SkipHttpErrorCheck
       if ($invoicesRead.StatusCode -ne 200) { throw 'Viewer could not read invoices' }
+      foreach ($restrictedPath in @('/merchant/accounting/overview','/merchant/accounting/cheques','/merchant/subscription','/merchant/subscription/orders','/merchant/billing','/merchant/plans','/merchant/price-batches','/merchant/reminders')) {
+        $restrictedRead = Invoke-WebRequest "$base/api$restrictedPath" -WebSession $roleSession -SkipHttpErrorCheck
+        if ($restrictedRead.StatusCode -ne 403) { throw "Viewer read restricted $restrictedPath : $($restrictedRead.StatusCode)" }
+      }
+      $viewerSearch = Invoke-RestMethod "$base/api/merchant/search?q=OUT-1" -WebSession $roleSession
+      if (@($viewerSearch | Where-Object kind -in @('cheque','purchase','expense','reminder')).Count -gt 0) { throw 'Viewer search exposed a restricted financial item' }
     }
     $canCreateInvoice = $role -eq 'cashier'
     $invoiceAttempt = Invoke-WebRequest "$base/api/merchant/invoices" -Method Post -WebSession $roleSession -Headers @{'X-CSRF'=$roleSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{idempotencyKey="role-invoice-$role-$id";customerName='آزمون نقش';customerPhone='';paymentStatus='proforma';paidRial=0;lines=@(@{name='خدمت';unitPriceRial=1000;quantity=1})} | ConvertTo-Json -Depth 10 -Compress) -SkipHttpErrorCheck

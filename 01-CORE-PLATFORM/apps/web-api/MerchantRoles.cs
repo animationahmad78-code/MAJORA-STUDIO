@@ -29,7 +29,12 @@ public static class MerchantRoles
                 .Any(prefix => p.Equals(prefix, StringComparison.OrdinalIgnoreCase) ||
                     p.StartsWith(prefix + "/", StringComparison.OrdinalIgnoreCase));
             if (!knownRead) return false;
-            if (role == "viewer") return true;
+            // The viewer's navigation contains only the sales read views. Keep the
+            // API equally narrow; hiding accounting and billing tabs is not access control.
+            if (role == "viewer")
+                return new[] { "/dashboard", "/search", "/products", "/customers", "/invoices", "/invoice-brand" }
+                    .Any(prefix => p.Equals(prefix, StringComparison.OrdinalIgnoreCase) ||
+                        p.StartsWith(prefix + "/", StringComparison.OrdinalIgnoreCase));
             if (role == "warehouse") return p.StartsWith("/products", StringComparison.OrdinalIgnoreCase);
             if (p.StartsWith("/subscription", StringComparison.OrdinalIgnoreCase) || p.StartsWith("/plans", StringComparison.OrdinalIgnoreCase) || p.StartsWith("/billing", StringComparison.OrdinalIgnoreCase)) return role == "accountant";
             if (p.StartsWith("/price-batches", StringComparison.OrdinalIgnoreCase) || p.StartsWith("/archive", StringComparison.OrdinalIgnoreCase)) return false;
