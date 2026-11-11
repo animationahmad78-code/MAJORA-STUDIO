@@ -209,6 +209,12 @@ try {
   $persianPhoneCustomer = PutJson "/merchant/customers/$($customer.id)" @{name='مشتری آزمون';phone='۰۹۱۲-۰۰۰-۰۰۰۰';address='مشهد';occupation='فروشنده';acquisitionSource='معرفی';referrerPhone='09121111111';notes='مشتری وفادار'} $ownerSession
   if ($persianPhoneCustomer.phone -ne '09120000000') { throw 'Persian phone was not normalized' }
   if ($customer.address -ne 'مشهد' -or $customer.acquisitionSource -ne 'معرفی') { throw 'Optional customer profile was not stored' }
+  $overflowRejected = $false
+  try { $null = PostJson '/merchant/invoices' @{idempotencyKey="overflow-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='proforma';paidRial=0;lines=@(@{productId=$null;name='قلم با مبلغ نامعتبر';unitPriceRial=9223372036854775807;quantity=2})} $ownerSession } catch { $overflowRejected = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $overflowRejected) { throw 'Invoice arithmetic overflow was not rejected as a validatable input error' }
+  $sumOverflowRejected = $false
+  try { $null = PostJson '/merchant/invoices' @{idempotencyKey="sum-overflow-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='proforma';paidRial=0;lines=@(@{productId=$null;name='ردیف نخست';unitPriceRial=9223372036854775807;quantity=1},@{productId=$null;name='ردیف دوم';unitPriceRial=1;quantity=1})} $ownerSession } catch { $sumOverflowRejected = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $sumOverflowRejected) { throw 'Invoice total overflow was not rejected as a validatable input error' }
   $invoiceBody = @{idempotencyKey="invoice-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='partial';paidRial=200000;lines=@(@{productId=$product.id;quantity=2})}
   $invoice = PostJson '/merchant/invoices' $invoiceBody $ownerSession
   $noCheque = Invoke-WebRequest "$base/api/merchant/invoices/$($invoice.id)/cheque" -WebSession $ownerSession
@@ -406,6 +412,12 @@ try {
   try { $null = Invoke-WebRequest "$base/api/merchant/products/$($product.id)/photo" -WebSession $otherSession } catch { $crossPhotoBlocked = $_.Exception.Response.StatusCode -eq 404 }
   if (-not $crossPhotoBlocked) { throw 'Cross-tenant product photo read was not blocked' }
   $otherProduct = PostJson '/merchant/products' @{name='کیف بهای تمام‌شده';sku="COST-$id";category='کیف';priceRial=500000;stock=0} $otherSession
+  $purchaseOverflowRejected = $false
+  try { $null = PostJson '/merchant/accounting/purchases' @{idempotencyKey="purchase-overflow-$id";supplierName='تأمین‌کننده آزمون';paidRial=0;lines=@(@{productId=$otherProduct.id;quantity=2;unitCostRial=9223372036854775807})} $otherSession } catch { $purchaseOverflowRejected = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $purchaseOverflowRejected) { throw 'Purchase arithmetic overflow was not rejected as a validatable input error' }
+  $purchaseSumOverflowRejected = $false
+  try { $null = PostJson '/merchant/accounting/purchases' @{idempotencyKey="purchase-sum-overflow-$id";supplierName='تأمین‌کننده آزمون';paidRial=0;lines=@(@{productId=$otherProduct.id;quantity=1;unitCostRial=9223372036854775807;stockQuantity=0},@{productId=$otherProduct.id;quantity=1;unitCostRial=1;stockQuantity=0})} $otherSession } catch { $purchaseSumOverflowRejected = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $purchaseSumOverflowRejected) { throw 'Purchase total overflow was not rejected as a validatable input error' }
   $purchaseBody = @{idempotencyKey="purchase-$id";supplierName='تأمین‌کننده آزمون';supplierInvoiceNumber='SUP-1';paidRial=300000;lines=@(@{productId=$otherProduct.id;quantity=5;unitCostRial=100000})}
   $purchase = PostJson '/merchant/accounting/purchases' $purchaseBody $otherSession
   $purchaseAgain = PostJson '/merchant/accounting/purchases' $purchaseBody $otherSession

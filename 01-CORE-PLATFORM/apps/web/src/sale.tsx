@@ -65,10 +65,12 @@ export function SaleWorkspace({ onDone }: { onDone: (invoiceId: string) => void 
   const quantity = (product: Product, next: number) => {
     if (!Number.isSafeInteger(next) || next < 0) return;
     if (!Number.isSafeInteger(product.priceRial * next)) { setError('مبلغ این ردیف از حد محاسبهٔ دقیق مرورگر فراتر است.'); return; }
+    if (next > product.stock) { setError(`موجودی «${product.name}» فقط ${product.stock} عدد است. تعداد را اصلاح کنید.`); return; }
+    setError('');
     setCart(previous => {
       const updated = { ...previous };
       if (next === 0) delete updated[product.id];
-      else updated[product.id] = { product, quantity: Math.min(next, product.stock), manual: previous[product.id]?.manual };
+      else updated[product.id] = { product, quantity: next, manual: previous[product.id]?.manual };
       return updated;
     });
   };

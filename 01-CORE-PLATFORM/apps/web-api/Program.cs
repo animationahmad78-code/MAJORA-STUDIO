@@ -1556,9 +1556,12 @@ merchant.MapPost("/invoices", async (InvoiceRequest body, MajoraDb db, HttpConte
             unitPrice = manualPrice;
             name = item.Name.Trim();
         }
-        var gross = checked(unitPrice * item.Quantity);
+        if (unitPrice > long.MaxValue / item.Quantity) return Fail("مبلغ این ردیف فاکتور از محدودهٔ ریالی مجاز فراتر است؛ قیمت یا تعداد را اصلاح کنید.");
+        var gross = unitPrice * item.Quantity;
         var discount = checked((long)decimal.Round(gross * item.DiscountPercent / 100m, 0, MidpointRounding.AwayFromZero));
-        var total = checked(gross - discount); invoice.TotalRial = checked(invoice.TotalRial + total);
+        var total = gross - discount;
+        if (invoice.TotalRial > long.MaxValue - total) return Fail("جمع فاکتور از محدودهٔ ریالی مجاز فراتر است؛ ردیف‌ها را بررسی کنید.");
+        invoice.TotalRial += total;
         invoice.Lines.Add(new InvoiceLine { Position = invoice.Lines.Count + 1, ProductId = p?.Id, NameSnapshot = name, UnitPriceRial = unitPrice, Quantity = item.Quantity, TotalRial = total, UnitCostRialSnapshot = p?.AverageCostRial ?? 0, CostKnown = p?.CostKnown ?? false });
         if (body.PaymentStatus != "proforma" && p is not null) { p.Stock -= item.Quantity; db.StockMovements.Add(new StockMovement { TenantId = tid, ProductId = p.Id, InvoiceId = invoice.Id, Delta = -item.Quantity, Reason = "invoice-issued" }); }
     }
@@ -1949,7 +1952,10 @@ merchant.MapPost("/accounting/purchases", async (PurchaseRequest body, MajoraDb 
         }
         else product = await db.Products.SingleOrDefaultAsync(x => x.Id == item.ProductId && x.TenantId == tid && !x.Archived);
         if (product is null) return Fail("کالای خرید یافت نشد.");
-        var lineTotal = checked(item.Quantity * item.UnitCostRial); purchase.TotalRial = checked(purchase.TotalRial + lineTotal);
+        if (item.UnitCostRial > long.MaxValue / item.Quantity) return Fail("مبلغ این ردیف خرید از محدودهٔ ریالی مجاز فراتر است؛ قیمت یا تعداد را اصلاح کنید.");
+        var lineTotal = item.Quantity * item.UnitCostRial;
+        if (purchase.TotalRial > long.MaxValue - lineTotal) return Fail("جمع خرید از محدودهٔ ریالی مجاز فراتر است؛ ردیف‌ها را بررسی کنید.");
+        purchase.TotalRial += lineTotal;
         purchase.Lines.Add(new PurchaseLine { ProductId = product.Id, NameSnapshot = product.Name, Quantity = item.Quantity, UnitCostRial = item.UnitCostRial, TotalRial = lineTotal });
         var stockQuantity = item.StockQuantity ?? item.Quantity;
         if (stockQuantity > 0 && product.Stock == 0) { product.AverageCostRial = item.UnitCostRial; product.CostKnown = true; }
@@ -1959,7 +1965,8 @@ merchant.MapPost("/accounting/purchases", async (PurchaseRequest body, MajoraDb 
             var quantity = (BigInteger)product.Stock + stockQuantity;
             product.AverageCostRial = checked((long)((value + quantity / 2) / quantity));
         }
-        product.Stock = checked(product.Stock + stockQuantity); product.UpdatedAt = DateTime.UtcNow;
+        if (product.Stock > long.MaxValue - stockQuantity) return Fail("موجودی کالا از محدودهٔ مجاز فراتر است؛ تعداد ورود به انبار را اصلاح کنید.");
+        product.Stock += stockQuantity; product.UpdatedAt = DateTime.UtcNow;
         if (stockQuantity > 0) db.StockMovements.Add(new StockMovement { TenantId = tid, ProductId = product.Id, Delta = stockQuantity, Reason = "purchase-received" });
     }
     if (body.PaidRial < 0 || body.PaidRial > purchase.TotalRial) return Fail("پرداخت خرید از جمع بیشتر است.");
