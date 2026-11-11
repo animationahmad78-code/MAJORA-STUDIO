@@ -226,6 +226,9 @@ static IResult Fail(string message, int status = 400) => Results.Json(new {
     error = message
 }, statusCode: status);
 static void Audit(MajoraDb db, ClaimsPrincipal p, Guid? tenantId, string action, string entity, Guid id, string detail = "") => db.Audit.Add(new AuditEntry { ActorId = UserId(p), TenantId = tenantId, Action = action, EntityType = entity, EntityId = id.ToString(), Detail = detail });
+static void AuthAudit(MajoraDb db, AppUser? user, string action, string reason, HttpContext c, Guid? sessionId = null) =>
+    db.Audit.Add(new AuditEntry { ActorId = user?.Id ?? Guid.Empty, TenantId = user?.TenantId, Action = action,
+        EntityType = "session", EntityId = sessionId?.ToString() ?? "", Detail = $"reason={reason};ip={c.Connection.RemoteIpAddress}" });
 static long DiscountedPrice(long price, decimal percent) => checked(price - (long)decimal.Round(price * percent / 100m, 0, MidpointRounding.AwayFromZero));
 static bool ValidCheque(ChequeRequest body) =>
     body.Direction is "received" or "issued" && !string.IsNullOrWhiteSpace(body.Party) && body.Party.Trim().Length <= 200 &&
@@ -294,10 +297,22 @@ static async Task<AppUser?> AuthenticatedAccount(MajoraDb db, HttpContext c, str
 app.MapGet("/api/health", () => Results.Ok(new { status = "ok", version = "web-foundation-1" }));
 app.MapPost("/api/auth/login", async (LoginRequest body, MajoraDb db, IPasswordHasher<AppUser> hasher, HttpContext ctx) =>
 {
-    if (string.IsNullOrWhiteSpace(body.Username) || string.IsNullOrWhiteSpace(body.Password)) return Fail("نام کاربری یا رمز عبور نادرست است.", 401);
-    var user = await db.Users.SingleOrDefaultAsync(x => x.Username == body.Username && x.Enabled);
-    if (user is null || hasher.VerifyHashedPassword(user, user.PasswordHash, body.Password) == PasswordVerificationResult.Failed) return Fail("نام کاربری یا رمز عبور نادرست است.", 401);
-    if (user.TenantId is Guid tid && !await Active(db, tid)) return Fail("اشتراک این کسب‌وکار فعال نیست. با پشتیبانی ماژورا تماس بگیرید.", 403);
+    if (string.IsNullOrWhiteSpace(body.Username) || string.IsNullOrWhiteSpace(body.Password))
+    {
+        AuthAudit(db, null, "auth.login.failed", "missing_credentials", ctx); await db.SaveChangesAsync();
+        return Fail("نام کاربری یا رمز عبور نادرست است.", 401);
+    }
+    var user = await db.Users.SingleOrDefaultAsync(x => x.Username == body.Username);
+    if (user is null || hasher.VerifyHashedPassword(user, user.PasswordHash, body.Password) == PasswordVerificationResult.Failed || !user.Enabled)
+    {
+        AuthAudit(db, user, "auth.login.failed", user?.Enabled == false ? "disabled_account" : "invalid_credentials", ctx);
+        await db.SaveChangesAsync(); return Fail("نام کاربری یا رمز عبور نادرست است.", 401);
+    }
+    if (user.TenantId is Guid tid && !await Active(db, tid))
+    {
+        AuthAudit(db, user, "auth.login.failed", "subscription_inactive", ctx); await db.SaveChangesAsync();
+        return Fail("اشتراک این کسب‌وکار فعال نیست. با پشتیبانی ماژورا تماس بگیرید.", 403);
+    }
     var panel = user.Role == "platform_admin" ? "admin" : "merchant";
     var scheme = AuthScheme(panel);
     if (user.TenantId is Guid merchantTenantId)
@@ -316,18 +331,25 @@ app.MapPost("/api/auth/login", async (LoginRequest body, MajoraDb db, IPasswordH
             if (oldSession is not null) { oldSession.RevokedAt = now; await db.SaveChangesAsync(); }
         }
         var activeSessions = await db.AppSessions.CountAsync(x => x.TenantId == merchantTenantId && x.RevokedAt == null && x.ExpiresAt > now);
-        if (activeSessions >= maxDevices) return Fail("سقف نشست‌های فعال این طرح تکمیل است. از پنل نشست‌ها دستگاه قدیمی را خارج کنید یا با پشتیبانی ماژورا تماس بگیرید.", 409);
+        if (activeSessions >= maxDevices)
+        {
+            AuthAudit(db, user, "auth.login.failed", "session_limit", ctx); await db.SaveChangesAsync();
+            await capacityTx.CommitAsync();
+            return Fail("سقف نشست‌های فعال این طرح تکمیل است. از پنل نشست‌ها دستگاه قدیمی را خارج کنید یا با پشتیبانی ماژورا تماس بگیرید.", 409);
+        }
         var merchantSession = new AppSession { UserId = user.Id, TenantId = merchantTenantId, Panel = panel,
             UserAgent = ctx.Request.Headers.UserAgent.ToString()[..Math.Min(200, ctx.Request.Headers.UserAgent.ToString().Length)],
             IpAddress = ctx.Connection.RemoteIpAddress?.ToString() ?? "" };
-        db.AppSessions.Add(merchantSession); await db.SaveChangesAsync();
+        db.AppSessions.Add(merchantSession); AuthAudit(db, user, "auth.login.success", "accepted", ctx, merchantSession.Id);
+        await db.SaveChangesAsync();
         await capacityTx.CommitAsync();
         return await CompleteLogin(ctx, user, scheme, panel, merchantSession.Id);
     }
     var session = new AppSession { UserId = user.Id, TenantId = user.TenantId, Panel = panel,
         UserAgent = ctx.Request.Headers.UserAgent.ToString()[..Math.Min(200, ctx.Request.Headers.UserAgent.ToString().Length)],
         IpAddress = ctx.Connection.RemoteIpAddress?.ToString() ?? "" };
-    db.AppSessions.Add(session); await db.SaveChangesAsync();
+    db.AppSessions.Add(session); AuthAudit(db, user, "auth.login.success", "accepted", ctx, session.Id);
+    await db.SaveChangesAsync();
     return await CompleteLogin(ctx, user, scheme, panel, session.Id);
 }).RequireRateLimiting("login");
 static async Task<IResult> CompleteLogin(HttpContext ctx, AppUser user, string scheme, string panel, Guid sessionId)
@@ -341,12 +363,15 @@ static async Task<IResult> CompleteLogin(HttpContext ctx, AppUser user, string s
 app.MapPost("/api/auth/logout", async (MajoraDb db, HttpContext c) =>
 {
     var panel = c.Request.Headers["X-Majora-Panel"].ToString() == "admin" ? "admin" : "merchant";
-    if (await AuthenticatedAccount(db, c, panel) is null) return Results.Unauthorized();
+    var user = await AuthenticatedAccount(db, c, panel);
+    if (user is null) return Results.Unauthorized();
     if (Guid.TryParse(c.User.FindFirstValue("sessionId"), out var sessionId))
     {
         var session = await db.AppSessions.SingleOrDefaultAsync(x => x.Id == sessionId);
-        if (session is not null) { session.RevokedAt = DateTime.UtcNow; await db.SaveChangesAsync(); }
+        if (session is not null) session.RevokedAt = DateTime.UtcNow;
     }
+    AuthAudit(db, user, "auth.logout", "requested", c, sessionId);
+    await db.SaveChangesAsync();
     await c.SignOutAsync(AuthScheme(panel));
     c.Response.Cookies.Delete(panel == "admin" ? "majora.admin.csrf" : "majora.csrf");
     return Results.NoContent();
@@ -714,8 +739,8 @@ admin.MapGet("/activity", async (Guid? tenantId, int? page, string? q, MajoraDb 
     var search = q?.Trim();
     if (search?.Length > 100) return Fail("عبارت جست‌وجو نباید بیش از ۱۰۰ نویسه باشد.");
     var events = db.Audit.AsNoTracking().Where(x => tenantId == null || x.TenantId == tenantId)
-        .Join(db.Users.AsNoTracking(), a => a.ActorId, u => u.Id,
-            (a, u) => new { a.Id, a.TenantId, a.At, a.Action, a.EntityType, a.EntityId, a.Detail, ActorName = u.Username });
+        .GroupJoin(db.Users.AsNoTracking(), a => a.ActorId, u => u.Id, (a, users) => new { a, users })
+        .SelectMany(x => x.users.DefaultIfEmpty(), (x, u) => new { x.a.Id, x.a.TenantId, x.a.At, x.a.Action, x.a.EntityType, x.a.EntityId, x.a.Detail, ActorName = u == null ? "ناشناس" : u.Username });
     if (!string.IsNullOrEmpty(search)) events = events.Where(x => x.ActorName.Contains(search) || x.Action.Contains(search) || x.EntityType.Contains(search) || x.EntityId.Contains(search) || x.Detail.Contains(search));
     return Results.Ok(await events.OrderByDescending(x => x.At).Skip(Math.Max(0, (page ?? 1) - 1) * 100).Take(100).ToListAsync());
 });

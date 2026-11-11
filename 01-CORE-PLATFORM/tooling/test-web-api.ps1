@@ -37,6 +37,11 @@ try {
     Invoke-RestMethod "$base/api$path" -Method Put -WebSession $session -Headers @{'X-CSRF'=$token} -ContentType 'application/json' -Body ($body | ConvertTo-Json -Depth 10 -Compress)
   }
   $null = PostJson '/auth/login' @{username=$adminUser;password=$adminPass} $adminSession $true
+  $unknownLoginBlocked = $false
+  try { $null = PostJson '/auth/login' @{username="unknown_$id";password='wrong-password'} ([Microsoft.PowerShell.Commands.WebRequestSession]::new()) $true } catch { $unknownLoginBlocked = $_.Exception.Response.StatusCode -eq 401 }
+  if (-not $unknownLoginBlocked) { throw 'Unknown login did not return generic unauthorized response' }
+  $unknownActivity = Invoke-RestMethod "$base/api/admin/activity?q=auth.login.failed" -WebSession $adminSession
+  if (@($unknownActivity | Where-Object actorName -eq 'ناشناس').Count -lt 1) { throw 'Unknown login attempt was missing from admin security history' }
   $missingTenant = Invoke-WebRequest "$base/api/admin/tenants/$([guid]::NewGuid())/invoice-brand" -WebSession $adminSession -SkipHttpErrorCheck
   $missingError = $missingTenant.Content | ConvertFrom-Json
   if ($missingTenant.StatusCode -ne 404 -or $missingError.errorCode -ne 'not_found' -or
@@ -79,6 +84,11 @@ try {
   $adminOverview = Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession
   if ($adminOverview.tenants -ne 20 -or $adminOverview.activeSubscriptions -ne 1) { throw 'Admin overview active tenant count disagrees with subscription data' }
   $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $ownerSession $true
+  $badOwnerPasswordBlocked = $false
+  try { $null = PostJson '/auth/login' @{username="owner_$id";password='wrong-password'} ([Microsoft.PowerShell.Commands.WebRequestSession]::new()) $true } catch { $badOwnerPasswordBlocked = $_.Exception.Response.StatusCode -eq 401 }
+  if (-not $badOwnerPasswordBlocked) { throw 'Incorrect password did not return generic unauthorized response' }
+  $authActivity = Invoke-RestMethod "$base/api/merchant/activity?q=auth.login" -WebSession $ownerSession
+  if (@($authActivity | Where-Object action -eq 'auth.login.success').Count -lt 1 -or @($authActivity | Where-Object action -eq 'auth.login.failed').Count -lt 1) { throw 'Known login events were not visible in tenant activity' }
   $null = PostJson '/auth/login' @{username=$adminUser;password=$adminPass} $ownerSession $true
   $adminInSharedBrowser = Invoke-RestMethod "$base/api/auth/me?panel=admin" -WebSession $ownerSession
   $merchantInSharedBrowser = Invoke-RestMethod "$base/api/auth/me?panel=merchant" -WebSession $ownerSession
@@ -87,6 +97,8 @@ try {
   $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $ownerSession
   $adminToken = $ownerSession.Cookies.GetCookies([uri]$base)['majora.admin.csrf'].Value
   $null = Invoke-RestMethod "$base/api/auth/logout" -Method Post -WebSession $ownerSession -Headers @{'X-CSRF'=$adminToken;'X-Majora-Panel'='admin'}
+  $logoutActivity = Invoke-RestMethod "$base/api/admin/activity?q=auth.logout" -WebSession $adminSession
+  if (@($logoutActivity | Where-Object action -eq 'auth.logout').Count -lt 1) { throw 'Logout event was not recorded' }
   $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $ownerSession
   $adminStillSignedIn = $true
   try { $null = Invoke-RestMethod "$base/api/admin/overview" -WebSession $ownerSession } catch { $adminStillSignedIn = $false }
@@ -646,6 +658,8 @@ try {
   $capacityBlocked = $false
   try { $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $blockedBrowser $true } catch { $capacityBlocked = $_.Exception.Response.StatusCode -eq 409 }
   if (-not $capacityBlocked) { throw 'A second browser bypassed the plan device limit' }
+  $capacityActivity = Invoke-RestMethod "$base/api/merchant/activity?q=session_limit" -WebSession $limitedBrowser
+  if (@($capacityActivity | Where-Object action -eq 'auth.login.failed').Count -lt 1) { throw 'Capacity rejection was not recorded in merchant history' }
   $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $limitedBrowser $true
   $limitedSessions = Invoke-RestMethod "$base/api/admin/tenants/$($tenant.id)/sessions" -WebSession $adminSession
   if (@($limitedSessions).Count -ne 1) { throw 'Signing in again on the same browser consumed another slot' }

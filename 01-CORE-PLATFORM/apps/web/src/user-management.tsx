@@ -18,21 +18,23 @@ const actionLabels: Record<string, string> = {
   'payment.record': 'دریافت وجه ثبت کرد', 'refund.record': 'بازپرداخت ثبت کرد',
   'sales-return.record': 'مرجوعی ثبت کرد', 'archive.add': 'موردی را بایگانی کرد', 'archive.restore': 'موردی را از بایگانی برگرداند', 'archive.purge': 'مورد بدون سابقه را حذف کرد',
   'session.revoke': 'دسترسی دستگاهی را قطع کرد', 'session.revoke-all': 'از همهٔ دستگاه‌های خود خارج شد',
+  'auth.login.success': 'وارد حساب شد', 'auth.login.failed': 'ورود ناموفق داشت', 'auth.logout': 'از حساب خارج شد',
   'staff.create': 'حساب همکار ساخت', 'staff.enabled': 'وضعیت همکار را تغییر داد',
   'password.admin-reset': 'رمز کاربر را بازنشانی کرد', 'password.owner-reset': 'رمز همکار را بازنشانی کرد',
   'invoice-brand.admin-update': 'هویت فاکتور را تغییر داد', 'invoice-brand.merchant-update': 'مشخصات فاکتور را تغییر داد',
   'subscription.create': 'اشتراک ثبت کرد', 'subscription-order.submit': 'درخواست اشتراک ثبت کرد'
 };
-const entityLabels: Record<string, string> = { invoice: 'فاکتور', product: 'کالا', customer: 'مشتری', purchase: 'خرید', expense: 'هزینه', cheque: 'چک', reminder: 'یادآور', tenant: 'فروشگاه', user: 'کاربر', 'invoice-brand': 'قالب فاکتور' };
+const entityLabels: Record<string, string> = { invoice: 'فاکتور', product: 'کالا', customer: 'مشتری', purchase: 'خرید', expense: 'هزینه', cheque: 'چک', reminder: 'یادآور', tenant: 'فروشگاه', user: 'کاربر', session: 'نشست', 'invoice-brand': 'قالب فاکتور' };
 const roleLabels: Record<string, string> = { platform_admin: 'مالک ماژورا', owner: 'مالک فروشگاه', manager: 'مدیر', cashier: 'صندوق‌دار', warehouse: 'انباردار', accountant: 'حسابدار', viewer: 'مشاهده‌گر', staff: 'همکار' };
-const detailLabels: Record<string, string> = { number: 'شماره فاکتور', amount: 'مبلغ', old: 'مقدار قبلی', new: 'مقدار جدید', from: 'نسخه قبلی', to: 'نسخه جدید', reason: 'دلیل', count: 'تعداد', percent: 'درصد', enabled: 'فعال', model: 'مدل', subscription: 'اشتراک', return: 'مرجوعی', status: 'وضعیت' };
+const detailLabels: Record<string, string> = { number: 'شماره فاکتور', amount: 'مبلغ', old: 'مقدار قبلی', new: 'مقدار جدید', from: 'نسخه قبلی', to: 'نسخه جدید', reason: 'دلیل', ip: 'نشانی شبکه', count: 'تعداد', percent: 'درصد', enabled: 'فعال', model: 'مدل', subscription: 'اشتراک', return: 'مرجوعی', status: 'وضعیت' };
+const authReasons: Record<string, string> = { accepted: 'ورود موفق', requested: 'خروج به درخواست کاربر', invalid_credentials: 'نام کاربری یا رمز نادرست', missing_credentials: 'اطلاعات ورود ناقص', disabled_account: 'حساب غیرفعال', subscription_inactive: 'اشتراک غیرفعال', session_limit: 'سقف نشست‌ها تکمیل' };
 function readableDetail(detail: string) {
   return detail.split(';').map(part => {
     const separator = part.indexOf('=');
     if (separator < 0) return part.trim();
     const key = part.slice(0, separator).trim();
     const value = part.slice(separator + 1).trim();
-    return `${detailLabels[key] ?? key}: ${value === 'True' ? 'بله' : value === 'False' ? 'خیر' : value}`;
+    return `${detailLabels[key] ?? key}: ${authReasons[value] ?? (value === 'True' ? 'بله' : value === 'False' ? 'خیر' : value)}`;
   }).filter(Boolean).join(' · ');
 }
 
