@@ -993,11 +993,35 @@ merchant.MapPut("/invoice-brand", async (InvoiceBrandUpdate body, MajoraDb db, H
 });
 merchant.MapGet("/dashboard", async (MajoraDb db, HttpContext c) =>
 {
-    var tid = TenantId(c.User); var since = DateTime.UtcNow.AddDays(-30);
-    var sales = await FinanceMath.LoadSalesMetricsAsync(db, tid, since);
-    var receipts30 = await db.Payments.Where(x => x.TenantId == tid && x.ReceivedAt >= since).SumAsync(x => x.AmountRial);
-    var refunds30 = await db.Refunds.Where(x => x.TenantId == tid && x.RefundedAt >= since).SumAsync(x => x.AmountRial);
-    return Results.Ok(new { sales30Rial = sales.NetSalesRial, received30Rial = receipts30 - refunds30, receivable30Rial = sales.ReceivableRial, refundDueRial = sales.RefundDueRial, invoiceCount30 = sales.InvoiceCount, customers = await db.Customers.CountAsync(x => x.TenantId == tid && !x.Archived), products = await db.Products.CountAsync(x => x.TenantId == tid && !x.Archived), lowStock = await db.Products.CountAsync(x => x.TenantId == tid && !x.Archived && x.Stock <= 3), overdue = await db.Reminders.CountAsync(x => x.TenantId == tid && !x.Done && x.DueAt <= DateTime.UtcNow), openCheques = await db.Cheques.CountAsync(x => x.TenantId == tid && x.Status == "open"), dueCheques = await db.Cheques.CountAsync(x => x.TenantId == tid && x.Status == "open" && x.DueAt <= DateTime.UtcNow) });
+    var tid = TenantId(c.User); var now = DateTime.UtcNow; var since = now.AddDays(-30);
+    var disabled = TenantFeatures.Read(await db.Tenants.AsNoTracking().Where(x => x.Id == tid).Select(x => x.DisabledFeaturesJson).SingleAsync());
+    var canSee = (string feature, string path) => !disabled.Contains(feature) && MerchantRoles.Allows(Role(c.User), "/api/merchant/" + path, "GET");
+    var invoicesVisible = canSee("invoices", "invoices");
+    var accountingVisible = canSee("accounting", "accounting/overview");
+    var returnsVisible = invoicesVisible && canSee("returns", "accounting/returns");
+    var chequesVisible = accountingVisible && canSee("cheques", "accounting/cheques");
+    var sales = invoicesVisible || accountingVisible ? await FinanceMath.LoadSalesMetricsAsync(db, tid, since) : null;
+    long? received30 = null;
+    if (accountingVisible)
+    {
+        var receipts = await db.Payments.Where(x => x.TenantId == tid && x.ReceivedAt >= since).SumAsync(x => x.AmountRial);
+        var refunds = await db.Refunds.Where(x => x.TenantId == tid && x.RefundedAt >= since).SumAsync(x => x.AmountRial);
+        received30 = receipts - refunds;
+    }
+    var productsVisible = canSee("products", "products");
+    return Results.Ok(new {
+        sales30Rial = invoicesVisible ? (long?)sales?.NetSalesRial : null,
+        received30Rial = received30,
+        receivable30Rial = accountingVisible ? (long?)sales?.ReceivableRial : null,
+        refundDueRial = returnsVisible ? (long?)sales?.RefundDueRial : null,
+        invoiceCount30 = invoicesVisible ? (int?)sales?.InvoiceCount : null,
+        customers = canSee("customers", "customers") ? (int?)await db.Customers.CountAsync(x => x.TenantId == tid && !x.Archived) : null,
+        products = productsVisible ? (int?)await db.Products.CountAsync(x => x.TenantId == tid && !x.Archived) : null,
+        lowStock = productsVisible ? (int?)await db.Products.CountAsync(x => x.TenantId == tid && !x.Archived && x.Stock <= 3) : null,
+        overdue = canSee("reminders", "reminders") ? (int?)await db.Reminders.CountAsync(x => x.TenantId == tid && !x.Done && x.DueAt <= now) : null,
+        openCheques = chequesVisible ? (int?)await db.Cheques.CountAsync(x => x.TenantId == tid && x.Status == "open") : null,
+        dueCheques = chequesVisible ? (int?)await db.Cheques.CountAsync(x => x.TenantId == tid && x.Status == "open" && x.DueAt <= now) : null
+    });
 });
 merchant.MapGet("/products/meta", async (MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var products = db.Products.Where(x => x.TenantId == tid && !x.Archived); return Results.Ok(new { count = await products.CountAsync(), categories = await products.Select(x => x.Category).Distinct().OrderBy(x => x).ToListAsync() }); });
 merchant.MapGet("/products", async (string? q, string? category, int? page, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Products.Where(x => x.TenantId == tid && !x.Archived && (q == null || x.Name.Contains(q) || x.Sku.Contains(q)) && (string.IsNullOrEmpty(category) || x.Category == category || x.Category.StartsWith(category + " / ") || x.Category.StartsWith(category + "/"))).OrderBy(x => x.Name).Skip(Math.Max(0, (page ?? 1) - 1) * 50).Take(50).ToListAsync()); });
@@ -2066,6 +2090,7 @@ merchant.MapPost("/advisor/ask", async (AdvisorQuestion body, MajoraDb db, HttpC
     catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or KeyNotFoundException or JsonException or ArgumentOutOfRangeException) { return RuleFallback(AiProviders.FromException(ex)); }
 }).RequireRateLimiting("login");
 app.MapFallbackToFile("index.html");
+TenantFeatures.AssertEndpointCoverage(((IEndpointRouteBuilder)app).DataSources.SelectMany(source => source.Endpoints));
 app.Run();
 
 public sealed record LoginRequest(string Username, string Password);

@@ -340,6 +340,14 @@ try {
   if ($chequePhoto.Headers['Content-Type'] -notlike 'image/png*') { throw 'Cheque photo could not be read' }
   $invoiceChequePhoto = Invoke-WebRequest "$base/api/merchant/invoices/$($chequeInvoice.id)/cheque-photo" -WebSession $ownerSession
   if ($invoiceChequePhoto.Headers['Content-Type'] -notlike 'image/png*') { throw 'Invoice cheque attachment could not be read' }
+  $null = PutJson "/admin/tenants/$($tenant.id)/features" @{disabled=@('cheques')} $adminSession
+  $hiddenChequeDashboard = Invoke-RestMethod "$base/api/merchant/dashboard" -WebSession $ownerSession
+  if ($null -ne $hiddenChequeDashboard.openCheques -or $null -ne $hiddenChequeDashboard.dueCheques) { throw 'Disabled cheque feature leaked dashboard totals' }
+  foreach ($chequePath in @("/merchant/invoices/$($chequeInvoice.id)/cheque", "/merchant/invoices/$($chequeInvoice.id)/cheque-photo", "/merchant/accounting/cheques/$($linkedCheque.id)/photo")) {
+    $hiddenCheque = Invoke-WebRequest "$base/api$chequePath" -WebSession $ownerSession -SkipHttpErrorCheck
+    if ($hiddenCheque.StatusCode -ne 403) { throw "Disabled cheque feature exposed $chequePath : $($hiddenCheque.StatusCode)" }
+  }
+  $null = PutJson "/admin/tenants/$($tenant.id)/features" @{disabled=@()} $adminSession
   $chequePaymentBlocked = $false
   try { $null = PostJson "/merchant/invoices/$($chequeInvoice.id)/payments" @{idempotencyKey="cheque-payment-$id";amountRial=500000;method='cash'} $ownerSession } catch { $chequePaymentBlocked = $_.Exception.Response.StatusCode -eq 409 }
   if (-not $chequePaymentBlocked) { throw 'Open cheque allowed untracked invoice payment' }
@@ -434,6 +442,14 @@ try {
   $crossRevisionBlocked = $false
   try { $null = Invoke-RestMethod "$base/api/merchant/invoices/$($invoice.id)/revisions" -WebSession $otherSession } catch { $crossRevisionBlocked = $_.Exception.Response.StatusCode -eq 404 }
   if (-not $crossRevisionBlocked) { throw 'Cross-tenant invoice revision history was readable' }
+  $crossInvoiceCheque = Invoke-WebRequest "$base/api/merchant/invoices/$($chequeInvoice.id)/cheque" -WebSession $otherSession -SkipHttpErrorCheck
+  if ($crossInvoiceCheque.StatusCode -ne 404) { throw 'Cross-tenant invoice cheque metadata was readable' }
+  $crossProductPrice = Invoke-WebRequest "$base/api/merchant/products/$($product.id)/price" -Method Put -WebSession $otherSession -Headers @{'X-CSRF'=$otherSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{expectedPriceRial=$product.priceRial;newPriceRial=$product.priceRial+1} | ConvertTo-Json -Compress) -SkipHttpErrorCheck
+  if ($crossProductPrice.StatusCode -ne 404) { throw 'Cross-tenant product price was mutable' }
+  $crossCustomerUpdate = Invoke-WebRequest "$base/api/merchant/customers/$($customer.id)" -Method Put -WebSession $otherSession -Headers @{'X-CSRF'=$otherSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{name='تغییر غیرمجاز';phone='09120000000'} | ConvertTo-Json -Compress) -SkipHttpErrorCheck
+  if ($crossCustomerUpdate.StatusCode -ne 404) { throw 'Cross-tenant customer was mutable' }
+  $crossPayment = Invoke-WebRequest "$base/api/merchant/invoices/$($invoice.id)/payments" -Method Post -WebSession $otherSession -Headers @{'X-CSRF'=$otherSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{idempotencyKey="cross-payment-$id";amountRial=1;method='cash'} | ConvertTo-Json -Compress) -SkipHttpErrorCheck
+  if ($crossPayment.StatusCode -ne 404) { throw 'Cross-tenant invoice payment was accepted' }
   $crossChequeBlocked = $false
   try { $null = Invoke-WebRequest "$base/api/merchant/accounting/cheques/$($linkedCheque.id)/photo" -WebSession $otherSession } catch { $crossChequeBlocked = $_.Exception.Response.StatusCode -eq 404 }
   if (-not $crossChequeBlocked) { throw 'Cross-tenant cheque photo was readable' }
@@ -478,6 +494,8 @@ try {
     if ($role -eq 'viewer') {
       $invoicesRead = Invoke-WebRequest "$base/api/merchant/invoices" -WebSession $roleSession -SkipHttpErrorCheck
       if ($invoicesRead.StatusCode -ne 200) { throw 'Viewer could not read invoices' }
+      $viewerDashboard = Invoke-RestMethod "$base/api/merchant/dashboard" -WebSession $roleSession
+      if ($null -ne $viewerDashboard.received30Rial -or $null -ne $viewerDashboard.receivable30Rial -or $null -ne $viewerDashboard.openCheques -or $null -ne $viewerDashboard.dueCheques) { throw 'Viewer dashboard exposed accounting or cheque totals' }
       foreach ($restrictedPath in @('/merchant/accounting/overview','/merchant/accounting/cheques','/merchant/subscription','/merchant/subscription/orders','/merchant/billing','/merchant/plans','/merchant/price-batches','/merchant/reminders')) {
         $restrictedRead = Invoke-WebRequest "$base/api$restrictedPath" -WebSession $roleSession -SkipHttpErrorCheck
         if ($restrictedRead.StatusCode -ne 403) { throw "Viewer read restricted $restrictedPath : $($restrictedRead.StatusCode)" }

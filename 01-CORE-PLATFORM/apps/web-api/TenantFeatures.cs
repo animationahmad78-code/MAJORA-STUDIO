@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.AspNetCore.Routing;
 
 namespace Majora.WebApi;
 
@@ -6,6 +7,33 @@ namespace Majora.WebApi;
 // Unknown keys fail closed on updates so a misspelling cannot silently grant access.
 public static class TenantFeatures
 {
+    // These routes are infrastructure, navigation, or subscription self-service.
+    // Every other merchant route must declare a feature in Required().
+    private static readonly HashSet<string> UngatedRoutes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "/features", "/sessions", "/sessions/{id:guid}/revoke",
+        "/subscription", "/subscription/quote", "/subscription/orders",
+        "/plans", "/billing", "/workspace", "/search", "/dashboard"
+    };
+
+    public static void AssertEndpointCoverage(IEnumerable<Endpoint> endpoints)
+    {
+        var merchantRoutes = 0;
+        foreach (var endpoint in endpoints.OfType<RouteEndpoint>())
+        {
+            var route = "/" + endpoint.RoutePattern.RawText?.Trim('/');
+            if (!route.StartsWith("/api/merchant/", StringComparison.OrdinalIgnoreCase)) continue;
+            merchantRoutes++;
+            var path = route[13..];
+            if (UngatedRoutes.Contains(path)) continue;
+            var methods = endpoint.Metadata.GetMetadata<IHttpMethodMetadata>()?.HttpMethods ?? ["GET"];
+            foreach (var method in methods)
+                if (Required(route, method).Length == 0)
+                    throw new InvalidOperationException($"Merchant route {method} {route} has no tenant feature policy.");
+        }
+        if (merchantRoutes == 0) throw new InvalidOperationException("Merchant endpoint coverage was not evaluated.");
+    }
+
     public static readonly IReadOnlyDictionary<string, string> Names = new Dictionary<string, string>
     {
         ["sale"] = "فروش جدید", ["products"] = "کالاها", ["prices"] = "ویرایش قیمت",
@@ -50,7 +78,8 @@ public static class TenantFeatures
         {
             if (p.Contains("/returns", StringComparison.OrdinalIgnoreCase) || p.Contains("/refunds", StringComparison.OrdinalIgnoreCase)) return ["invoices", "returns", "accounting"];
             if (p.Contains("/payments", StringComparison.OrdinalIgnoreCase)) return ["invoices", "accounting"];
-            if (p.EndsWith("/cheque", StringComparison.OrdinalIgnoreCase)) return ["invoices", "cheques"];
+            if (p.EndsWith("/cheque", StringComparison.OrdinalIgnoreCase) ||
+                p.EndsWith("/cheque-photo", StringComparison.OrdinalIgnoreCase)) return ["invoices", "cheques"];
             if (method == "POST" && (p.Equals("/invoices", StringComparison.OrdinalIgnoreCase) || p.EndsWith("/convert", StringComparison.OrdinalIgnoreCase))) return ["sale"];
             return ["invoices"];
         }
