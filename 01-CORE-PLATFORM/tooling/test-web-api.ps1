@@ -12,6 +12,7 @@ $envVars = @{
   ASPNETCORE_ENVIRONMENT = 'Development'
   MAJORA_BOOTSTRAP_USER = $adminUser
   MAJORA_BOOTSTRAP_PASSWORD = $adminPass
+  MAJORA_TEST_LOGIN_LIMIT = '100'
   ConnectionStrings__Sqlite = "Data Source=$database"
 }
 $arguments = if ($ApiDll) { @($ApiDll, '--urls', $base) } else { @('run','-c','Release','--no-build','--project',$apiProject,'--urls',$base) }
@@ -637,8 +638,22 @@ try {
   $secondOwnerValid = $true
   try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $secondOwnerSession } catch { $secondOwnerValid = $_.Exception.Response.StatusCode -ne 401 }
   if ($secondOwnerValid) { throw 'Logout-all left another device session valid' }
+  $limitedPlan = PutJson "/admin/plans/$($plan.id)" @{name='پایه';monthlyRial=1000000;maxUsers=3;maxDevices=1} $adminSession
+  if ($limitedPlan.maxDevices -ne 1) { throw 'Plan device limit did not persist' }
+  $limitedBrowser = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+  $blockedBrowser = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+  $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $limitedBrowser $true
+  $capacityBlocked = $false
+  try { $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $blockedBrowser $true } catch { $capacityBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $capacityBlocked) { throw 'A second browser bypassed the plan device limit' }
+  $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $limitedBrowser $true
+  $limitedSessions = Invoke-RestMethod "$base/api/admin/tenants/$($tenant.id)/sessions" -WebSession $adminSession
+  if (@($limitedSessions).Count -ne 1) { throw 'Signing in again on the same browser consumed another slot' }
+  $null = PostJson "/admin/tenants/$($tenant.id)/sessions/$($limitedSessions[0].id)/revoke" @{} $adminSession
+  $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $blockedBrowser $true
+  $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $blockedBrowser
   $null = Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession
-  Write-Output 'PASS: 20 tenants; subscriptions/orders; archive; invoice order; tenant isolation; device/session listing and revocation; logout-all; finance, brand and CSRF scenarios'
+  Write-Output 'PASS: 20 tenants; subscriptions/orders; archive; invoice order; tenant isolation; device cap and session revocation; logout-all; finance, brand and CSRF scenarios'
 } finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
   Write-Output "Test log: $log"

@@ -674,6 +674,9 @@ namespace Majora.WebApi.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<int>("MaxDevices")
+                        .HasColumnType("int");
+
                     b.Property<int>("MaxUsers")
                         .HasColumnType("int");
 

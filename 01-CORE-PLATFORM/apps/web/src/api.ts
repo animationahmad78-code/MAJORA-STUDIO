@@ -7,7 +7,7 @@ export type InvoiceDetail = Invoice & { lines: { id: string; productId?: string;
 export type SalesReturn = { id: string; invoiceId: string; invoiceNumber: number; customerName: string; reason: string; amountRial: number; createdAt: string };
 export const receivable = (invoice: Invoice) => invoice.paymentStatus === 'proforma' ? 0 : Math.max(0, invoice.totalRial - invoice.returnedRial - invoice.paidRial + invoice.refundedRial);
 export const refundDue = (invoice: Invoice) => invoice.paymentStatus === 'proforma' ? 0 : Math.max(0, invoice.paidRial - invoice.refundedRial - invoice.totalRial + invoice.returnedRial);
-export type Plan = { id: string; name: string; description: string; featuresJson: string; monthlyRial: number; maxUsers: number; enabled: boolean };
+export type Plan = { id: string; name: string; description: string; featuresJson: string; monthlyRial: number; maxUsers: number; maxDevices: number; enabled: boolean };
 export type Tenant = { id: string; name: string; slug: string; enabled: boolean; brandColor: string; logoUrl?: string; subscription?: { endsAt: string; paymentStatus: string; priceRialSnapshot: number } };
 export type InvoiceSocialLink = { platform: 'telegram' | 'instagram' | 'whatsapp' | 'bale' | 'rubika' | 'eitaa' | 'linkedin' | 'x' | 'website' | 'phone'; text: string; enabled: boolean };
 export type InvoiceBrand = { revision: number; storeName: string; slogan: string; phone: string; address: string; card: string; cardHolder: string; note: string; conditions: string[]; socialTelegram: string; socialInstagram: string; socialContact: string; socialLinks: InvoiceSocialLink[]; logoDataUrl: string | null };

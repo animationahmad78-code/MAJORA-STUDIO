@@ -49,9 +49,15 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
     o.Events.OnRedirectToAccessDenied = c => { c.Response.StatusCode = 403; return Task.CompletedTask; };
 });
 builder.Services.AddAuthorization();
-builder.Services.AddRateLimiter(o => o.AddPolicy("login", context => RateLimitPartition.GetFixedWindowLimiter(
-    context.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => new FixedWindowRateLimiterOptions
-    { PermitLimit = 15, Window = TimeSpan.FromMinutes(5), QueueLimit = 0 })));
+var loginLimit = builder.Environment.IsDevelopment() && int.TryParse(builder.Configuration["MAJORA_TEST_LOGIN_LIMIT"], out var testLimit)
+    ? Math.Clamp(testLimit, 15, 100) : 15;
+builder.Services.AddRateLimiter(o =>
+{
+    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    o.AddPolicy("login", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => new FixedWindowRateLimiterOptions
+        { PermitLimit = loginLimit, Window = TimeSpan.FromMinutes(5), QueueLimit = 0 }));
+});
 builder.Services.AddScoped<IPasswordHasher<AppUser>, PasswordHasher<AppUser>>();
 builder.Services.AddHttpClient();
 builder.Services.AddHttpClient("ai", client => client.Timeout = TimeSpan.FromSeconds(25))
@@ -174,6 +180,19 @@ using (var scope = app.Services.CreateScope())
                 upgrade.CommandText = "ALTER TABLE InvoiceLines ADD COLUMN Position INTEGER NOT NULL DEFAULT 0";
                 await upgrade.ExecuteNonQueryAsync();
             }
+            using var planColumns = connection.CreateCommand();
+            planColumns.CommandText = "PRAGMA table_info(Plans)";
+            using var planReader = await planColumns.ExecuteReaderAsync();
+            var hasMaxDevices = false;
+            while (await planReader.ReadAsync())
+                if (string.Equals(planReader.GetString(1), "MaxDevices", StringComparison.OrdinalIgnoreCase)) hasMaxDevices = true;
+            await planReader.CloseAsync();
+            if (!hasMaxDevices)
+            {
+                using var upgrade = connection.CreateCommand();
+                upgrade.CommandText = "ALTER TABLE Plans ADD COLUMN MaxDevices INTEGER NOT NULL DEFAULT 6";
+                await upgrade.ExecuteNonQueryAsync();
+            }
             using var sessionTable = connection.CreateCommand();
             sessionTable.CommandText = "CREATE TABLE IF NOT EXISTS AppSessions (Id TEXT NOT NULL PRIMARY KEY, UserId TEXT NOT NULL, TenantId TEXT NULL, Panel TEXT NOT NULL, CreatedAt TEXT NOT NULL, LastSeenAt TEXT NOT NULL, ExpiresAt TEXT NOT NULL, RevokedAt TEXT NULL, UserAgent TEXT NOT NULL, IpAddress TEXT NOT NULL)";
             await sessionTable.ExecuteNonQueryAsync();
@@ -281,16 +300,44 @@ app.MapPost("/api/auth/login", async (LoginRequest body, MajoraDb db, IPasswordH
     if (user.TenantId is Guid tid && !await Active(db, tid)) return Fail("اشتراک این کسب‌وکار فعال نیست. با پشتیبانی ماژورا تماس بگیرید.", 403);
     var panel = user.Role == "platform_admin" ? "admin" : "merchant";
     var scheme = AuthScheme(panel);
+    if (user.TenantId is Guid merchantTenantId)
+    {
+        await using var capacityTx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+        var now = DateTime.UtcNow;
+        var maxDevices = await db.Subscriptions.Where(s => s.TenantId == merchantTenantId && s.PaymentStatus == "paid" && s.StartsAt <= now && s.EndsAt > now)
+            .OrderByDescending(s => s.EndsAt).Join(db.Plans, s => s.PlanId, p => p.Id, (s, p) => (int?)p.MaxDevices).FirstOrDefaultAsync();
+        if (maxDevices is null) return Fail("اشتراک این کسب‌وکار فعال نیست. با پشتیبانی ماژورا تماس بگیرید.", 403);
+        var currentTicket = await ctx.AuthenticateAsync(scheme);
+        var oldSessionId = currentTicket.Principal?.FindFirstValue("sessionId");
+        var oldUserId = currentTicket.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (oldUserId == user.Id.ToString() && Guid.TryParse(oldSessionId, out var oldId))
+        {
+            var oldSession = await db.AppSessions.SingleOrDefaultAsync(x => x.Id == oldId && x.UserId == user.Id && x.TenantId == merchantTenantId && x.RevokedAt == null);
+            if (oldSession is not null) { oldSession.RevokedAt = now; await db.SaveChangesAsync(); }
+        }
+        var activeSessions = await db.AppSessions.CountAsync(x => x.TenantId == merchantTenantId && x.RevokedAt == null && x.ExpiresAt > now);
+        if (activeSessions >= maxDevices) return Fail("سقف نشست‌های فعال این طرح تکمیل است. از پنل نشست‌ها دستگاه قدیمی را خارج کنید یا با پشتیبانی ماژورا تماس بگیرید.", 409);
+        var merchantSession = new AppSession { UserId = user.Id, TenantId = merchantTenantId, Panel = panel,
+            UserAgent = ctx.Request.Headers.UserAgent.ToString()[..Math.Min(200, ctx.Request.Headers.UserAgent.ToString().Length)],
+            IpAddress = ctx.Connection.RemoteIpAddress?.ToString() ?? "" };
+        db.AppSessions.Add(merchantSession); await db.SaveChangesAsync();
+        await capacityTx.CommitAsync();
+        return await CompleteLogin(ctx, user, scheme, panel, merchantSession.Id);
+    }
     var session = new AppSession { UserId = user.Id, TenantId = user.TenantId, Panel = panel,
         UserAgent = ctx.Request.Headers.UserAgent.ToString()[..Math.Min(200, ctx.Request.Headers.UserAgent.ToString().Length)],
         IpAddress = ctx.Connection.RemoteIpAddress?.ToString() ?? "" };
     db.AppSessions.Add(session); await db.SaveChangesAsync();
-    var claims = new List<Claim> { new(ClaimTypes.NameIdentifier, user.Id.ToString()), new(ClaimTypes.Name, user.DisplayName), new(ClaimTypes.Role, user.Role), new("authVersion", user.AuthVersion.ToString()), new("sessionId", session.Id.ToString()) };
+    return await CompleteLogin(ctx, user, scheme, panel, session.Id);
+}).RequireRateLimiting("login");
+static async Task<IResult> CompleteLogin(HttpContext ctx, AppUser user, string scheme, string panel, Guid sessionId)
+{
+    var claims = new List<Claim> { new(ClaimTypes.NameIdentifier, user.Id.ToString()), new(ClaimTypes.Name, user.DisplayName), new(ClaimTypes.Role, user.Role), new("authVersion", user.AuthVersion.ToString()), new("sessionId", sessionId.ToString()) };
     if (user.TenantId is Guid tenantId) claims.Add(new Claim("tenant", tenantId.ToString()));
     await ctx.SignInAsync(scheme, new ClaimsPrincipal(new ClaimsIdentity(claims, scheme)));
     Csrf(ctx, panel);
     return Results.Ok(new { user.Id, user.DisplayName, user.Role, user.TenantId });
-}).RequireRateLimiting("login");
+}
 app.MapPost("/api/auth/logout", async (MajoraDb db, HttpContext c) =>
 {
     var panel = c.Request.Headers["X-Majora-Panel"].ToString() == "admin" ? "admin" : "merchant";
@@ -424,23 +471,23 @@ admin.MapPost("/ai-provider/test", async (MajoraDb db, IDataProtectionProvider p
 admin.MapGet("/plans", async (MajoraDb db) => Results.Ok(await db.Plans.OrderBy(x => x.MonthlyRial).ToListAsync()));
 admin.MapPost("/plans", async (PlanRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (string.IsNullOrWhiteSpace(body.Name) || body.MonthlyRial < 0 || body.MaxUsers < 1 ||
+    if (string.IsNullOrWhiteSpace(body.Name) || body.MonthlyRial < 0 || body.MaxUsers < 1 || body.MaxDevices < 1 || body.MaxDevices > 1000 ||
         (body.Description?.Length ?? 0) > 500 || (body.Features?.Count ?? 0) > 20 ||
         body.Features?.Any(x => string.IsNullOrWhiteSpace(x) || x.Length > 150) == true) return Fail("مشخصات طرح نامعتبر است.");
     var plan = new Plan { Name = body.Name.Trim(), Description = body.Description?.Trim() ?? "",
         FeaturesJson = JsonSerializer.Serialize(body.Features?.Select(x => x.Trim()).ToArray() ?? []),
-        MonthlyRial = body.MonthlyRial, MaxUsers = body.MaxUsers, Enabled = body.Enabled };
+        MonthlyRial = body.MonthlyRial, MaxUsers = body.MaxUsers, MaxDevices = body.MaxDevices, Enabled = body.Enabled };
     db.Plans.Add(plan); Audit(db, c.User, null, "plan.create", "plan", plan.Id); await db.SaveChangesAsync(); return Results.Created($"/api/admin/plans/{plan.Id}", plan);
 });
 admin.MapPut("/plans/{id:guid}", async (Guid id, PlanRequest body, MajoraDb db, HttpContext c) =>
 {
     var plan = await db.Plans.FindAsync(id); if (plan is null) return Results.NotFound();
-    if (string.IsNullOrWhiteSpace(body.Name) || body.MonthlyRial < 0 || body.MaxUsers < 1 ||
+    if (string.IsNullOrWhiteSpace(body.Name) || body.MonthlyRial < 0 || body.MaxUsers < 1 || body.MaxDevices < 1 || body.MaxDevices > 1000 ||
         (body.Description?.Length ?? 0) > 500 || (body.Features?.Count ?? 0) > 20 ||
         body.Features?.Any(x => string.IsNullOrWhiteSpace(x) || x.Length > 150) == true) return Fail("مشخصات طرح نامعتبر است.");
     plan.Name = body.Name.Trim(); plan.Description = body.Description?.Trim() ?? "";
     plan.FeaturesJson = JsonSerializer.Serialize(body.Features?.Select(x => x.Trim()).ToArray() ?? []);
-    plan.MonthlyRial = body.MonthlyRial; plan.MaxUsers = body.MaxUsers; plan.Enabled = body.Enabled;
+    plan.MonthlyRial = body.MonthlyRial; plan.MaxUsers = body.MaxUsers; plan.MaxDevices = body.MaxDevices; plan.Enabled = body.Enabled;
     Audit(db, c.User, null, "plan.update", "plan", id); await db.SaveChangesAsync(); return Results.Ok(plan);
 });
 admin.MapGet("/promo-codes", async (MajoraDb db) => Results.Ok(await db.PromoCodes.AsNoTracking().OrderByDescending(x => x.ExpiresAt).ToListAsync()));
@@ -738,7 +785,7 @@ merchant.MapPost("/sessions/{id:guid}/revoke", async (Guid id, MajoraDb db, Http
 merchant.MapGet("/subscription", async (MajoraDb db, HttpContext c) =>
 {
     var tid = TenantId(c.User);
-    return Results.Ok(await db.Subscriptions.Where(s => s.TenantId == tid).Join(db.Plans, s => s.PlanId, p => p.Id, (s,p) => new { s.Id, Plan = p.Name, s.StartsAt, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot, p.MaxUsers }).OrderByDescending(s => s.EndsAt).ToListAsync());
+    return Results.Ok(await db.Subscriptions.Where(s => s.TenantId == tid).Join(db.Plans, s => s.PlanId, p => p.Id, (s,p) => new { s.Id, Plan = p.Name, s.StartsAt, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot, p.MaxUsers, p.MaxDevices }).OrderByDescending(s => s.EndsAt).ToListAsync());
 });
 merchant.MapGet("/plans", async (MajoraDb db) => Results.Ok(await db.Plans.AsNoTracking()
     .Where(x => x.Enabled).OrderBy(x => x.MonthlyRial).ToListAsync()));
@@ -1913,7 +1960,7 @@ app.MapFallbackToFile("index.html");
 app.Run();
 
 public sealed record LoginRequest(string Username, string Password);
-public sealed record PlanRequest(string Name, long MonthlyRial, int MaxUsers, bool Enabled = true, string? Description = null, List<string>? Features = null);
+public sealed record PlanRequest(string Name, long MonthlyRial, int MaxUsers, bool Enabled = true, string? Description = null, List<string>? Features = null, int MaxDevices = 6);
 public sealed record PromoCodeRequest(string Code, decimal Percent, DateTime StartsAt, DateTime ExpiresAt, bool Enabled = true);
 public sealed record BillingRequest(string CardNumber, string CardHolder);
 public sealed record SubscriptionOrderRequest(Guid PlanId, string IdempotencyKey, string? PromoCode, string? ReceiptDataUrl, long ExpectedTotalRial);
