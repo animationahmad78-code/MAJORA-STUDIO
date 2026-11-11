@@ -11,4 +11,11 @@ describe('invoice pagination', () => {
       expect(pages.at(-1)?.length).toBeLessThan(pages[0].length);
     }
   });
+  it('balances eighteen A4 rows instead of leaving one row alone on the last sheet', () => {
+    const rows = Array.from({ length: 18 }, (_, index) => ({ name: `قلم شماره ${index + 1}` }));
+    const pages = pageLines(rows, 'a4');
+    expect(pages).toHaveLength(2);
+    expect(pages.map(page => page.length)).toEqual([9, 9]);
+    expect(pages.flat()).toEqual(rows);
+  });
 });

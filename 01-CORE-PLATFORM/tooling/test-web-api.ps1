@@ -590,6 +590,14 @@ try {
   if ($oldStaffSessionValid) { throw 'Password reset left old session valid' }
   $null = PostJson '/auth/login' @{username=$renamedStaff;password=$replacementPassword} $staffSession $true
   $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession
+  $ordered = PostJson '/merchant/invoices' @{idempotencyKey="ordered-$id";customerName='آزمون ترتیب فاکتور';customerPhone='';paymentStatus='proforma';paidRial=0;lines=@(
+    @{name='قلم اول';quantity=1;unitPriceRial=100000;discountPercent=0},
+    @{name='قلم دوم';quantity=1;unitPriceRial=200000;discountPercent=0},
+    @{name='قلم سوم';quantity=1;unitPriceRial=300000;discountPercent=0}
+  )} $ownerSession
+  $orderedRead = Invoke-RestMethod "$base/api/merchant/invoices/$($ordered.id)" -WebSession $ownerSession
+  if ((@($orderedRead.lines | ForEach-Object nameSnapshot) -join '|') -ne 'قلم اول|قلم دوم|قلم سوم' -or
+      (@($orderedRead.lines | ForEach-Object position) -join '|') -ne '1|2|3') { throw 'Invoice line order was not preserved after database round trip' }
   Write-Output 'PASS: 20 tenants; idempotent subscriptions/orders; promo quote and receipt approval; username and password reset session revocation; staff/admin activity; customer profile and receivable badge; purchase-created stock; existing invoice, return, cheque, AI fallback, brand, archive, isolation and CSRF scenarios'
 } finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }

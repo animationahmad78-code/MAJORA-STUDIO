@@ -159,12 +159,26 @@ using (var scope = app.Services.CreateScope())
                 upgrade.CommandText = "ALTER TABLE Tenants ADD COLUMN DisabledFeaturesJson TEXT NOT NULL DEFAULT '[]'";
                 await upgrade.ExecuteNonQueryAsync();
             }
+            using var lineColumns = connection.CreateCommand();
+            lineColumns.CommandText = "PRAGMA table_info(InvoiceLines)";
+            using var lineReader = await lineColumns.ExecuteReaderAsync();
+            var hasLinePosition = false;
+            while (await lineReader.ReadAsync())
+                if (string.Equals(lineReader.GetString(1), "Position", StringComparison.OrdinalIgnoreCase)) hasLinePosition = true;
+            await lineReader.CloseAsync();
+            if (!hasLinePosition)
+            {
+                using var upgrade = connection.CreateCommand();
+                upgrade.CommandText = "ALTER TABLE InvoiceLines ADD COLUMN Position INTEGER NOT NULL DEFAULT 0";
+                await upgrade.ExecuteNonQueryAsync();
+            }
         }
         finally { if (openedHere) await connection.CloseAsync(); }
     }
     else if (app.Environment.IsDevelopment()) await db.Database.MigrateAsync();
     else if (!await db.Database.CanConnectAsync() || (await db.Database.GetPendingMigrationsAsync()).Any())
         throw new InvalidOperationException("SQL Server is unavailable or schema migrations are pending. Apply the reviewed release migration before startup.");
+    await InvoiceLineOrderBackfill.RunAsync(db);
     var adminName = builder.Configuration["MAJORA_BOOTSTRAP_USER"];
     var adminPassword = builder.Configuration["MAJORA_BOOTSTRAP_PASSWORD"];
     if (!string.IsNullOrWhiteSpace(adminName) && !string.IsNullOrWhiteSpace(adminPassword) && !await db.Users.AnyAsync())
@@ -1074,7 +1088,7 @@ merchant.MapGet("/invoices", async (string? q, string? field, int? page, MajoraD
         .Select(x => new { x.Id, x.Number, x.Revision, x.CustomerName, x.CustomerPhone, x.IssuedAt,
             x.TotalRial, x.PaidRial, x.ReturnedRial, x.RefundedRial, x.PaymentStatus, x.Status }).ToListAsync());
 });
-merchant.MapGet("/invoices/{id:guid}", async (Guid id, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var invoice = await db.Invoices.Include(x => x.Lines).SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid); return invoice is null ? Results.NotFound() : Results.Ok(invoice); });
+merchant.MapGet("/invoices/{id:guid}", async (Guid id, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var invoice = await db.Invoices.AsNoTracking().Include(x => x.Lines).SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid); if (invoice is null) return Results.NotFound(); invoice.Lines = invoice.Lines.OrderBy(x => x.Position).ThenBy(x => x.Id).ToList(); return Results.Ok(invoice); });
 merchant.MapGet("/invoices/{id:guid}/cheque", async (Guid id, MajoraDb db, HttpContext c) =>
 {
     var tid = TenantId(c.User);
@@ -1111,6 +1125,7 @@ merchant.MapPost("/invoices/{id:guid}/revisions", async (Guid id, InvoiceRevisio
     if (await db.Cheques.AnyAsync(x => x.TenantId == tid && x.InvoiceId == id && x.Status == "open")) return Fail("چک این فاکتور هنوز باز است؛ پیش از ویرایش، وضعیت آن را تعیین کنید.", 409);
     if (invoice.ReturnedRial > 0 || invoice.RefundedRial > 0 || await db.SalesReturns.AnyAsync(x => x.InvoiceId == id && x.TenantId == tid))
         return Fail("فاکتور دارای مرجوعی یا بازپرداخت از مسیر اصلاح سند قابل تغییر نیست؛ برای اصلاح بعدی سند جداگانه ثبت کنید.", 409);
+    invoice.Lines = invoice.Lines.OrderBy(x => x.Position).ThenBy(x => x.Id).ToList();
     var oldLines = invoice.Lines.ToDictionary(x => x.Id);
     var oldSnapshot = JsonSerializer.Serialize(invoice, JsonSerializerOptions.Web);
     var newLines = new List<InvoiceLine>();
@@ -1134,7 +1149,7 @@ merchant.MapPost("/invoices/{id:guid}/revisions", async (Guid id, InvoiceRevisio
             if (item.DiscountRial < 0 || item.DiscountRial > gross) return Fail("تخفیف ردیف از مبلغ آن بیشتر است.");
             var net = checked(gross - item.DiscountRial);
             newTotal = checked(newTotal + net);
-            newLines.Add(new InvoiceLine { InvoiceId = id, ProductId = item.ProductId, NameSnapshot = item.Name.Trim(),
+            newLines.Add(new InvoiceLine { InvoiceId = id, Position = newLines.Count + 1, ProductId = item.ProductId, NameSnapshot = item.Name.Trim(),
                 UnitPriceRial = item.UnitPriceRial, Quantity = item.Quantity, TotalRial = net,
                 UnitCostRialSnapshot = old?.UnitCostRialSnapshot ?? product?.AverageCostRial ?? 0,
                 CostKnown = old?.CostKnown ?? product?.CostKnown ?? false });
@@ -1251,7 +1266,7 @@ merchant.MapPost("/invoices", async (InvoiceRequest body, MajoraDb db, HttpConte
         var gross = checked(unitPrice * item.Quantity);
         var discount = checked((long)decimal.Round(gross * item.DiscountPercent / 100m, 0, MidpointRounding.AwayFromZero));
         var total = checked(gross - discount); invoice.TotalRial = checked(invoice.TotalRial + total);
-        invoice.Lines.Add(new InvoiceLine { ProductId = p?.Id, NameSnapshot = name, UnitPriceRial = unitPrice, Quantity = item.Quantity, TotalRial = total, UnitCostRialSnapshot = p?.AverageCostRial ?? 0, CostKnown = p?.CostKnown ?? false });
+        invoice.Lines.Add(new InvoiceLine { Position = invoice.Lines.Count + 1, ProductId = p?.Id, NameSnapshot = name, UnitPriceRial = unitPrice, Quantity = item.Quantity, TotalRial = total, UnitCostRialSnapshot = p?.AverageCostRial ?? 0, CostKnown = p?.CostKnown ?? false });
         if (body.PaymentStatus != "proforma" && p is not null) { p.Stock -= item.Quantity; db.StockMovements.Add(new StockMovement { TenantId = tid, ProductId = p.Id, InvoiceId = invoice.Id, Delta = -item.Quantity, Reason = "invoice-issued" }); }
     }
     if (body.ExpectedTotalRial is long expectedTotal && expectedTotal != invoice.TotalRial) return Fail("جمع فاکتور با قیمت فعلی کالاها سازگار نیست؛ فهرست را تازه کنید.", 409);

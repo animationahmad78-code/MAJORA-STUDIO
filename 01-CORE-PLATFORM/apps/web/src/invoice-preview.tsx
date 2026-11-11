@@ -108,7 +108,7 @@ export function InvoicePreview({ id, close, snapshot }: { id: string; close: () 
     dateJalali: new Intl.DateTimeFormat('fa-IR-u-ca-persian', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(invoice.issuedAt)),
     customerName: invoice.customerName, customerPhone: invoice.customerPhone,
     paymentStatus: invoice.paymentStatus as InvoiceReceipt['paymentStatus'],
-    paymentMethod: cheque ? 'چک' : invoice.paymentStatus === 'paid' ? 'تسویه‌شده' : invoice.paymentStatus === 'partial' ? 'پیش‌پرداخت' : '—',
+    paymentMethod: cheque ? 'چک' : invoice.paymentStatus === 'paid' ? 'تسویه‌شده' : invoice.paymentStatus === 'partial' ? 'پیش‌پرداخت' : invoice.paymentStatus === 'unpaid' ? 'تسویه‌نشده' : 'پیش‌فاکتور',
     dueDateJalali: cheque ? new Intl.DateTimeFormat('fa-IR-u-ca-persian', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(cheque.dueAt)) : undefined,
     cheque: cheque ? { serial: cheque.serial, bank: cheque.bank, amountRial: cheque.amountRial,
       dueJalali: new Intl.DateTimeFormat('fa-IR-u-ca-persian', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(cheque.dueAt)),
