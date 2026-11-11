@@ -438,6 +438,27 @@ try {
   $archiveCustomers = Invoke-RestMethod "$base/api/merchant/archive/customers" -WebSession $ownerSession
   if (@($archiveCustomers).Count -ne 1) { throw 'Customer archive failed' }
   $null = PostJson "/merchant/archive/customers/$($customer.id)/restore" @{} $ownerSession
+  $unusedProduct = PostJson '/merchant/products' @{name='کالای بدون سابقه';sku="UNUSED-$id";category='آزمون';priceRial=1000;stock=0} $ownerSession
+  $unusedCustomer = PostJson '/merchant/customers' @{name='مشتری بدون سابقه';phone=''} $ownerSession
+  $null = PostJson "/merchant/archive/products/$($unusedProduct.id)" @{} $ownerSession
+  $null = PostJson "/merchant/archive/customers/$($unusedCustomer.id)" @{} $ownerSession
+  $null = PostJson "/merchant/archive/products/$($product.id)" @{} $ownerSession
+  $null = PostJson "/merchant/archive/customers/$($customer.id)" @{} $ownerSession
+  $null = PostJson "/merchant/archive/invoices/$($proforma.id)" @{} $ownerSession
+  $staffPurgeBlocked = $false
+  try { $null = PostJson '/merchant/archive/purge' @{kind='all';all=$true;ids=@()} $staffSession } catch { $staffPurgeBlocked = $_.Exception.Response.StatusCode -eq 403 }
+  if (-not $staffPurgeBlocked) { throw 'Staff could purge archive' }
+  $purgeResult = PostJson '/merchant/archive/purge' @{kind='all';all=$true;ids=@()} $ownerSession
+  if ($purgeResult.deleted -ne 2 -or $purgeResult.retained -lt 3) { throw 'Archive purge did not separate unused and historical records' }
+  $remainingProducts = Invoke-RestMethod "$base/api/merchant/archive/products" -WebSession $ownerSession
+  $remainingCustomers = Invoke-RestMethod "$base/api/merchant/archive/customers" -WebSession $ownerSession
+  $remainingInvoices = Invoke-RestMethod "$base/api/merchant/archive/invoices" -WebSession $ownerSession
+  if (@($remainingProducts).Count -ne 1 -or $remainingProducts[0].id -ne $product.id -or
+      @($remainingCustomers).Count -ne 1 -or $remainingCustomers[0].id -ne $customer.id -or
+      @($remainingInvoices).Count -ne 1 -or $remainingInvoices[0].id -ne $proforma.id) { throw 'Archive purge removed referenced or financial records' }
+  $null = PostJson "/merchant/archive/products/$($product.id)/restore" @{} $ownerSession
+  $null = PostJson "/merchant/archive/customers/$($customer.id)/restore" @{} $ownerSession
+  $null = PostJson "/merchant/archive/invoices/$($proforma.id)/restore" @{} $ownerSession
   $discountProduct = PostJson '/merchant/products' @{name='کالای تخفیف آزمون';sku="DISCOUNT-$id";category='آزمون';priceRial=1001;stock=3} $ownerSession
   $discountBody = @{idempotencyKey="discount-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='paid';paidRial=2002;expectedTotalRial=2002;lines=@(@{productId=$discountProduct.id;quantity=3;expectedUnitPriceRial=1001;discountPercent=33.333})}
   $discountInvoice = PostJson '/merchant/invoices' $discountBody $ownerSession

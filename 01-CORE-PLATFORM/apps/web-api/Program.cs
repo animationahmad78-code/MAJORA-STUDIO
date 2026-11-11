@@ -1033,6 +1033,53 @@ merchant.MapPost("/archive/{kind}/{id:guid}/restore", async (string kind, Guid i
     await db.SaveChangesAsync();
     return Results.NoContent();
 });
+merchant.MapPost("/archive/purge", async (ArchivePurgeRequest body, MajoraDb db, HttpContext c) =>
+{
+    if (!CanWrite(c.User)) return Results.Forbid();
+    if (body.Kind is not ("products" or "customers" or "all") || body.Ids is { Count: > 500 })
+        return Fail("فقط کالاها و مشتریان بدون سابقهٔ مرتبط قابل حذف‌اند. در هر درخواست حداکثر ۵۰۰ مورد انتخاب کنید.");
+    if (body.Kind == "all" && !body.All) return Fail("پاک‌سازی همهٔ گروه‌ها باید با تأیید جداگانه انجام شود.");
+    if (!body.All && (body.Ids is null || body.Ids.Count == 0)) return Fail("دست‌کم یک مورد را انتخاب کنید.");
+    await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    var tid = TenantId(c.User);
+    var ids = body.Ids?.Distinct().ToHashSet() ?? [];
+    var deleted = 0;
+    var retained = 0;
+    if (body.Kind is "products" or "all")
+    {
+        var archived = await db.Products.Where(x => x.TenantId == tid && x.Archived && (body.All || ids.Contains(x.Id))).ToListAsync();
+        foreach (var product in archived)
+        {
+            var used = product.Stock != 0 ||
+                await db.InvoiceLines.AnyAsync(x => x.ProductId == product.Id) ||
+                await db.PurchaseLines.AnyAsync(x => x.ProductId == product.Id) ||
+                await db.StockMovements.AnyAsync(x => x.ProductId == product.Id && x.TenantId == tid) ||
+                await db.PriceBatchLines.AnyAsync(x => x.ProductId == product.Id) ||
+                await db.SalesReturnLines.AnyAsync(x => x.ProductId == product.Id);
+            if (used) { retained++; continue; }
+            var photo = await db.ProductPhotos.SingleOrDefaultAsync(x => x.ProductId == product.Id && x.TenantId == tid);
+            if (photo is not null) db.ProductPhotos.Remove(photo);
+            db.Products.Remove(product);
+            Audit(db, c.User, tid, "archive.purge", "product", product.Id);
+            deleted++;
+        }
+    }
+    if (body.Kind is "customers" or "all")
+    {
+        var archived = await db.Customers.Where(x => x.TenantId == tid && x.Archived && (body.All || ids.Contains(x.Id))).ToListAsync();
+        foreach (var customer in archived)
+        {
+            if (await db.Invoices.AnyAsync(x => x.TenantId == tid && x.CustomerId == customer.Id)) { retained++; continue; }
+            db.Customers.Remove(customer);
+            Audit(db, c.User, tid, "archive.purge", "customer", customer.Id);
+            deleted++;
+        }
+    }
+    if (body.Kind == "all") retained += await db.Invoices.CountAsync(x => x.TenantId == tid && x.Archived);
+    await db.SaveChangesAsync();
+    await transaction.CommitAsync();
+    return Results.Ok(new { deleted, retained });
+});
 merchant.MapPost("/customers", async (CustomerRequest body, MajoraDb db, HttpContext c) =>
 {
     var phone = IranPhone.NormalizeOptional(body.Phone);
@@ -1778,6 +1825,7 @@ public sealed record TenantFeatureUpdate(List<string> Disabled);
 public sealed record AdminInvoiceBrandUpdate(InvoiceBrandUpdate Brand, string Reason);
 public sealed record SubscriptionRequest(Guid PlanId, DateTime StartsAt, DateTime EndsAt, string PaymentStatus, long? PriceRial, string? Note);
 public sealed record ProductRequest(string Name, string Sku, string Category, long PriceRial, long Stock, long? AverageCostRial = null, string? PhotoDataUrl = null);
+public sealed record ArchivePurgeRequest(string Kind, bool All, List<Guid>? Ids);
 public sealed record ProductPriceUpdate(long ExpectedPriceRial, long NewPriceRial);
 public sealed record GlobalSearchHit(string Kind, Guid Id, string Title, string Subtitle);
 public sealed record ProductPhotoRequest(string DataUrl);
