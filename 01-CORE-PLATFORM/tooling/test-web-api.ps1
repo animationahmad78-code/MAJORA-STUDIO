@@ -115,6 +115,9 @@ try {
   $subscription = PostJson "/admin/tenants/$($tenant.id)/subscription" $subscriptionBody $adminSession
   $subscriptionAgain = PostJson "/admin/tenants/$($tenant.id)/subscription" $subscriptionBody $adminSession
   if ($subscriptionAgain.id -ne $subscription.id) { throw 'Repeated subscription creation was not idempotent' }
+  $overlapBlocked = $false
+  try { $null = PostJson "/admin/tenants/$($tenant.id)/subscription" @{planId=$plan.id;startsAt=[datetime]::UtcNow.AddDays(2).ToString('o');endsAt=[datetime]::UtcNow.AddDays(32).ToString('o');paymentStatus='pending'} $adminSession } catch { $overlapBlocked = $_.Exception.Response.StatusCode -eq 409 }
+  if (-not $overlapBlocked) { throw 'Overlapping subscription periods were accepted' }
   $adminOverview = Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession
   if ($adminOverview.tenants -ne 20 -or $adminOverview.activeSubscriptions -ne 2) { throw 'Admin overview active tenant count disagrees with subscription data' }
   $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $ownerSession $true

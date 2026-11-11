@@ -748,6 +748,8 @@ admin.MapPost("/tenants/{id:guid}/subscription", async (Guid id, SubscriptionReq
     if (repeated is not null)
         return repeated.PriceRialSnapshot == price && repeated.PaymentStatus == body.PaymentStatus
             ? Results.Ok(repeated) : Fail("برای همین بازه اشتراک دیگری ثبت شده است.", 409);
+    if (await db.Subscriptions.AnyAsync(s => s.TenantId == id && s.StartsAt < body.EndsAt && s.EndsAt > body.StartsAt))
+        return Fail("بازهٔ اشتراک با اشتراک موجود هم‌پوشانی دارد؛ تاریخ شروع را پس از پایان بازهٔ قبلی بگذارید.", 409);
     var sub = new Subscription { TenantId = id, PlanId = plan.Id, StartsAt = body.StartsAt, EndsAt = body.EndsAt,
         PriceRialSnapshot = price, PaymentStatus = body.PaymentStatus, Note = body.Note ?? "" };
     db.Subscriptions.Add(sub); Audit(db, c.User, id, "subscription.create", "subscription", sub.Id);
@@ -762,6 +764,9 @@ admin.MapPost("/tenants/{id:guid}/subscriptions/{subscriptionId:guid}/approve", 
     if (subscription is null) return Results.NotFound();
     if (subscription.PaymentStatus == "paid") return Results.Ok(subscription);
     if (subscription.PaymentStatus != "pending") return Fail("این اشتراک در وضعیت قابل تأیید نیست.", 409);
+    if (await db.Subscriptions.AnyAsync(s => s.TenantId == id && s.Id != subscriptionId && s.PaymentStatus == "paid" &&
+        s.StartsAt < subscription.EndsAt && s.EndsAt > subscription.StartsAt))
+        return Fail("این بازه با اشتراک پرداخت‌شدهٔ دیگری هم‌پوشانی دارد؛ پیش از تأیید تاریخ‌ها را اصلاح کنید.", 409);
     subscription.PaymentStatus = "paid";
     Audit(db, c.User, id, "subscription.approve", "subscription", subscriptionId,
         JsonSerializer.Serialize(new { before = "pending", after = "paid", reason = body.Reason.Trim() }));
