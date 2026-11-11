@@ -396,6 +396,43 @@ try {
   $null = PostJson '/auth/login' @{username="staff_$id";password=$staffPass} $staffSession $true
   $staffInvoice = PostJson '/merchant/invoices' @{idempotencyKey="staff-invoice-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='paid';paidRial=500000;lines=@(@{productId=$product.id;quantity=1})} $staffSession
   if ($staffInvoice.totalRial -ne 500000) { throw 'Staff sale failed' }
+  foreach ($role in @('cashier','warehouse','accountant','viewer')) {
+    $roleUser = PostJson '/merchant/staff' @{username="${role}_$id";displayName="Role $role";password=$staffPass;role=$role} $ownerSession
+    $roleSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+    $null = PostJson '/auth/login' @{username="${role}_$id";password=$staffPass} $roleSession $true
+    $productsForRole = Invoke-RestMethod "$base/api/merchant/products" -WebSession $roleSession
+    if (@($productsForRole).Count -lt 1) { throw "Role $role cannot read products" }
+    if ($role -eq 'warehouse') {
+      $currentProduct = $productsForRole | Where-Object id -eq $product.id | Select-Object -First 1
+      $catalogUpdate = @{name=$currentProduct.name;sku=$currentProduct.sku;category=$currentProduct.category;priceRial=$currentProduct.priceRial;stock=$currentProduct.stock}
+      $null = PutJson "/merchant/products/$($product.id)" $catalogUpdate $roleSession
+      $catalogUpdate.priceRial = $product.priceRial + 1
+      $priceChange = Invoke-WebRequest "$base/api/merchant/products/$($product.id)" -Method Put -WebSession $roleSession -Headers @{'X-CSRF'=$roleSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body ($catalogUpdate | ConvertTo-Json -Compress) -SkipHttpErrorCheck
+      if ($priceChange.StatusCode -ne 403) { throw 'Warehouse role changed a product price' }
+    }
+    if ($role -eq 'cashier') {
+      $financeRead = Invoke-WebRequest "$base/api/merchant/accounting/overview" -WebSession $roleSession -SkipHttpErrorCheck
+      if ($financeRead.StatusCode -ne 403) { throw 'Cashier role read accounting overview' }
+      $cashierSearch = Invoke-RestMethod "$base/api/merchant/search?q=OUT-1" -WebSession $roleSession
+      if (@($cashierSearch | Where-Object kind -eq 'cheque').Count -gt 0) { throw 'Cashier search exposed a cheque' }
+    }
+    if ($role -eq 'accountant') {
+      $accountantSearch = Invoke-RestMethod "$base/api/merchant/search?q=OUT-1" -WebSession $roleSession
+      if (@($accountantSearch | Where-Object kind -eq 'cheque').Count -lt 1) { throw 'Accountant search omitted a cheque' }
+    }
+    if ($role -eq 'viewer') {
+      $invoicesRead = Invoke-WebRequest "$base/api/merchant/invoices" -WebSession $roleSession -SkipHttpErrorCheck
+      if ($invoicesRead.StatusCode -ne 200) { throw 'Viewer could not read invoices' }
+    }
+    $canCreateInvoice = $role -eq 'cashier'
+    $invoiceAttempt = Invoke-WebRequest "$base/api/merchant/invoices" -Method Post -WebSession $roleSession -Headers @{'X-CSRF'=$roleSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{idempotencyKey="role-invoice-$role-$id";customerName='آزمون نقش';customerPhone='';paymentStatus='proforma';paidRial=0;lines=@(@{name='خدمت';unitPriceRial=1000;quantity=1})} | ConvertTo-Json -Depth 10 -Compress) -SkipHttpErrorCheck
+    if (($invoiceAttempt.StatusCode -in 200,201) -ne $canCreateInvoice) { throw "Role $role invoice permission is wrong: $($invoiceAttempt.StatusCode)" }
+    $expenseAttempt = Invoke-WebRequest "$base/api/merchant/accounting/expenses" -Method Post -WebSession $roleSession -Headers @{'X-CSRF'=$roleSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{category='آزمون';amountRial=1000} | ConvertTo-Json -Compress) -SkipHttpErrorCheck
+    if (($expenseAttempt.StatusCode -in 200,201) -ne ($role -eq 'accountant')) { throw "Role $role accounting permission is wrong: $($expenseAttempt.StatusCode)" }
+    $archiveAttempt = Invoke-WebRequest "$base/api/merchant/archive/purge" -Method Post -WebSession $roleSession -Headers @{'X-CSRF'=$roleSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body '{"kind":"all","all":true,"ids":[]}' -SkipHttpErrorCheck
+    if ($archiveAttempt.StatusCode -ne 403) { throw "Role $role could purge archive" }
+    $null = PostJson "/merchant/staff/$($roleUser.id)/enabled" @{enabled=$false} $ownerSession
+  }
   $priceBody = @{idempotencyKey="price-$id";percent=12.5;allProducts=$false;productIds=@($product.id)}
   $priceBatch = PostJson '/merchant/price-batches' $priceBody $ownerSession
   $priceAgain = PostJson '/merchant/price-batches' $priceBody $ownerSession

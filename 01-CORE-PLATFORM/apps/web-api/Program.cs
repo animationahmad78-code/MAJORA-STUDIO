@@ -220,7 +220,9 @@ static Guid UserId(ClaimsPrincipal p) => Guid.Parse(p.FindFirstValue(ClaimTypes.
 static Guid TenantId(ClaimsPrincipal p) => Guid.Parse(p.FindFirstValue("tenant")!);
 static string Role(ClaimsPrincipal p) => p.FindFirstValue(ClaimTypes.Role) ?? "";
 static bool CanWrite(ClaimsPrincipal p) => Role(p) is "owner" or "manager";
-static bool CanSell(ClaimsPrincipal p) => Role(p) is "owner" or "manager" or "staff";
+static bool CanSell(ClaimsPrincipal p) => Role(p) is "owner" or "manager" or "staff" or "cashier";
+static bool CanManageCatalog(ClaimsPrincipal p) => CanWrite(p) || Role(p) == "warehouse";
+static bool CanManageFinance(ClaimsPrincipal p) => CanWrite(p) || Role(p) == "accountant";
 static IResult Fail(string message, int status = 400) => Results.Json(new {
     errorCode = status == 409 ? "conflict" : status == 403 ? "access_denied" : status == 401 ? "authentication_required" : "invalid_request",
     error = message
@@ -758,6 +760,8 @@ merchant.AddEndpointFilter(async (invocation, next) =>
 {
     var c = invocation.HttpContext;
     if (!c.User.HasClaim(x => x.Type == "tenant")) return Fail("این بخش برای حساب فروشگاه است.", 403);
+    if (!MerchantRoles.Allows(Role(c.User), c.Request.Path.Value ?? "", c.Request.Method))
+        return Fail("نقش شما اجازهٔ انجام این عملیات را ندارد.", 403);
     var db = c.RequestServices.GetRequiredService<MajoraDb>();
     var subscriptionSelfService = c.Request.Path.StartsWithSegments("/api/merchant/subscription") ||
         c.Request.Path.StartsWithSegments("/api/merchant/plans") ||
@@ -885,20 +889,21 @@ merchant.MapGet("/search", async (string? q, MajoraDb db, HttpContext c) =>
     if (term.Length > 100) return Fail("عبارت جست‌وجو نباید بیش از ۱۰۰ نویسه باشد.");
     var tid = TenantId(c.User); var hits = new List<GlobalSearchHit>();
     var disabled = TenantFeatures.Read(await db.Tenants.AsNoTracking().Where(x => x.Id == tid).Select(x => x.DisabledFeaturesJson).SingleAsync());
-    if (!disabled.Contains("products")) hits.AddRange(await db.Products.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived && (x.Name.Contains(term) || x.Sku.Contains(term) || x.Category.Contains(term)))
+    var canSearch = (string section) => MerchantRoles.Allows(Role(c.User), "/api/merchant/" + section, "GET");
+    if (!disabled.Contains("products") && canSearch("products")) hits.AddRange(await db.Products.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived && (x.Name.Contains(term) || x.Sku.Contains(term) || x.Category.Contains(term)))
         .OrderBy(x => x.Name).Take(8).Select(x => new GlobalSearchHit("product", x.Id, x.Name, x.Sku + " · " + x.Category)).ToListAsync());
-    if (!disabled.Contains("customers")) hits.AddRange(await db.Customers.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived && (x.Name.Contains(term) || x.Phone.Contains(term)))
+    if (!disabled.Contains("customers") && canSearch("customers")) hits.AddRange(await db.Customers.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived && (x.Name.Contains(term) || x.Phone.Contains(term)))
         .OrderBy(x => x.Name).Take(8).Select(x => new GlobalSearchHit("customer", x.Id, x.Name, x.Phone)).ToListAsync());
     var isNumber = long.TryParse(term, out var invoiceNumber);
-    if (!disabled.Contains("invoices")) hits.AddRange(await db.Invoices.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived && (x.CustomerName.Contains(term) || x.CustomerPhone.Contains(term) || (isNumber && x.Number == invoiceNumber)))
+    if (!disabled.Contains("invoices") && canSearch("invoices")) hits.AddRange(await db.Invoices.AsNoTracking().Where(x => x.TenantId == tid && !x.Archived && (x.CustomerName.Contains(term) || x.CustomerPhone.Contains(term) || (isNumber && x.Number == invoiceNumber)))
         .OrderByDescending(x => x.IssuedAt).Take(8).Select(x => new GlobalSearchHit("invoice", x.Id, "فاکتور " + x.Number, x.CustomerName)).ToListAsync());
-    if (!disabled.Contains("cheques") && !disabled.Contains("accounting")) hits.AddRange(await db.Cheques.AsNoTracking().Where(x => x.TenantId == tid && (x.Party.Contains(term) || x.Serial.Contains(term) || x.Bank.Contains(term) || x.SayadId.Contains(term)))
+    if (!disabled.Contains("cheques") && !disabled.Contains("accounting") && canSearch("accounting/cheques")) hits.AddRange(await db.Cheques.AsNoTracking().Where(x => x.TenantId == tid && (x.Party.Contains(term) || x.Serial.Contains(term) || x.Bank.Contains(term) || x.SayadId.Contains(term)))
         .OrderByDescending(x => x.CreatedAt).Take(8).Select(x => new GlobalSearchHit("cheque", x.Id, x.Party + " · " + x.Serial, x.Bank)).ToListAsync());
-    if (!disabled.Contains("reminders")) hits.AddRange(await db.Reminders.AsNoTracking().Where(x => x.TenantId == tid && !x.Done && x.Title.Contains(term))
+    if (!disabled.Contains("reminders") && canSearch("reminders")) hits.AddRange(await db.Reminders.AsNoTracking().Where(x => x.TenantId == tid && !x.Done && x.Title.Contains(term))
         .OrderBy(x => x.DueAt).Take(8).Select(x => new GlobalSearchHit("reminder", x.Id, x.Title, "یادآور باز")).ToListAsync());
-    if (!disabled.Contains("accounting")) hits.AddRange(await db.Purchases.AsNoTracking().Where(x => x.TenantId == tid && (x.SupplierName.Contains(term) || x.SupplierInvoiceNumber.Contains(term)))
+    if (!disabled.Contains("accounting") && canSearch("accounting/purchases")) hits.AddRange(await db.Purchases.AsNoTracking().Where(x => x.TenantId == tid && (x.SupplierName.Contains(term) || x.SupplierInvoiceNumber.Contains(term)))
         .OrderByDescending(x => x.PurchasedAt).Take(8).Select(x => new GlobalSearchHit("purchase", x.Id, x.SupplierName, x.SupplierInvoiceNumber)).ToListAsync());
-    if (!disabled.Contains("accounting")) hits.AddRange(await db.Expenses.AsNoTracking().Where(x => x.TenantId == tid && !x.Voided && (x.Category.Contains(term) || x.Description.Contains(term)))
+    if (!disabled.Contains("accounting") && canSearch("accounting/expenses")) hits.AddRange(await db.Expenses.AsNoTracking().Where(x => x.TenantId == tid && !x.Voided && (x.Category.Contains(term) || x.Description.Contains(term)))
         .OrderByDescending(x => x.IncurredAt).Take(8).Select(x => new GlobalSearchHit("expense", x.Id, x.Category, x.Description)).ToListAsync());
     return Results.Ok(hits);
 });
@@ -939,7 +944,8 @@ merchant.MapGet("/products/meta", async (MajoraDb db, HttpContext c) => { var ti
 merchant.MapGet("/products", async (string? q, string? category, int? page, MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Products.Where(x => x.TenantId == tid && !x.Archived && (q == null || x.Name.Contains(q) || x.Sku.Contains(q)) && (string.IsNullOrEmpty(category) || x.Category == category || x.Category.StartsWith(category + " / ") || x.Category.StartsWith(category + "/"))).OrderBy(x => x.Name).Skip(Math.Max(0, (page ?? 1) - 1) * 50).Take(50).ToListAsync()); });
 merchant.MapPost("/products", async (ProductRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (!CanWrite(c.User)) return Results.Forbid();
+    if (!CanManageCatalog(c.User)) return Results.Forbid();
+    if (Role(c.User) == "warehouse" && (body.PriceRial != 0 || body.AverageCostRial is > 0)) return Fail("ثبت قیمت و بهای تمام‌شده فقط برای مدیر مجاز است.", 403);
     if (string.IsNullOrWhiteSpace(body.Name) || string.IsNullOrWhiteSpace(body.Sku) || body.PriceRial < 0 || body.Stock < 0 || body.AverageCostRial < 0) return Fail("مشخصات کالا نامعتبر است.");
     if (body.PhotoDataUrl is { Length: > 0 } && !ProductPhotos.TryDecode(body.PhotoDataUrl, out _, out _)) return Fail("تصویر کالا معتبر نیست.");
     var product = new Product { TenantId = TenantId(c.User), Name = body.Name.Trim(), Sku = body.Sku.Trim(), Category = body.Category.Trim(), PriceRial = body.PriceRial, Stock = body.Stock, AverageCostRial = body.AverageCostRial ?? 0, CostKnown = body.AverageCostRial is not null };
@@ -952,8 +958,10 @@ merchant.MapPost("/products", async (ProductRequest body, MajoraDb db, HttpConte
 });
 merchant.MapPut("/products/{id:guid}", async (Guid id, ProductRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (!CanWrite(c.User)) return Results.Forbid();
+    if (!CanManageCatalog(c.User)) return Results.Forbid();
     var tid = TenantId(c.User); var p = await db.Products.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && !x.Archived); if (p is null) return Results.NotFound();
+    if (Role(c.User) == "warehouse" && (body.PriceRial != p.PriceRial || body.AverageCostRial is long requestedCost && requestedCost != p.AverageCostRial))
+        return Fail("انباردار نمی‌تواند قیمت فروش یا بهای تمام‌شده را تغییر دهد.", 403);
     if (string.IsNullOrWhiteSpace(body.Name) || body.PriceRial < 0 || body.Stock < 0 || body.AverageCostRial < 0) return Fail("مشخصات کالا نامعتبر است.");
     if (body.PhotoDataUrl is { Length: > 0 } && !ProductPhotos.TryDecode(body.PhotoDataUrl, out _, out _)) return Fail("تصویر کالا معتبر نیست.");
     var delta = body.Stock - p.Stock; p.Name = body.Name.Trim(); p.Category = body.Category.Trim(); p.Sku = body.Sku.Trim(); p.PriceRial = body.PriceRial; p.Stock = body.Stock; p.UpdatedAt = DateTime.UtcNow;
@@ -996,7 +1004,7 @@ merchant.MapGet("/products/{id:guid}/photo", async (Guid id, MajoraDb db, HttpCo
 });
 merchant.MapPut("/products/{id:guid}/photo", async (Guid id, ProductPhotoRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (!CanWrite(c.User)) return Results.Forbid();
+    if (!CanManageCatalog(c.User)) return Results.Forbid();
     var tid = TenantId(c.User);
     var product = await db.Products.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && !x.Archived);
     if (product is null) return Results.NotFound();
@@ -1011,7 +1019,7 @@ merchant.MapPut("/products/{id:guid}/photo", async (Guid id, ProductPhotoRequest
 });
 merchant.MapDelete("/products/{id:guid}/photo", async (Guid id, MajoraDb db, HttpContext c) =>
 {
-    if (!CanWrite(c.User)) return Results.Forbid();
+    if (!CanManageCatalog(c.User)) return Results.Forbid();
     var tid = TenantId(c.User);
     var product = await db.Products.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && !x.Archived);
     if (product is null) return Results.NotFound();
@@ -1537,7 +1545,7 @@ merchant.MapPost("/invoices/{id:guid}/convert", async (Guid id, MajoraDb db, Htt
 });
 merchant.MapPost("/invoices/{id:guid}/payments", async (Guid id, PaymentRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (!CanSell(c.User)) return Results.Forbid();
+    if (!CanSell(c.User) && !CanManageFinance(c.User)) return Results.Forbid();
     if (string.IsNullOrWhiteSpace(body.IdempotencyKey) || body.IdempotencyKey.Length > 100) return Fail("شناسهٔ ثبت دریافت لازم است.");
     await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
     var tid = TenantId(c.User);
@@ -1619,7 +1627,7 @@ merchant.MapPost("/invoices/{id:guid}/returns", async (Guid id, SalesReturnReque
 });
 merchant.MapPost("/invoices/{id:guid}/refunds", async (Guid id, RefundRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (!CanSell(c.User)) return Results.Forbid();
+    if (!CanSell(c.User) && !CanManageFinance(c.User)) return Results.Forbid();
     if (string.IsNullOrWhiteSpace(body.IdempotencyKey) || body.IdempotencyKey.Length > 100 || string.IsNullOrWhiteSpace(body.Method)) return Fail("شناسه یا روش بازپرداخت لازم است.");
     var tid = TenantId(c.User);
     await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
@@ -1641,7 +1649,7 @@ merchant.MapGet("/reminders", async (MajoraDb db, HttpContext c) => { var tid = 
 merchant.MapPost("/reminders", async (ReminderRequest body, MajoraDb db, HttpContext c) => { if (string.IsNullOrWhiteSpace(body.Title)) return Fail("عنوان یادآور لازم است."); var r = new Reminder { TenantId = TenantId(c.User), Title = body.Title.Trim(), DueAt = body.DueAt }; db.Reminders.Add(r); Audit(db, c.User, r.TenantId, "reminder.create", "reminder", r.Id); await db.SaveChangesAsync(); return Results.Created($"/api/merchant/reminders/{r.Id}", r); });
 merchant.MapPut("/reminders/{id:guid}", async (Guid id, ReminderRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (!CanWrite(c.User)) return Results.Forbid();
+    if (!CanSell(c.User) && !CanManageFinance(c.User)) return Results.Forbid();
     if (string.IsNullOrWhiteSpace(body.Title) || body.Title.Length > 300 || body.DueAt.Year is < 2000 or > 2100)
         return Fail("عنوان یا تاریخ یادآور معتبر نیست.");
     var tid = TenantId(c.User);
@@ -1698,7 +1706,7 @@ merchant.MapPost("/staff/{id:guid}/reset-password", async (Guid id, PasswordRese
 merchant.MapPost("/staff", async (StaffRequest body, MajoraDb db, IPasswordHasher<AppUser> hasher, HttpContext c) =>
 {
     if (Role(c.User) != "owner") return Results.Forbid();
-    if (body.Role is not ("manager" or "staff") || body.Password.Length < 12 || string.IsNullOrWhiteSpace(body.Username)) return Fail("مشخصات کاربر نامعتبر است.");
+    if (body.Role is not ("manager" or "staff" or "cashier" or "warehouse" or "accountant" or "viewer") || body.Password.Length < 12 || string.IsNullOrWhiteSpace(body.Username)) return Fail("مشخصات کاربر نامعتبر است.");
     var tid = TenantId(c.User); var activePlan = await db.Subscriptions.Where(x => x.TenantId == tid && x.PaymentStatus == "paid" && x.EndsAt > DateTime.UtcNow).OrderByDescending(x => x.EndsAt).Join(db.Plans, x => x.PlanId, p => p.Id, (x,p) => p).FirstAsync();
     if (await db.Users.CountAsync(x => x.TenantId == tid && x.Enabled) >= activePlan.MaxUsers) return Fail("سقف کاربران طرح تکمیل است.", 409);
     if (await db.Users.AnyAsync(x => x.Username == body.Username)) return Fail("نام کاربری تکراری است.", 409);
@@ -1760,7 +1768,7 @@ merchant.MapGet("/accounting/cheques/overview", async (MajoraDb db, HttpContext 
 });
 merchant.MapPost("/accounting/cheques", async (ChequeRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (!CanWrite(c.User)) return Results.Forbid();
+    if (!CanManageFinance(c.User)) return Results.Forbid();
     if (!ValidCheque(body) || body.ShowDetails || body.ShowImage || !string.IsNullOrWhiteSpace(body.PhotoDataUrl) && !ProductPhotos.TryDecode(body.PhotoDataUrl, out _, out _)) return Fail("مشخصات چک مستقل نامعتبر است.");
     var tid = TenantId(c.User); var cheque = NewCheque(body, tid);
     if (cheque.SayadId.Length > 0 && await db.Cheques.AnyAsync(x => x.TenantId == tid && x.SayadId == cheque.SayadId)) return Fail("این شناسهٔ صیادی قبلاً در فروشگاه ثبت شده است.", 409);
@@ -1772,7 +1780,7 @@ merchant.MapPost("/accounting/cheques", async (ChequeRequest body, MajoraDb db, 
 });
 merchant.MapPut("/accounting/cheques/{id:guid}", async (Guid id, ChequeRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (!CanWrite(c.User)) return Results.Forbid();
+    if (!CanManageFinance(c.User)) return Results.Forbid();
     if (!ValidCheque(body)) return Fail("مشخصات چک نامعتبر است.");
     var tid = TenantId(c.User); await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
     var cheque = await db.Cheques.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid);
@@ -1803,7 +1811,7 @@ merchant.MapGet("/accounting/cheques/{id:guid}/photo", async (Guid id, MajoraDb 
 });
 merchant.MapPost("/accounting/cheques/{id:guid}/status", async (Guid id, ChequeStatusRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (!CanWrite(c.User)) return Results.Forbid();
+    if (!CanManageFinance(c.User)) return Results.Forbid();
     if (body.Status is not ("open" or "cleared" or "returned" or "cancelled")) return Fail("وضعیت چک نامعتبر است.");
     var tid = TenantId(c.User); await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
     var cheque = await db.Cheques.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid);
@@ -1841,7 +1849,7 @@ merchant.MapPost("/accounting/cheques/{id:guid}/status", async (Guid id, ChequeS
 merchant.MapGet("/accounting/purchases", async (MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Purchases.Where(x => x.TenantId == tid).OrderByDescending(x => x.PurchasedAt).Take(100).Select(x => new { x.Id, x.SupplierName, x.SupplierInvoiceNumber, x.PurchasedAt, x.TotalRial, x.PaidRial }).ToListAsync()); });
 merchant.MapPost("/accounting/purchases", async (PurchaseRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (!CanWrite(c.User)) return Results.Forbid();
+    if (!CanManageFinance(c.User)) return Results.Forbid();
     if (string.IsNullOrWhiteSpace(body.SupplierName) || string.IsNullOrWhiteSpace(body.IdempotencyKey) || body.IdempotencyKey.Length > 100 || body.Lines is null || body.Lines.Count is < 1 or > 100) return Fail("اطلاعات خرید نامعتبر است.");
     var tid = TenantId(c.User); await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
     var existing = await db.Purchases.SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == body.IdempotencyKey);
@@ -1895,7 +1903,7 @@ merchant.MapPost("/accounting/purchases", async (PurchaseRequest body, MajoraDb 
 });
 merchant.MapPost("/accounting/purchases/{id:guid}/payments", async (Guid id, PaymentRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (!CanWrite(c.User)) return Results.Forbid(); var tid = TenantId(c.User);
+    if (!CanManageFinance(c.User)) return Results.Forbid(); var tid = TenantId(c.User);
     await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
     var purchase = await db.Purchases.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid); if (purchase is null) return Results.NotFound();
     if (body.AmountRial < 1 || body.AmountRial > purchase.TotalRial - purchase.PaidRial) return Fail("مبلغ پرداخت خرید نامعتبر است.");
@@ -1905,7 +1913,7 @@ merchant.MapPost("/accounting/purchases/{id:guid}/payments", async (Guid id, Pay
 merchant.MapGet("/accounting/expenses", async (MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Expenses.Where(x => x.TenantId == tid && !x.Voided).OrderByDescending(x => x.IncurredAt).Take(100).ToListAsync()); });
 merchant.MapPost("/accounting/expenses", async (ExpenseRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (!CanWrite(c.User)) return Results.Forbid();
+    if (!CanManageFinance(c.User)) return Results.Forbid();
     if (string.IsNullOrWhiteSpace(body.Category) || body.Category.Length > 200 || body.AmountRial < 1 ||
         body.IncurredAt is DateTime date && (date.Year < 2000 || date > DateTime.UtcNow.AddDays(1)))
         return Fail("دسته، مبلغ یا تاریخ هزینه معتبر نیست.");
@@ -1915,7 +1923,7 @@ merchant.MapPost("/accounting/expenses", async (ExpenseRequest body, MajoraDb db
 });
 merchant.MapPut("/accounting/expenses/{id:guid}", async (Guid id, ExpenseRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (!CanWrite(c.User)) return Results.Forbid();
+    if (!CanManageFinance(c.User)) return Results.Forbid();
     if (string.IsNullOrWhiteSpace(body.Category) || body.Category.Length > 200 || body.AmountRial < 1 ||
         string.IsNullOrWhiteSpace(body.Reason) || body.Reason.Length > 500 ||
         body.IncurredAt is DateTime date && (date.Year < 2000 || date > DateTime.UtcNow.AddDays(1)))
