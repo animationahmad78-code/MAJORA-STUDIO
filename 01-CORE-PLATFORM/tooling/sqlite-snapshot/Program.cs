@@ -20,6 +20,16 @@ if (args.Length == 2 && args[0] == "--inspect")
         count.CommandText = $"SELECT COUNT(*) FROM \"{table}\"";
         counts[table] = (long)(await count.ExecuteScalarAsync() ?? 0L);
     }
+    long requestHashTables = 0;
+    foreach (var table in new[] { "SubscriptionOrders", "PriceBatches", "Invoices", "Payments", "SalesReturns", "Refunds", "Purchases" })
+    {
+        await using var columns = db.CreateCommand();
+        columns.CommandText = $"PRAGMA table_info({table})";
+        await using var reader = await columns.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            if (string.Equals(reader.GetString(1), "RequestHash", StringComparison.OrdinalIgnoreCase)) requestHashTables++;
+    }
+    counts["RequestHashTables"] = requestHashTables;
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(counts));
     return 0;
 }

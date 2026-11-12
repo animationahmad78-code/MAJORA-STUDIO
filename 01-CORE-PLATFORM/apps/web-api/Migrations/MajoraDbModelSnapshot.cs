@@ -428,6 +428,13 @@ namespace Majora.WebApi.Migrations
                         .HasColumnType("bigint")
                         .HasDefaultValue(0L);
 
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)")
+                        .HasDefaultValue("");
+
                     b.Property<long>("ReturnedRial")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("bigint")
@@ -642,6 +649,13 @@ namespace Majora.WebApi.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)")
+                        .HasDefaultValue("");
+
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uniqueidentifier");
 
@@ -732,6 +746,13 @@ namespace Majora.WebApi.Migrations
                     b.Property<decimal>("Percent")
                         .HasPrecision(8, 3)
                         .HasColumnType("decimal(8,3)");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)")
+                        .HasDefaultValue("");
 
                     b.Property<DateTime?>("RevertedAt")
                         .HasColumnType("datetime2");
@@ -900,6 +921,13 @@ namespace Majora.WebApi.Migrations
                     b.Property<DateTime>("PurchasedAt")
                         .HasColumnType("datetime2");
 
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)")
+                        .HasDefaultValue("");
+
                     b.Property<string>("SupplierInvoiceNumber")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
@@ -1015,6 +1043,13 @@ namespace Majora.WebApi.Migrations
                     b.Property<DateTime>("RefundedAt")
                         .HasColumnType("datetime2");
 
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)")
+                        .HasDefaultValue("");
+
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uniqueidentifier");
 
@@ -1081,6 +1116,13 @@ namespace Majora.WebApi.Migrations
                         .IsRequired()
                         .HasMaxLength(500)
                         .HasColumnType("nvarchar(500)");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)")
+                        .HasDefaultValue("");
 
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uniqueidentifier");
@@ -1245,6 +1287,13 @@ namespace Majora.WebApi.Migrations
                     b.Property<string>("ReceiptContentType")
                         .HasMaxLength(30)
                         .HasColumnType("nvarchar(30)");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)")
+                        .HasDefaultValue("");
 
                     b.Property<DateTime?>("ReviewedAt")
                         .HasColumnType("datetime2");

@@ -236,6 +236,8 @@ try {
   if ($workspace.name -ne 'نام جدید فروشگاه') { throw 'Workspace brand did not follow admin edit' }
   $again = PostJson '/merchant/invoices' $invoiceBody $ownerSession
   if ($again.id -ne $invoice.id) { throw 'Idempotency failed' }
+  $changedInvoiceRetry = Invoke-WebRequest "$base/api/merchant/invoices" -Method Post -WebSession $ownerSession -Headers @{'X-CSRF'=$ownerSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{idempotencyKey="invoice-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='partial';paidRial=100000;lines=@(@{productId=$product.id;quantity=2})} | ConvertTo-Json -Depth 10 -Compress) -SkipHttpErrorCheck
+  if ($changedInvoiceRetry.StatusCode -ne 409) { throw 'Changed invoice retry was reported as success' }
   $products = Invoke-RestMethod "$base/api/merchant/products" -WebSession $ownerSession
   if ($products[0].stock -ne 3) { throw 'Stock was deducted more than once or not at all' }
   $proforma = PostJson '/merchant/invoices' @{idempotencyKey="proforma-$id";customerId=$customer.id;customerName='';customerPhone='';paymentStatus='proforma';paidRial=0;lines=@(@{productId=$product.id;quantity=99})} $ownerSession
@@ -251,6 +253,8 @@ try {
   $payment = PostJson "/merchant/invoices/$($invoice.id)/payments" $paymentBody $ownerSession
   $paymentAgain = PostJson "/merchant/invoices/$($invoice.id)/payments" $paymentBody $ownerSession
   if ($paymentAgain.id -ne $payment.id) { throw 'Payment idempotency failed' }
+  $changedPaymentRetry = Invoke-WebRequest "$base/api/merchant/invoices/$($invoice.id)/payments" -Method Post -WebSession $ownerSession -Headers @{'X-CSRF'=$ownerSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{idempotencyKey="payment-1-$id";amountRial=700000;method='cash'} | ConvertTo-Json -Compress) -SkipHttpErrorCheck
+  if ($changedPaymentRetry.StatusCode -ne 409) { throw 'Changed payment retry was reported as success' }
   $detail = Invoke-RestMethod "$base/api/merchant/invoices/$($invoice.id)" -WebSession $ownerSession
   if ($detail.paidRial -ne 1000000 -or $detail.paymentStatus -ne 'paid') { throw 'Payment settlement mismatch' }
   $issuedRevision = Invoke-RestMethod "$base/api/merchant/invoices/$($invoice.id)/revisions" -WebSession $ownerSession
@@ -260,6 +264,8 @@ try {
   $return = PostJson "/merchant/invoices/$($invoice.id)/returns" $returnBody $ownerSession
   $returnAgain = PostJson "/merchant/invoices/$($invoice.id)/returns" $returnBody $ownerSession
   if ($return.amountRial -ne 500000 -or $returnAgain.id -ne $return.id -or $return.refundDueRial -ne 500000 -or $return.paymentStatus -ne 'refund_due') { throw 'Return amount, idempotency or refund due mismatch' }
+  $changedReturnRetry = Invoke-WebRequest "$base/api/merchant/invoices/$($invoice.id)/returns" -Method Post -WebSession $ownerSession -Headers @{'X-CSRF'=$ownerSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{idempotencyKey="return-1-$id";reason='دلیل دیگر';lines=@(@{invoiceLineId=$returnLineId;quantity=1;restock=$true})} | ConvertTo-Json -Depth 10 -Compress) -SkipHttpErrorCheck
+  if ($changedReturnRetry.StatusCode -ne 409) { throw 'Changed return retry was reported as success' }
   $productsAfterReturn = Invoke-RestMethod "$base/api/merchant/products" -WebSession $ownerSession
   if ($productsAfterReturn[0].stock -ne 4) { throw 'Returned item was not restocked exactly once' }
   $overReturnBlocked = $false
@@ -272,6 +278,8 @@ try {
   $refund = PostJson "/merchant/invoices/$($invoice.id)/refunds" $refundBody $ownerSession
   $refundAgain = PostJson "/merchant/invoices/$($invoice.id)/refunds" $refundBody $ownerSession
   if ($refund.id -ne $refundAgain.id -or $refund.paymentStatus -ne 'paid') { throw 'Refund idempotency or recalculation failed' }
+  $changedRefundRetry = Invoke-WebRequest "$base/api/merchant/invoices/$($invoice.id)/refunds" -Method Post -WebSession $ownerSession -Headers @{'X-CSRF'=$ownerSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{idempotencyKey="refund-1-$id";amountRial=400000;method='cash';reference='LOCAL-TEST'} | ConvertTo-Json -Compress) -SkipHttpErrorCheck
+  if ($changedRefundRetry.StatusCode -ne 409) { throw 'Changed refund retry was reported as success' }
   $detail = Invoke-RestMethod "$base/api/merchant/invoices/$($invoice.id)" -WebSession $ownerSession
   if ($detail.returnedRial -ne 500000 -or $detail.refundedRial -ne 500000 -or $detail.lines[0].returnedQuantity -ne 1) { throw 'Return ledger/detail mismatch' }
   $returns = Invoke-RestMethod "$base/api/merchant/accounting/returns" -WebSession $ownerSession
@@ -430,6 +438,8 @@ try {
   $purchase = PostJson '/merchant/accounting/purchases' $purchaseBody $otherSession
   $purchaseAgain = PostJson '/merchant/accounting/purchases' $purchaseBody $otherSession
   if ($purchase.totalRial -ne 500000 -or $purchaseAgain.id -ne $purchase.id) { throw 'Purchase or idempotency mismatch' }
+  $changedPurchaseRetry = Invoke-WebRequest "$base/api/merchant/accounting/purchases" -Method Post -WebSession $otherSession -Headers @{'X-CSRF'=$otherSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{idempotencyKey="purchase-$id";supplierName='تأمین‌کننده آزمون';supplierInvoiceNumber='SUP-1';paidRial=200000;lines=@(@{productId=$otherProduct.id;quantity=5;unitCostRial=100000})} | ConvertTo-Json -Depth 10 -Compress) -SkipHttpErrorCheck
+  if ($changedPurchaseRetry.StatusCode -ne 409) { throw 'Changed purchase retry was reported as success' }
   $null = PostJson '/merchant/accounting/expenses' @{category='اجاره';description='آزمون';amountRial=50000} $otherSession
   $null = PostJson '/merchant/invoices' @{idempotencyKey="cost-sale-$id";customerName='مشتری دوم';customerPhone='';paymentStatus='paid';paidRial=1000000;lines=@(@{productId=$otherProduct.id;quantity=2})} $otherSession
   $autoCustomers = Invoke-RestMethod "$base/api/merchant/customers" -WebSession $otherSession
@@ -529,11 +539,13 @@ try {
     if ($archiveAttempt.StatusCode -ne 403) { throw "Role $role could purge archive" }
     $null = PostJson "/merchant/staff/$($roleUser.id)/enabled" @{enabled=$false} $ownerSession
   }
-  $priceBody = @{idempotencyKey="price-$id";percent=12.5;allProducts=$false;productIds=@($product.id)}
+  $priceBody = @{idempotencyKey=" price-$id ";percent=12.5;allProducts=$false;productIds=@($product.id)}
   $priceBatch = PostJson '/merchant/price-batches' $priceBody $ownerSession
   $priceAgain = PostJson '/merchant/price-batches' $priceBody $ownerSession
   $priced = Invoke-RestMethod "$base/api/merchant/products" -WebSession $ownerSession
   if ($priceAgain.id -ne $priceBatch.id -or $priced[0].priceRial -ne 562500) { throw 'Price batch calculation or idempotency failed' }
+  $changedPriceRetry = Invoke-WebRequest "$base/api/merchant/price-batches" -Method Post -WebSession $ownerSession -Headers @{'X-CSRF'=$ownerSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{idempotencyKey=" price-$id ";percent=15;allProducts=$false;productIds=@($product.id)} | ConvertTo-Json -Depth 10 -Compress) -SkipHttpErrorCheck
+  if ($changedPriceRetry.StatusCode -ne 409) { throw 'Changed price batch retry was reported as success' }
   $priceLines = Invoke-RestMethod "$base/api/merchant/price-batches/$($priceBatch.id)/lines" -WebSession $ownerSession
   if (@($priceLines).Count -ne 1 -or $priceLines[0].oldPriceRial -ne 500000 -or $priceLines[0].newPriceRial -ne 562500) { throw 'Price history detail mismatch' }
   $staleQuoteBlocked = $false
@@ -708,6 +720,8 @@ try {
   $order = PostJson '/merchant/subscription/orders' $orderBody $ownerSession
   $orderAgain = PostJson '/merchant/subscription/orders' $orderBody $ownerSession
   if ($orderAgain.id -ne $order.id -or $order.totalRial -ne 900000) { throw 'Subscription order idempotency or price failed' }
+  $changedOrderRetry = Invoke-WebRequest "$base/api/merchant/subscription/orders" -Method Post -WebSession $ownerSession -Headers @{'X-CSRF'=$ownerSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{planId=$plan.id;idempotencyKey="order-$id";promoCode=$promo.code;receiptDataUrl=$png;expectedTotalRial=899999} | ConvertTo-Json -Compress) -SkipHttpErrorCheck
+  if ($changedOrderRetry.StatusCode -ne 409) { throw 'Changed subscription order retry was reported as success' }
   $pendingOrders = Invoke-RestMethod "$base/api/admin/subscription-orders" -WebSession $adminSession
   if (@($pendingOrders | Where-Object id -eq $order.id).Count -ne 1) { throw 'Admin cannot see pending subscription order' }
   $receipt = Invoke-WebRequest "$base/api/admin/subscription-orders/$($order.id)/receipt" -WebSession $adminSession

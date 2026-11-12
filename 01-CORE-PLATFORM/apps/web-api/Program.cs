@@ -199,6 +199,7 @@ using (var scope = app.Services.CreateScope())
             using var sessionIndex = connection.CreateCommand();
             sessionIndex.CommandText = "CREATE INDEX IF NOT EXISTS IX_AppSessions_UserId_ExpiresAt ON AppSessions (UserId, ExpiresAt); CREATE INDEX IF NOT EXISTS IX_AppSessions_TenantId_ExpiresAt ON AppSessions (TenantId, ExpiresAt)";
             await sessionIndex.ExecuteNonQueryAsync();
+            await SqliteLocalSchema.EnsureRequestHashesAsync(connection);
         }
         finally { if (openedHere) await connection.CloseAsync(); }
     }
@@ -911,8 +912,9 @@ merchant.MapPost("/subscription/orders", async (SubscriptionOrderRequest body, M
         return Fail("تصویر رسید باید JPEG، PNG یا WebP معتبر و کمتر از یک مگابایت باشد.");
     var tid = TenantId(c.User);
     await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    var requestHash = Idempotency.Fingerprint(body);
     var existing = await db.SubscriptionOrders.SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == body.IdempotencyKey);
-    if (existing is not null) return existing.PlanId == body.PlanId && existing.PromoCodeSnapshot == (body.PromoCode?.Trim().ToUpperInvariant() ?? "")
+    if (existing is not null) return Idempotency.Matches(existing.RequestHash, requestHash)
         ? Results.Ok(new { existing.Id, existing.Status, existing.TotalRial }) : Fail("شناسهٔ درخواست برای سفارش دیگری استفاده شده است.", 409);
     if (await db.SubscriptionOrders.CountAsync(x => x.TenantId == tid && x.Status == "pending_approval") >= 5)
         return Fail("پنج درخواست در انتظار بررسی دارید؛ پس از تعیین وضعیت یکی از آن‌ها دوباره تلاش کنید.", 409);
@@ -932,7 +934,7 @@ merchant.MapPost("/subscription/orders", async (SubscriptionOrderRequest body, M
     var total = DiscountedPrice(plan.MonthlyRial, discount);
     if (body.ExpectedTotalRial != total) return Fail("مبلغ طرح یا تخفیف تغییر کرده است؛ مبلغ را دوباره بررسی کنید.", 409);
     var order = new SubscriptionOrder { TenantId = tid, PlanId = plan.Id, PlanNameSnapshot = plan.Name,
-        IdempotencyKey = body.IdempotencyKey, PromoCodeSnapshot = normalized, DiscountPercentSnapshot = discount,
+        IdempotencyKey = body.IdempotencyKey, RequestHash = requestHash, PromoCodeSnapshot = normalized, DiscountPercentSnapshot = discount,
         BasePriceRial = plan.MonthlyRial, TotalRial = total,
         ReceiptBytes = bytes, ReceiptContentType = contentType, Status = "pending_approval" };
     db.SubscriptionOrders.Add(order); Audit(db, c.User, tid, "subscription-order.submit", "subscription-order", order.Id);
@@ -1135,9 +1137,13 @@ merchant.MapPost("/price-batches", async (PriceBatchRequest body, MajoraDb db, H
         (!body.AllProducts && (body.ProductIds is null || body.ProductIds.Count == 0)) || (body.AllProducts && body.ProductIds is { Count: > 0 }))
         return Fail("درصد یا انتخاب کالاها معتبر نیست.");
     var tid = TenantId(c.User);
+    var requestKey = body.IdempotencyKey.Trim();
     await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
-    var previous = await db.PriceBatches.AsNoTracking().SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == body.IdempotencyKey);
-    if (previous is not null) return Results.Ok(new { previous.Id, previous.Percent, previous.CreatedAt, previous.RevertedAt });
+    var requestHash = Idempotency.Fingerprint(body);
+    var previous = await db.PriceBatches.AsNoTracking().SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == requestKey);
+    if (previous is not null) return Idempotency.Matches(previous.RequestHash, requestHash)
+        ? Results.Ok(new { previous.Id, previous.Percent, previous.CreatedAt, previous.RevertedAt })
+        : Fail("شناسهٔ درخواست برای تغییر قیمت دیگری استفاده شده است.", 409);
     var ids = body.ProductIds?.Distinct().ToList() ?? [];
     if (!body.AllProducts && ids.Count != body.ProductIds!.Count) return Fail("کالا تکراری انتخاب شده است.");
     var products = body.AllProducts
@@ -1151,7 +1157,7 @@ merchant.MapPost("/price-batches", async (PriceBatchRequest body, MajoraDb db, H
             changes.Add((product, checked((long)Math.Round(product.PriceRial * (100m + body.Percent) / 100m, 0, MidpointRounding.AwayFromZero))));
     }
     catch (OverflowException) { return Fail("مبلغ جدید از محدودهٔ ریال پشتیبانی‌شده بیشتر است."); }
-    var batch = new PriceBatch { TenantId = tid, IdempotencyKey = body.IdempotencyKey.Trim(), Percent = body.Percent };
+    var batch = new PriceBatch { TenantId = tid, IdempotencyKey = requestKey, RequestHash = requestHash, Percent = body.Percent };
     foreach (var (product, newPrice) in changes)
     {
         batch.Lines.Add(new PriceBatchLine { ProductId = product.Id, NameSnapshot = product.Name, OldPriceRial = product.PriceRial, NewPriceRial = newPrice });
@@ -1537,7 +1543,7 @@ merchant.MapPost("/invoices", async (InvoiceRequest body, MajoraDb db, HttpConte
 {
     if (!CanSell(c.User)) return Results.Forbid();
     var tid = TenantId(c.User);
-    if (string.IsNullOrWhiteSpace(body.IdempotencyKey) || body.IdempotencyKey.Length > 100 || body.Lines.Count is < 1 or > 200) return Fail("شناسهٔ درخواست یا اقلام نامعتبر است.");
+    if (string.IsNullOrWhiteSpace(body.IdempotencyKey) || body.IdempotencyKey.Length > 100 || body.Lines is null || body.Lines.Count is < 1 or > 200) return Fail("شناسهٔ درخواست یا اقلام نامعتبر است.");
     var catalogIds = body.Lines.Where(x => x.ProductId is not null).Select(x => x.ProductId).ToList();
     if (catalogIds.Distinct().Count() != catalogIds.Count) return Fail("یک کالا بیش از یک بار در فاکتور انتخاب شده است.");
     if (body.PaymentStatus is not ("paid" or "partial" or "unpaid" or "proforma" or "cheque")) return Fail("وضعیت پرداخت لازم است.");
@@ -1545,8 +1551,11 @@ merchant.MapPost("/invoices", async (InvoiceRequest body, MajoraDb db, HttpConte
     if (body.PaymentStatus != "cheque" && body.Cheque is not null) return Fail("اطلاعات چک فقط برای فاکتور چکی پذیرفته می‌شود.");
     if (body.Cheque?.PhotoDataUrl is { Length: > 0 } && !ProductPhotos.TryDecode(body.Cheque.PhotoDataUrl, out _, out _)) return Fail("تصویر چک معتبر نیست.");
     await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    var requestHash = Idempotency.Fingerprint(body);
     var existing = await db.Invoices.SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == body.IdempotencyKey);
-    if (existing is not null) return Results.Ok(new { existing.Id, existing.Number, existing.TotalRial });
+    if (existing is not null) return Idempotency.Matches(existing.RequestHash, requestHash)
+        ? Results.Ok(new { existing.Id, existing.Number, existing.TotalRial })
+        : Fail("شناسهٔ درخواست برای فاکتور متفاوتی استفاده شده است؛ فهرست فاکتورها را بررسی کنید.", 409);
     var chequeSayad = body.Cheque?.SayadId;
     if (!string.IsNullOrWhiteSpace(chequeSayad) && await db.Cheques.AnyAsync(x => x.TenantId == tid && x.SayadId == chequeSayad)) return Fail("این شناسهٔ صیادی قبلاً در فروشگاه ثبت شده است.", 409);
     var tenant = await db.Tenants.SingleAsync(x => x.Id == tid); var customer = body.CustomerId is Guid cid ? await db.Customers.SingleOrDefaultAsync(x => x.Id == cid && x.TenantId == tid && !x.Archived) : null;
@@ -1560,7 +1569,7 @@ merchant.MapPost("/invoices", async (InvoiceRequest body, MajoraDb db, HttpConte
     }
     var brandProfile = await db.InvoiceBrands.AsNoTracking().SingleOrDefaultAsync(x => x.TenantId == tid)
         ?? InvoiceBrand.Create(tid, tenant.Name, false, null);
-    var invoice = new Invoice { TenantId = tid, Number = tenant.NextInvoiceNumber++, CustomerId = customer.Id, CustomerName = customer.Name, CustomerPhone = customer.Phone, PaymentStatus = body.PaymentStatus, IdempotencyKey = body.IdempotencyKey, BrandSnapshotJson = InvoiceBrand.Snapshot(brandProfile) };
+    var invoice = new Invoice { TenantId = tid, Number = tenant.NextInvoiceNumber++, CustomerId = customer.Id, CustomerName = customer.Name, CustomerPhone = customer.Phone, PaymentStatus = body.PaymentStatus, IdempotencyKey = body.IdempotencyKey, RequestHash = requestHash, BrandSnapshotJson = InvoiceBrand.Snapshot(brandProfile) };
     if (string.IsNullOrWhiteSpace(invoice.CustomerName)) return Fail("نام مشتری لازم است.");
     foreach (var item in body.Lines)
     {
@@ -1650,12 +1659,14 @@ merchant.MapPost("/invoices/{id:guid}/payments", async (Guid id, PaymentRequest 
     if (string.IsNullOrWhiteSpace(body.IdempotencyKey) || body.IdempotencyKey.Length > 100) return Fail("شناسهٔ ثبت دریافت لازم است.");
     await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
     var tid = TenantId(c.User);
+    var requestHash = Idempotency.Fingerprint(body);
     var existing = await db.Payments.SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == body.IdempotencyKey);
-    if (existing is not null) return existing.InvoiceId == id ? Results.Ok(new { existing.Id, existing.AmountRial }) : Fail("شناسهٔ درخواست برای فاکتور دیگری استفاده شده است.", 409);
+    if (existing is not null) return existing.InvoiceId == id && Idempotency.Matches(existing.RequestHash, requestHash)
+        ? Results.Ok(new { existing.Id, existing.AmountRial }) : Fail("شناسهٔ درخواست برای دریافت متفاوتی استفاده شده است.", 409);
     var invoice = await db.Invoices.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && x.Status == "issued" && x.PaymentStatus != "proforma"); if (invoice is null) return Results.NotFound();
     if (await db.Cheques.AnyAsync(x => x.TenantId == tid && x.InvoiceId == id && x.Status == "open")) return Fail("چک این فاکتور هنوز باز است؛ ابتدا وضعیت چک را مشخص کنید.", 409);
     if (body.AmountRial < 1 || body.AmountRial > FinanceMath.Receivable(invoice) || string.IsNullOrWhiteSpace(body.Method)) return Fail("مبلغ از مانده بیشتر است یا معتبر نیست.");
-    var payment = new Payment { TenantId = invoice.TenantId, InvoiceId = id, IdempotencyKey = body.IdempotencyKey, AmountRial = body.AmountRial, Method = body.Method.Trim(), Reference = body.Reference?.Trim() ?? "" };
+    var payment = new Payment { TenantId = invoice.TenantId, InvoiceId = id, IdempotencyKey = body.IdempotencyKey, RequestHash = requestHash, AmountRial = body.AmountRial, Method = body.Method.Trim(), Reference = body.Reference?.Trim() ?? "" };
     invoice.PaidRial = checked(invoice.PaidRial + body.AmountRial); FinanceMath.UpdateStatus(invoice);
     if (invoice.PaymentStatus == "paid") foreach (var reminder in await db.Reminders.Where(x => x.InvoiceId == id && x.TenantId == invoice.TenantId && !x.Done).ToListAsync()) reminder.Done = true;
     db.Payments.Add(payment); Audit(db, c.User, invoice.TenantId, "payment.record", "invoice", id, $"amount={body.AmountRial}");
@@ -1683,12 +1694,14 @@ merchant.MapPost("/invoices/{id:guid}/returns", async (Guid id, SalesReturnReque
         return Fail("ردیف‌ها، دلیل یا شناسهٔ مرجوعی نامعتبر است.");
     var tid = TenantId(c.User);
     await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    var requestHash = Idempotency.Fingerprint(body);
     var existing = await db.SalesReturns.SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == body.IdempotencyKey);
-    if (existing is not null) return existing.InvoiceId == id ? Results.Ok(new { existing.Id, existing.AmountRial }) : Fail("شناسهٔ درخواست برای فاکتور دیگری استفاده شده است.", 409);
+    if (existing is not null) return existing.InvoiceId == id && Idempotency.Matches(existing.RequestHash, requestHash)
+        ? Results.Ok(new { existing.Id, existing.AmountRial }) : Fail("شناسهٔ درخواست برای مرجوعی متفاوتی استفاده شده است.", 409);
     if (await db.Cheques.AnyAsync(x => x.TenantId == tid && x.InvoiceId == id && x.Status == "open")) return Fail("پیش از ثبت مرجوعی، وضعیت چک باز فاکتور را تعیین کنید.", 409);
     var invoice = await db.Invoices.Include(x => x.Lines).SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && x.Status == "issued" && x.PaymentStatus != "proforma");
     if (invoice is null) return Results.NotFound();
-    var salesReturn = new SalesReturn { TenantId = tid, InvoiceId = id, IdempotencyKey = body.IdempotencyKey, Reason = body.Reason.Trim() };
+    var salesReturn = new SalesReturn { TenantId = tid, InvoiceId = id, IdempotencyKey = body.IdempotencyKey, RequestHash = requestHash, Reason = body.Reason.Trim() };
     foreach (var item in body.Lines)
     {
         var line = invoice.Lines.SingleOrDefault(x => x.Id == item.InvoiceLineId);
@@ -1732,12 +1745,14 @@ merchant.MapPost("/invoices/{id:guid}/refunds", async (Guid id, RefundRequest bo
     if (string.IsNullOrWhiteSpace(body.IdempotencyKey) || body.IdempotencyKey.Length > 100 || string.IsNullOrWhiteSpace(body.Method)) return Fail("شناسه یا روش بازپرداخت لازم است.");
     var tid = TenantId(c.User);
     await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    var requestHash = Idempotency.Fingerprint(body);
     var existing = await db.Refunds.SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == body.IdempotencyKey);
-    if (existing is not null) return existing.InvoiceId == id ? Results.Ok(new { existing.Id, existing.AmountRial }) : Fail("شناسهٔ درخواست برای فاکتور دیگری استفاده شده است.", 409);
+    if (existing is not null) return existing.InvoiceId == id && Idempotency.Matches(existing.RequestHash, requestHash)
+        ? Results.Ok(new { existing.Id, existing.AmountRial }) : Fail("شناسهٔ درخواست برای بازپرداخت متفاوتی استفاده شده است.", 409);
     var invoice = await db.Invoices.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && x.Status == "issued");
     if (invoice is null) return Results.NotFound();
     if (body.AmountRial < 1 || body.AmountRial > FinanceMath.RefundDue(invoice)) return Fail("مبلغ بازپرداخت از طلب مشتری بیشتر است یا معتبر نیست.");
-    var refund = new Refund { TenantId = tid, InvoiceId = id, IdempotencyKey = body.IdempotencyKey, AmountRial = body.AmountRial, Method = body.Method.Trim(), Reference = body.Reference?.Trim() ?? "" };
+    var refund = new Refund { TenantId = tid, InvoiceId = id, IdempotencyKey = body.IdempotencyKey, RequestHash = requestHash, AmountRial = body.AmountRial, Method = body.Method.Trim(), Reference = body.Reference?.Trim() ?? "" };
     invoice.RefundedRial = checked(invoice.RefundedRial + body.AmountRial); FinanceMath.UpdateStatus(invoice);
     if (FinanceMath.RefundDue(invoice) == 0)
         foreach (var reminder in await db.Reminders.Where(x => x.InvoiceId == id && x.TenantId == tid && !x.Done && x.Title.StartsWith("بازپرداخت")).ToListAsync()) reminder.Done = true;
@@ -1953,11 +1968,14 @@ merchant.MapPost("/accounting/purchases", async (PurchaseRequest body, MajoraDb 
     if (!CanManageFinance(c.User)) return Results.Forbid();
     if (string.IsNullOrWhiteSpace(body.SupplierName) || string.IsNullOrWhiteSpace(body.IdempotencyKey) || body.IdempotencyKey.Length > 100 || body.Lines is null || body.Lines.Count is < 1 or > 100) return Fail("اطلاعات خرید نامعتبر است.");
     var tid = TenantId(c.User); await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    var requestHash = Idempotency.Fingerprint(body);
     var existing = await db.Purchases.SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == body.IdempotencyKey);
-    if (existing is not null) return Results.Ok(new { existing.Id, existing.TotalRial });
+    if (existing is not null) return Idempotency.Matches(existing.RequestHash, requestHash)
+        ? Results.Ok(new { existing.Id, existing.TotalRial })
+        : Fail("شناسهٔ درخواست برای خرید متفاوتی استفاده شده است.", 409);
     if (body.PurchasedAt is DateTime purchaseDate && (purchaseDate > DateTime.UtcNow.AddDays(1) || purchaseDate < new DateTime(2000, 1, 1)))
         return Fail("تاریخ خرید معتبر نیست.");
-    var purchase = new Purchase { TenantId = tid, SupplierName = body.SupplierName.Trim(), SupplierInvoiceNumber = body.SupplierInvoiceNumber?.Trim() ?? "", IdempotencyKey = body.IdempotencyKey,
+    var purchase = new Purchase { TenantId = tid, SupplierName = body.SupplierName.Trim(), SupplierInvoiceNumber = body.SupplierInvoiceNumber?.Trim() ?? "", IdempotencyKey = body.IdempotencyKey, RequestHash = requestHash,
         PurchasedAt = body.PurchasedAt?.ToUniversalTime() ?? DateTime.UtcNow };
     var newSkus = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     foreach (var item in body.Lines)
