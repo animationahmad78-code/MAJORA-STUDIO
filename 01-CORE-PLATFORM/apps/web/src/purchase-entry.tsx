@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react';
-import { api, rial, type Product } from './api';
+import { api, type Product } from './api';
 import { JalaliDateField, jalaliToIsoDate } from '../../mobile/src/jalali-date';
 import { RialInput } from './rial-input';
+import { formatBigRial, purchaseMoney } from './purchase-money';
 
 type Row = { productId: string; name: string; sku: string; category: string; priceRial: string; quantity: number; unitCostRial: string; stockQuantity: string };
 const emptyRow = (): Row => ({ productId: '', name: '', sku: '', category: '', priceRial: '', quantity: 1, unitCostRial: '', stockQuantity: '1' });
@@ -13,8 +14,10 @@ export function PurchaseEntry({ products, reload, run }: { products: Product[]; 
   const [rows, setRows] = useState<Row[]>([emptyRow()]);
   const key = useRef(crypto.randomUUID());
   const change = (index: number, patch: Partial<Row>) => setRows(current => current.map((row, i) => i === index ? { ...row, ...patch } : row));
-  const total = rows.reduce((sum, row) => sum + row.quantity * Number(row.unitCostRial || 0), 0);
+  const money = purchaseMoney(rows, paid);
+  const showMoneyError = !!money.error && (rows.some(row => row.productId || row.unitCostRial || row.priceRial) || !!paid);
   const submit = async () => {
+    if (money.error) throw new Error(money.error);
     const dueIso = due ? jalaliToIsoDate(due) : null;
     if (due && !dueIso) throw new Error('تاریخ پیگیری شمسی معتبر نیست.');
     const purchaseIso = purchasedAt ? jalaliToIsoDate(purchasedAt) : null;
@@ -42,10 +45,11 @@ export function PurchaseEntry({ products, reload, run }: { products: Product[]; 
         {rows.length > 1 && <button type="button" onClick={() => setRows(current => current.filter((_, i) => i !== index))}>حذف ردیف</button>}
       </div>)}
       <button type="button" onClick={() => setRows(current => [...current, emptyRow()])}>＋ ردیف دیگر</button>
-      <p className="purchase-total">جمع خرید: <strong>{rial(total)}</strong></p>
+      <p className="purchase-total">جمع خرید: <strong>{formatBigRial(money.totalRial)}</strong></p>
+      {showMoneyError && <p role="alert" className="field-error">{money.error}</p>}
       <div className="form-grid"><label>پرداخت‌شده (ریال)<RialInput value={paid} onValueChange={setPaid} placeholder="خالی = پرداخت نشده" /></label><JalaliDateField label="تاریخ پیگیری مانده (شمسی)" value={due} onChange={setDue} optional /></div>
       <fieldset className="purchase-stock-choice"><legend>وضعیت ورود کالا به موجودی (الزامی)</legend><label><input type="radio" name="stock-mode" checked={stockMode === 'received'} onChange={() => setStockMode('received')} /> تعداد تحویل‌شده را هم‌زمان به انبار اضافه کن</label><label><input type="radio" name="stock-mode" checked={stockMode === 'purchase-only'} onChange={() => setStockMode('purchase-only')} /> فقط خرید ثبت شود؛ هنوز به موجودی اضافه نشود</label></fieldset>
-      <button className="primary full" disabled={!supplier.trim() || rows.some(row => !row.productId) || !stockMode}>ثبت خرید</button>
+      <button className="primary full" disabled={!supplier.trim() || rows.some(row => !row.productId) || !stockMode || !!money.error}>ثبت خرید</button>
     </form>
   </section>;
 }
