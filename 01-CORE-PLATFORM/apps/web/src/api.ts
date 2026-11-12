@@ -1,4 +1,4 @@
-export type User = { id: string; displayName: string; role: string; tenantId?: string };
+export type User = { id: string; displayName: string; role: string; tenantId?: string; accessActive?: boolean };
 export type Product = { id: string; name: string; sku: string; category: string; priceRial: number; averageCostRial: number | null; costKnown: boolean | null; stock: number; hasPhoto: boolean; updatedAt: string };
 export type Customer = { id: string; name: string; phone: string };
 export type CustomerWithStatus = Customer & { status: string; receivableRial: number };

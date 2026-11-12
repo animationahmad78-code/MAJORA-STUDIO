@@ -33,8 +33,9 @@ const roleSections: Record<string, Tab[]> = {
   accountant: ['dashboard','products','customers','invoices','accounting','cheques','reminders','advisor','majora-support'],
   viewer: ['dashboard','products','customers','invoices','majora-support']
 };
-const visibleMerchantTabs = (role: string, disabled: string[]) => merchantTabs.filter(([id]) =>
-  !disabled.includes(tabFeature[id] ?? '') && (!roleSections[role] || roleSections[role].includes(id)));
+const visibleMerchantTabs = (role: string, disabled: string[], accessActive = true) => merchantTabs.filter(([id]) =>
+  (!accessActive ? id === 'subscription' || id === 'majora-support' :
+    !disabled.includes(tabFeature[id] ?? '') && (!roleSections[role] || roleSections[role].includes(id))));
 const defaultTab = (role: string): Tab => role === 'warehouse' ? 'products' : 'dashboard';
 
 function App() {
@@ -49,6 +50,12 @@ function App() {
   const [featureLoadError,setFeatureLoadError] = useState('');
   const refreshBrand = () => { if (user && user.role !== 'platform_admin') api<{name:string;logoUrl?:string;brandColor:string}>('/merchant/workspace').then(setBrand).catch(()=>{}); };
   useEffect(()=>{ api<User>('/auth/me').then(setUser).catch(()=>{}).finally(()=>setLoading(false)); },[]);
+  useEffect(() => {
+    if (!user || user.role === 'platform_admin') return;
+    const refreshAccess = () => { if (document.visibilityState === 'visible') void api<User>('/auth/me').then(setUser).catch(() => {}); };
+    window.addEventListener('focus', refreshAccess);
+    return () => window.removeEventListener('focus', refreshAccess);
+  }, [user?.id]);
   useEffect(()=>{
     const sync = () => { api<User>('/auth/me').then(next => { setUser(next); setNotice('نشست این مرورگر تغییر کرد؛ هویت فعال به‌روزرسانی شد.'); }).catch(() => { setUser(null); setBrand(null); }); };
     const onStorage = (event: StorageEvent) => {
@@ -75,17 +82,17 @@ function App() {
   }, [user?.id]);
   useEffect(()=>{
     if (!user) return;
-    const allowed = user?.role === 'platform_admin' ? adminTabs : visibleMerchantTabs(user.role, disabledFeatures);
+    const allowed = user?.role === 'platform_admin' ? adminTabs : visibleMerchantTabs(user.role, disabledFeatures, user.accessActive);
     const fromHash = window.location.hash.match(/^#\/([a-z-]+)$/)?.[1] as Tab | undefined;
     const fallback = allowed.some(([id]) => id === defaultTab(user.role)) ? defaultTab(user.role) : allowed[0]?.[0] ?? 'majora-support';
     const next = fromHash && allowed.some(([id]) => id === fromHash) ? fromHash : fallback;
     if (next === fallback && fromHash && fromHash !== fallback) window.history.replaceState(null, '', `#/${fallback}`);
     setTab(next);
-  },[user?.id,disabledFeatures]);
+  },[user?.id,user?.accessActive,disabledFeatures]);
   useEffect(()=>{
     const restore = () => {
       if (!user) return;
-      const allowed = user?.role === 'platform_admin' ? adminTabs : visibleMerchantTabs(user.role, disabledFeatures);
+      const allowed = user?.role === 'platform_admin' ? adminTabs : visibleMerchantTabs(user.role, disabledFeatures, user.accessActive);
       const fromHash = window.location.hash.match(/^#\/([a-z-]+)$/)?.[1] as Tab | undefined;
       const fallback = allowed.some(([id]) => id === defaultTab(user.role)) ? defaultTab(user.role) : allowed[0]?.[0] ?? 'majora-support';
       const next = fromHash && allowed.some(([id]) => id === fromHash) ? fromHash : fallback;
@@ -96,11 +103,11 @@ function App() {
     window.addEventListener('popstate', restore);
     window.addEventListener('hashchange', restore);
     return () => { window.removeEventListener('popstate', restore); window.removeEventListener('hashchange', restore); };
-  },[user?.role,disabledFeatures]);
+  },[user?.role,user?.accessActive,disabledFeatures]);
   useEffect(()=>{setMenuOpen(false)},[tab]);
   const navigate = (next: Tab, fromSearch = false) => {
     if (disabledFeatures.includes(tabFeature[next] ?? '')) return;
-    if (user?.role !== 'platform_admin' && !visibleMerchantTabs(user?.role ?? '', disabledFeatures).some(([id]) => id === next)) return;
+    if (user?.role !== 'platform_admin' && !visibleMerchantTabs(user?.role ?? '', disabledFeatures, user?.accessActive).some(([id]) => id === next)) return;
     if (!fromSearch) setSearchTarget(null);
     if (next !== tab) { window.history.pushState(null, '', `#/${next}`); setTab(next); window.scrollTo({ top: 0, behavior: 'instant' }); }
   };
@@ -110,14 +117,14 @@ function App() {
     navigate(hit.kind === 'product' ? 'products' : hit.kind === 'customer' ? 'customers' : hit.kind === 'cheque' ? 'cheques' : hit.kind === 'reminder' ? 'reminders' : 'accounting', true);
   };
   const run = async (action:()=>Promise<unknown>, success='ذخیره شد.') => { setError(''); setNotice(''); try { await action(); setNotice(success); } catch (e) { setError(e instanceof Error ? e.message : 'خطا در انجام عملیات'); } };
-  const tabs = user?.role === 'platform_admin' ? adminTabs : visibleMerchantTabs(user?.role ?? '', disabledFeatures);
+  const tabs = user?.role === 'platform_admin' ? adminTabs : visibleMerchantTabs(user?.role ?? '', disabledFeatures, user?.accessActive);
   if (loading) return <div className="splash"><img className="splash-orb" src="/majora-mark.png" alt="MAJORA"/><strong>فضای کاری ماژورا</strong><span>در حال آماده‌سازی فضای کسب‌وکار…</span><small>Powered by MAJORA</small></div>;
   if (!user) return <Login onLogin={setUser} error={error} setError={setError}/>;
   if (featureLoadError) return <div className="feature-load-error" role="alert"><h1>دسترسی بخش‌ها دریافت نشد</h1><p>{featureLoadError}</p><div className="form-actions"><button className="primary" onClick={() => { setFeatureLoadError(''); api<{disabled:string[]}>('/merchant/features').then(x => { setDisabledFeatures(x.disabled); setFeaturesLoadedFor(user.id); }).catch(e => setFeatureLoadError(e instanceof Error ? e.message : 'دوباره تلاش کنید.')); }}>تلاش دوباره</button><button onClick={() => { void api('/auth/logout','POST').then(() => { setUser(null); setBrand(null); setFeatureLoadError(''); }).catch(e => setFeatureLoadError(e instanceof Error ? e.message : 'خروج انجام نشد.')); }}>خروج از حساب</button></div></div>;
   if (featuresLoadedFor !== user.id) return <div className="splash"><img className="splash-orb" src={brand?.logoUrl || '/majora-mark.png'} alt={brand?.name || 'MAJORA'}/><strong>{brand?.name || 'در حال آماده‌سازی فروشگاه'}</strong><span>دسترسی بخش‌ها بررسی می‌شود…</span><small>Powered by MAJORA</small></div>;
   return <div className="shell" style={{'--brand':brand?.brandColor??'#0B2B53'} as React.CSSProperties}>
 <aside className="sidebar"><div className="brand"><img src={user.role==='platform_admin'?'/majora-mark.png':(brand?.logoUrl || '/store-logo-gold.png')} alt={user.role==='platform_admin'?'نشان ماژورا':'لوگوی فروشگاه'}/><div><b>{brand?.name || 'MAJORA STUDIO'}</b><small>فضای مدیریت کسب‌وکار</small></div></div><nav aria-label="منوی اصلی">{tabs.map(([id,label,icon])=><button key={id} className={tab===id?'active':''} onClick={()=>navigate(id)}><span aria-hidden="true">{icon}</span>{label}</button>)}</nav><div className="sidebar-foot"><small>Powered by <b>MAJORA</b></small><button onClick={()=>run(async()=>{await api('/auth/logout','POST'); setUser(null); setBrand(null)},'')}>خروج از حساب</button></div></aside>
-    <div className="main"><header className="topbar"><div><small>سلام، {user.displayName}</small><h1>{tabs.find(x=>x[0]===tab)?.[1]}</h1></div>{user.role!=='platform_admin'&&user.role!=='warehouse'&&<GlobalSearch onPick={openSearchHit}/>}<div className="top-actions"><span className="online-dot"/> داده‌های این فضا روی سرور ثبت می‌شوند <button className="menu-toggle" onClick={()=>setMenuOpen(true)} aria-label="باز کردن منوی کامل">☰ منو</button><button onClick={()=>run(async()=>{await api('/auth/logout','POST'); setUser(null); setBrand(null)},'')}>خروج</button></div></header>
+    <div className="main"><header className="topbar"><div><small>سلام، {user.displayName}</small><h1>{tabs.find(x=>x[0]===tab)?.[1]}</h1></div>{user.role!=='platform_admin'&&user.role!=='warehouse'&&user.accessActive!==false&&<GlobalSearch onPick={openSearchHit}/>}<div className="top-actions"><span className="online-dot"/> {user.accessActive===false?'اشتراک فعال نیست؛ برای تمدید به «اشتراک من» بروید.':'داده‌های این فضا روی سرور ثبت می‌شوند'} <button className="menu-toggle" onClick={()=>setMenuOpen(true)} aria-label="باز کردن منوی کامل">☰ منو</button><button onClick={()=>run(async()=>{await api('/auth/logout','POST'); setUser(null); setBrand(null)},'')}>خروج</button></div></header>
       {error && <div role="alert" className="toast error" onClick={()=>setError('')}>{error} <button aria-label="بستن">×</button></div>}{notice && <div role="status" className="toast success" onClick={()=>setNotice('')}>{notice} <button aria-label="بستن">×</button></div>}
       <main className="content" key={tab}>{tab==='majora-support'?<MajoraSupport/>:user.role==='platform_admin' ? (tab==='plans'?<AdminBilling/>:tab==='admin-users'?<UserManagement admin/>:tab==='tenants'?<Tenants/>:tab==='admin-features'?<AdminFeatures/>:tab==='ai-settings'?<AiSettings/>:tab==='admin-brand'?<AdminInvoiceBrandSettings/>:<AdminDashboard/>) : (tab==='sale'?<SaleWorkspace onDone={id=>{setOpenedInvoiceId(id);navigate('invoices')}}/>:tab==='products'?<ProductsCatalog role={user.role} initialQuery={searchTarget?.kind==='product'?searchTarget.query:''}/>:tab==='price-batches'?<PriceBatches run={run}/>:tab==='customers'?<Customers role={user.role} initialQuery={searchTarget?.kind==='customer'?searchTarget.query:''}/>:tab==='invoices'?<Invoices role={user.role} run={run} initialId={openedInvoiceId} onInitialViewed={()=>setOpenedInvoiceId(null)} onReturn={id=>{setReturnTarget(id);navigate('returns')}} onCheque={()=>navigate('cheques')}/>:tab==='archive'?<Archive run={run}/>:tab==='returns'?<Returns initialId={returnTarget} onTargetUsed={()=>setReturnTarget(null)}/>:tab==='invoice-brand'?<InvoiceBrandSettings editable={false} onSaved={refreshBrand}/>:tab==='accounting'?<Accounting run={run} focusId={searchTarget?.kind==='purchase'||searchTarget?.kind==='expense'?searchTarget.id:undefined}/>:tab==='cheques'?<Cheques initialQuery={searchTarget?.kind==='cheque'?searchTarget.query:''}/>:tab==='reminders'?<Reminders run={run} initialQuery={searchTarget?.kind==='reminder'?searchTarget.query:''}/>:tab==='advisor'?<><Advisor/><AdvisorChat/></>:tab==='subscription'?<MerchantSubscription/>:tab==='staff'?<><Staff run={run} role={user.role}/>{user.role==='owner'&&<UserManagement admin={false}/>}</>:<Dashboard go={navigate} role={user.role} brand={brand?.name??'فروشگاه شما'} logo={brand?.logoUrl} disabledFeatures={disabledFeatures}/>)}</main>
       <footer className="footer">نرم‌افزار به سبک کار شما · Powered by MAJORA</footer>

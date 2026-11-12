@@ -311,7 +311,9 @@ app.MapPost("/api/auth/login", async (LoginRequest body, MajoraDb db, IPasswordH
         AuthAudit(db, user, "auth.login.failed", user?.Enabled == false ? "disabled_account" : "invalid_credentials", ctx);
         await db.SaveChangesAsync(); return Fail("نام کاربری یا رمز عبور نادرست است.", 401);
     }
-    if (user.TenantId is Guid tid && !await Active(db, tid))
+    var subscriptionActive = user.TenantId is not Guid tid || await Active(db, tid);
+    if (user.TenantId is Guid merchantId &&
+        (!await db.Tenants.AnyAsync(t => t.Id == merchantId && t.Enabled) || !subscriptionActive && user.Role != "owner"))
     {
         AuthAudit(db, user, "auth.login.failed", "subscription_inactive", ctx); await db.SaveChangesAsync();
         return Fail("اشتراک این کسب‌وکار فعال نیست. با پشتیبانی ماژورا تماس بگیرید.", 403);
@@ -322,8 +324,11 @@ app.MapPost("/api/auth/login", async (LoginRequest body, MajoraDb db, IPasswordH
     {
         await using var capacityTx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
         var now = DateTime.UtcNow;
-        var maxDevices = await db.Subscriptions.Where(s => s.TenantId == merchantTenantId && s.PaymentStatus == "paid" && s.StartsAt <= now && s.EndsAt > now)
-            .OrderByDescending(s => s.EndsAt).Join(db.Plans, s => s.PlanId, p => p.Id, (s, p) => (int?)p.MaxDevices).FirstOrDefaultAsync();
+        var maxDevices = subscriptionActive
+            ? await db.Subscriptions.Where(s => s.TenantId == merchantTenantId && s.PaymentStatus == "paid" && s.StartsAt <= now && s.EndsAt > now)
+                .OrderByDescending(s => s.EndsAt).Join(db.Plans, s => s.PlanId, p => p.Id, (s, p) => (int?)p.MaxDevices).FirstOrDefaultAsync()
+            : await db.Subscriptions.Where(s => s.TenantId == merchantTenantId).OrderByDescending(s => s.EndsAt)
+                .Join(db.Plans, s => s.PlanId, p => p.Id, (s, p) => (int?)p.MaxDevices).FirstOrDefaultAsync() ?? 1;
         if (maxDevices is null) return Fail("اشتراک این کسب‌وکار فعال نیست. با پشتیبانی ماژورا تماس بگیرید.", 403);
         var currentTicket = await ctx.AuthenticateAsync(scheme);
         var oldSessionId = currentTicket.Principal?.FindFirstValue("sessionId");
@@ -333,7 +338,8 @@ app.MapPost("/api/auth/login", async (LoginRequest body, MajoraDb db, IPasswordH
             var oldSession = await db.AppSessions.SingleOrDefaultAsync(x => x.Id == oldId && x.UserId == user.Id && x.TenantId == merchantTenantId && x.RevokedAt == null);
             if (oldSession is not null) { oldSession.RevokedAt = now; await db.SaveChangesAsync(); }
         }
-        var activeSessions = await db.AppSessions.CountAsync(x => x.TenantId == merchantTenantId && x.RevokedAt == null && x.ExpiresAt > now);
+        var activeSessions = await db.AppSessions.CountAsync(x => x.TenantId == merchantTenantId && x.RevokedAt == null && x.ExpiresAt > now &&
+            (subscriptionActive || x.UserId == user.Id));
         if (activeSessions >= maxDevices)
         {
             AuthAudit(db, user, "auth.login.failed", "session_limit", ctx); await db.SaveChangesAsync();
@@ -346,7 +352,7 @@ app.MapPost("/api/auth/login", async (LoginRequest body, MajoraDb db, IPasswordH
         db.AppSessions.Add(merchantSession); AuthAudit(db, user, "auth.login.success", "accepted", ctx, merchantSession.Id);
         await db.SaveChangesAsync();
         await capacityTx.CommitAsync();
-        return await CompleteLogin(ctx, user, scheme, panel, merchantSession.Id);
+        return await CompleteLogin(ctx, user, scheme, panel, merchantSession.Id, subscriptionActive);
     }
     var session = new AppSession { UserId = user.Id, TenantId = user.TenantId, Panel = panel,
         UserAgent = ctx.Request.Headers.UserAgent.ToString()[..Math.Min(200, ctx.Request.Headers.UserAgent.ToString().Length)],
@@ -355,13 +361,13 @@ app.MapPost("/api/auth/login", async (LoginRequest body, MajoraDb db, IPasswordH
     await db.SaveChangesAsync();
     return await CompleteLogin(ctx, user, scheme, panel, session.Id);
 }).RequireRateLimiting("login");
-static async Task<IResult> CompleteLogin(HttpContext ctx, AppUser user, string scheme, string panel, Guid sessionId)
+static async Task<IResult> CompleteLogin(HttpContext ctx, AppUser user, string scheme, string panel, Guid sessionId, bool accessActive = true)
 {
     var claims = new List<Claim> { new(ClaimTypes.NameIdentifier, user.Id.ToString()), new(ClaimTypes.Name, user.DisplayName), new(ClaimTypes.Role, user.Role), new("authVersion", user.AuthVersion.ToString()), new("sessionId", sessionId.ToString()) };
     if (user.TenantId is Guid tenantId) claims.Add(new Claim("tenant", tenantId.ToString()));
     await ctx.SignInAsync(scheme, new ClaimsPrincipal(new ClaimsIdentity(claims, scheme)));
     Csrf(ctx, panel);
-    return Results.Ok(new { user.Id, user.DisplayName, user.Role, user.TenantId });
+    return Results.Ok(new { user.Id, user.DisplayName, user.Role, user.TenantId, AccessActive = accessActive });
 }
 app.MapPost("/api/auth/logout", async (MajoraDb db, HttpContext c) =>
 {
@@ -385,7 +391,8 @@ app.MapGet("/api/auth/me", async (string? panel, MajoraDb db, HttpContext c) =>
     var user = await AuthenticatedAccount(db, c, panel);
     if (user is null) return Results.Unauthorized();
     Csrf(c, panel);
-    return Results.Ok(new { user.Id, user.DisplayName, user.Role, user.TenantId });
+    return Results.Ok(new { user.Id, user.DisplayName, user.Role, user.TenantId,
+        AccessActive = user.TenantId is not Guid tid || await Active(db, tid) });
 });
 app.MapPost("/api/auth/change-password", async (PasswordChange body, MajoraDb db, IPasswordHasher<AppUser> hasher, HttpContext c) =>
 {
@@ -823,14 +830,18 @@ merchant.AddEndpointFilter(async (invocation, next) =>
     if (!MerchantRoles.Allows(Role(c.User), c.Request.Path.Value ?? "", c.Request.Method))
         return Fail("نقش شما اجازهٔ انجام این عملیات را ندارد.", 403);
     var db = c.RequestServices.GetRequiredService<MajoraDb>();
+    var tenantId = TenantId(c.User);
     var subscriptionSelfService = c.Request.Path.StartsWithSegments("/api/merchant/subscription") ||
         c.Request.Path.StartsWithSegments("/api/merchant/plans") ||
-        c.Request.Path.StartsWithSegments("/api/merchant/billing");
-    if (!await Active(db, TenantId(c.User)) && !subscriptionSelfService) return Fail("اشتراک فعال نیست.", 403);
+        c.Request.Path.StartsWithSegments("/api/merchant/billing") ||
+        c.Request.Path.StartsWithSegments("/api/merchant/features") ||
+        c.Request.Path.StartsWithSegments("/api/merchant/workspace");
+    if (!await db.Tenants.AnyAsync(x => x.Id == tenantId && x.Enabled))
+        return Fail("دسترسی این فروشگاه توسط ماژورا متوقف شده است.", 403);
+    if (!await Active(db, TenantId(c.User)) && !subscriptionSelfService) return Fail("اشتراک فعال نیست؛ ابتدا اشتراک را تمدید کنید.", 403);
     var required = TenantFeatures.Required(c.Request.Path.Value ?? "", c.Request.Method);
     if (required.Length > 0)
     {
-        var tenantId = TenantId(c.User);
         var policy = await db.Tenants.AsNoTracking().Where(x => x.Id == tenantId).Select(x => x.DisabledFeaturesJson).SingleAsync();
         var disabled = TenantFeatures.Read(policy);
         if (required.FirstOrDefault(disabled.Contains) is { } denied)

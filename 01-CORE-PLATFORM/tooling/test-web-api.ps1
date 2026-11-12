@@ -94,11 +94,23 @@ try {
   if (@($tenantList).Count -ne 20) { throw 'Consecutive tenant creation did not produce exactly 20 shops' }
   $provisionedSubscription = @($tenantList | Where-Object id -eq $provisionedShop.id)[0].subscription
   if (-not $provisionedSubscription.id -or $provisionedSubscription.paymentStatus -ne 'pending') { throw 'Provisioned subscription was not visible to the owner' }
+  $renewalSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+  $renewalLogin = PostJson '/auth/login' @{username="owner_$($id)_20";password=$ownerPass} $renewalSession $true
+  if ($renewalLogin.accessActive -ne $false) { throw 'Pending subscription granted full workspace access' }
+  if ((Invoke-RestMethod "$base/api/auth/me?panel=merchant" -WebSession $renewalSession).accessActive -ne $false) { throw 'Pending subscription status was not returned on session restore' }
+  $null = Invoke-RestMethod "$base/api/merchant/subscription" -WebSession $renewalSession
+  $null = Invoke-RestMethod "$base/api/merchant/plans" -WebSession $renewalSession
+  $null = Invoke-RestMethod "$base/api/merchant/features" -WebSession $renewalSession
+  $null = Invoke-RestMethod "$base/api/merchant/workspace" -WebSession $renewalSession
+  $pendingCatalog = Invoke-WebRequest "$base/api/merchant/products" -WebSession $renewalSession -SkipHttpErrorCheck
+  if ($pendingCatalog.StatusCode -ne 403) { throw 'Pending subscription allowed catalog access' }
   $missingApprovalReason = Invoke-WebRequest "$base/api/admin/tenants/$($provisionedShop.id)/subscriptions/$($provisionedSubscription.id)/approve" -Method Post -WebSession $adminSession -Headers @{'X-CSRF'=$adminSession.Cookies.GetCookies([uri]$base)['majora.admin.csrf'].Value} -ContentType 'application/json' -Body '{"reason":""}' -SkipHttpErrorCheck
   if ($missingApprovalReason.StatusCode -ne 400) { throw 'Subscription approval without a reason was accepted' }
   $approvedProvision = PostJson "/admin/tenants/$($provisionedShop.id)/subscriptions/$($provisionedSubscription.id)/approve" @{reason='آزمون بررسی واریز'} $adminSession
   $approvedProvisionAgain = PostJson "/admin/tenants/$($provisionedShop.id)/subscriptions/$($provisionedSubscription.id)/approve" @{reason='آزمون تکرار درخواست'} $adminSession
   if ($approvedProvision.paymentStatus -ne 'paid' -or $approvedProvisionAgain.id -ne $approvedProvision.id) { throw 'Pending subscription approval failed or duplicated' }
+  if ((Invoke-RestMethod "$base/api/auth/me?panel=merchant" -WebSession $renewalSession).accessActive -ne $true) { throw 'Approved subscription did not unlock the existing session' }
+  $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $renewalSession
   $invalidProvisionSlug = "invalid-provision-$($id.Substring(0,8))"
   $invalidProvision = Invoke-WebRequest "$base/api/admin/tenants" -Method Post -WebSession $adminSession -Headers @{'X-CSRF'=$adminSession.Cookies.GetCookies([uri]$base)['majora.admin.csrf'].Value} -ContentType 'application/json' -Body (@{name='فروشگاه نامعتبر';slug=$invalidProvisionSlug;ownerUsername="invalid_provision_$id";ownerName='مالک';ownerPassword=$ownerPass;planId=[guid]::NewGuid();startsAt=[datetime]::UtcNow.AddDays(-1).ToString('o');endsAt=[datetime]::UtcNow.AddDays(30).ToString('o');paymentStatus='paid'} | ConvertTo-Json -Compress) -SkipHttpErrorCheck
   if ($invalidProvision.StatusCode -ne 400 -or @((Invoke-RestMethod "$base/api/admin/tenants" -WebSession $adminSession) | Where-Object slug -eq $invalidProvisionSlug).Count -ne 0) { throw 'Failed provisioning left a partial tenant' }
@@ -679,6 +691,8 @@ try {
   $suspended = $false
   try { $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession } catch { $suspended = $_.Exception.Response.StatusCode -eq 403 }
   if (-not $suspended) { throw 'Suspended tenant still has access' }
+  $suspendedBilling = Invoke-WebRequest "$base/api/merchant/subscription" -WebSession $ownerSession -SkipHttpErrorCheck
+  if ($suspendedBilling.StatusCode -ne 403) { throw 'Administratively suspended tenant could use subscription checkout' }
   $null = PutJson "/admin/tenants/$($tenant.id)" @{name='فروشگاه آزمون';enabled=$true;brandColor='#0B2B53'} $adminSession
   if ((Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession).activeSubscriptions -ne $beforeSuspension) { throw 'Reactivated tenant was missing from active overview' }
   $reactivated = Invoke-RestMethod "$base/api/merchant/products" -WebSession $staffSession
