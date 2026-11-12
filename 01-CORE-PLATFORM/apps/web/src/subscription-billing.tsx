@@ -9,13 +9,14 @@ type Billing = { cardNumber: string; cardHolder: string };
 type Order = { id: string; tenantName?: string; planNameSnapshot: string; promoCodeSnapshot: string; basePriceRial: number; totalRial: number; status: string; paymentMethod: string; hasReceipt?: boolean; createdAt: string };
 type Quote = { basePriceRial: number; discountPercent: number; totalRial: number; promoCode: string };
 const statusLabel: Record<string, string> = { pending_approval: 'در انتظار تأیید ماژورا', paid: 'تأیید و فعال شد', rejected: 'رد شد', awaiting_receipt: 'در انتظار رسید' };
+const periodLabel: Record<string, string> = { active: 'فعال', expired: 'منقضی', scheduled: 'شروع در آینده', pending_payment: 'در انتظار پرداخت' };
 const features = (plan: Plan): string[] => { try { const parsed: unknown = JSON.parse(plan.featuresJson || '[]'); return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []; } catch { return []; } };
 const atNoon = (value: string) => { const iso = jalaliToIsoDate(value); if (!iso) throw new Error('تاریخ شمسی معتبر وارد کنید.'); return new Date(`${iso}T12:00:00`).toISOString(); };
 const fileData = (file: File) => new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(new Error('خواندن تصویر رسید انجام نشد.')); reader.readAsDataURL(file); });
 
 export function MerchantSubscription() {
   const [plans, setPlans] = useState<Plan[]>([]); const [orders, setOrders] = useState<Order[]>([]);
-  const [history, setHistory] = useState<{ id: string; plan: string; startsAt: string; endsAt: string; paymentStatus: string; priceRialSnapshot: number }[]>([]);
+  const [history, setHistory] = useState<{ id: string; plan: string; startsAt: string; endsAt: string; paymentStatus: string; effectiveStatus: string; priceRialSnapshot: number }[]>([]);
   const [billing, setBilling] = useState<Billing | null>(null); const [selected, setSelected] = useState<Plan | null>(null);
   const [promo, setPromo] = useState(''); const [quote, setQuote] = useState<Quote | null>(null); const [receipt, setReceipt] = useState<File | null>(null);
   const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [notice, setNotice] = useState('');
@@ -54,7 +55,7 @@ export function MerchantSubscription() {
       <small>درگاه پرداخت پس از انتخاب و اتصال ارائه‌دهندهٔ معتبر فعال می‌شود؛ این فرم فقط کارت‌به‌کارت و تأیید دستی را ثبت می‌کند.</small>
     </section>}
     <section className="card"><div className="card-head"><h2>درخواست‌های پرداخت</h2><button onClick={() => void load().catch(e => setError(e.message))}>تازه‌سازی</button></div><div className="list">{orders.map(order => <div className="list-row" key={order.id}><div><strong>{order.planNameSnapshot}</strong><small>{dateFa(order.createdAt)} · {order.promoCodeSnapshot || 'بدون کد تخفیف'}</small></div><b>{rial(order.totalRial)}</b><span className={'badge ' + (order.status === 'paid' ? 'green' : 'amber')}>{statusLabel[order.status] ?? order.status}</span></div>)}{!orders.length && <p className="empty">درخواستی ثبت نشده است.</p>}</div></section>
-    <section className="card"><h2>سوابق اشتراک</h2><div className="list">{history.map(item => <div className="list-row" key={item.id}><div><strong>{item.plan}</strong><small>از {dateFa(item.startsAt)} تا {dateFa(item.endsAt)}</small></div><b>{rial(item.priceRialSnapshot)}</b><span className="badge green">{item.paymentStatus === 'paid' ? 'پرداخت‌شده' : 'در انتظار'}</span></div>)}{!history.length && <p className="empty">اشتراکی ثبت نشده است.</p>}</div></section>
+    <section className="card"><h2>سوابق اشتراک</h2><div className="list">{history.map(item => <div className="list-row" key={item.id}><div><strong>{item.plan}</strong><small>از {dateFa(item.startsAt)} تا {dateFa(item.endsAt)}</small></div><b>{rial(item.priceRialSnapshot)}</b><span className={'badge ' + (item.effectiveStatus === 'active' ? 'green' : 'amber')}>{periodLabel[item.effectiveStatus] ?? 'وضعیت نامشخص'}</span></div>)}{!history.length && <p className="empty">اشتراکی ثبت نشده است.</p>}</div></section>
   </div>;
 }
 

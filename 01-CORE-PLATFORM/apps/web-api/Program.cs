@@ -602,7 +602,27 @@ admin.MapPost("/subscription-orders/{id:guid}/decision", async (Guid id, Subscri
     else { order.Status = "rejected"; Audit(db, c.User, order.TenantId, "subscription-order.reject", "subscription-order", id); }
     await db.SaveChangesAsync(); await tx.CommitAsync(); return Results.Ok(new { order.Id, order.Status, order.SubscriptionId });
 });
-admin.MapGet("/tenants", async (MajoraDb db) => Results.Ok(await db.Tenants.OrderBy(x => x.Name).Select(x => new { x.Id, x.Name, x.Slug, x.Enabled, x.BrandColor, x.LogoUrl, Subscription = db.Subscriptions.Where(s => s.TenantId == x.Id).OrderByDescending(s => s.EndsAt).Select(s => new { s.Id, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot }).FirstOrDefault() }).ToListAsync()));
+admin.MapGet("/tenants", async (MajoraDb db) =>
+{
+    var now = DateTime.UtcNow;
+    var tenants = await db.Tenants.AsNoTracking().OrderBy(x => x.Name).Select(x => new {
+        x.Id, x.Name, x.Slug, x.Enabled, x.BrandColor, x.LogoUrl,
+        Subscription = db.Subscriptions.Where(s => s.TenantId == x.Id).OrderByDescending(s => s.EndsAt)
+            .Select(s => new { s.Id, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot }).FirstOrDefault(),
+        ActiveSubscription = db.Subscriptions.Where(s => s.TenantId == x.Id && s.PaymentStatus == "paid" && s.StartsAt <= now && s.EndsAt > now)
+            .OrderByDescending(s => s.EndsAt).Select(s => new { s.Id, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot }).FirstOrDefault(),
+        HasPending = db.Subscriptions.Any(s => s.TenantId == x.Id && s.PaymentStatus == "pending"),
+        LastPaidEnd = db.Subscriptions.Where(s => s.TenantId == x.Id && s.PaymentStatus == "paid")
+            .OrderByDescending(s => s.EndsAt).Select(s => (DateTime?)s.EndsAt).FirstOrDefault()
+    }).ToListAsync();
+    return Results.Ok(tenants.Select(x => new {
+        x.Id, x.Name, x.Slug, x.Enabled, x.BrandColor, x.LogoUrl, x.Subscription, x.ActiveSubscription,
+        AccessActive = x.Enabled && x.ActiveSubscription is not null,
+        SubscriptionStatus = !x.Enabled ? "suspended" : x.ActiveSubscription is not null ? "active" :
+            x.LastPaidEnd > now ? "scheduled" : x.HasPending ? "pending_payment" :
+            x.LastPaidEnd is not null ? "expired" : "draft"
+    }));
+});
 admin.MapGet("/feature-catalog", () => Results.Ok(TenantFeatures.Names.Select(x => new { key = x.Key, name = x.Value, requires = TenantFeatures.Dependencies.GetValueOrDefault(x.Key) ?? [] })));
 admin.MapGet("/tenants/{id:guid}/features", async (Guid id, MajoraDb db) =>
 {
@@ -885,7 +905,13 @@ merchant.MapPost("/sessions/{id:guid}/revoke", async (Guid id, MajoraDb db, Http
 merchant.MapGet("/subscription", async (MajoraDb db, HttpContext c) =>
 {
     var tid = TenantId(c.User);
-    return Results.Ok(await db.Subscriptions.Where(s => s.TenantId == tid).Join(db.Plans, s => s.PlanId, p => p.Id, (s,p) => new { s.Id, Plan = p.Name, s.StartsAt, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot, p.MaxUsers, p.MaxDevices }).OrderByDescending(s => s.EndsAt).ToListAsync());
+    var now = DateTime.UtcNow;
+    var history = await db.Subscriptions.AsNoTracking().Where(s => s.TenantId == tid)
+        .Join(db.Plans, s => s.PlanId, p => p.Id, (s,p) => new { s.Id, Plan = p.Name, s.StartsAt, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot, p.MaxUsers, p.MaxDevices })
+        .OrderByDescending(s => s.EndsAt).ToListAsync();
+    return Results.Ok(history.Select(s => new { s.Id, s.Plan, s.StartsAt, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot,
+        s.MaxUsers, s.MaxDevices, EffectiveStatus = s.PaymentStatus != "paid" ? "pending_payment" :
+            s.StartsAt > now ? "scheduled" : s.EndsAt <= now ? "expired" : "active" }));
 });
 merchant.MapGet("/plans", async (MajoraDb db) => Results.Ok(await db.Plans.AsNoTracking()
     .Where(x => x.Enabled).OrderBy(x => x.MonthlyRial).ToListAsync()));

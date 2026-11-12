@@ -66,6 +66,7 @@ try {
   $createdTenantIds = [System.Collections.Generic.HashSet[string]]::new()
   [void]$createdTenantIds.Add($tenant.id.ToString())
   $provisionedShop = $null
+  $expiredShop = $null
   for ($shopIndex = 2; $shopIndex -le 20; $shopIndex++) {
     $shopBody = @{name="فروشگاه آزمون $shopIndex";slug="shop-$($id.Substring(0,8))-$shopIndex";ownerUsername="owner_$($id)_$shopIndex";ownerName="مالک $shopIndex";ownerPassword=$ownerPass;classicPreset=$false}
     if ($shopIndex -eq 20) {
@@ -76,6 +77,7 @@ try {
       $shopBody.brand = @{revision=1;storeName=$shopBody.name;slogan='شعار ویژه';phone='05100000000';address='تهران';card='';cardHolder='';note='';conditions=@('شرط ویژه');socialTelegram='';socialInstagram='';socialContact='';logoDataUrl=$null;socialLinks=@()}
     }
     $shop = PostJson '/admin/tenants' $shopBody $adminSession
+    if ($shopIndex -eq 2) { $expiredShop = $shop }
     if ($shopIndex -eq 20) {
       $provisionedShop = $shop
       $repeatProvision = PostJson '/admin/tenants' $shopBody $adminSession
@@ -92,6 +94,14 @@ try {
   }
   $tenantList = Invoke-RestMethod "$base/api/admin/tenants" -WebSession $adminSession
   if (@($tenantList).Count -ne 20) { throw 'Consecutive tenant creation did not produce exactly 20 shops' }
+  $expiredPeriod = PostJson "/admin/tenants/$($expiredShop.id)/subscription" @{planId=$plan.id;startsAt=[datetime]::UtcNow.AddDays(-60).ToString('o');endsAt=[datetime]::UtcNow.AddDays(-30).ToString('o');paymentStatus='paid'} $adminSession
+  $expiredList = @((Invoke-RestMethod "$base/api/admin/tenants" -WebSession $adminSession) | Where-Object id -eq $expiredShop.id)[0]
+  if ($expiredList.subscriptionStatus -ne 'expired' -or $expiredList.accessActive -ne $false -or $expiredList.activeSubscription) { throw 'Expired paid period was shown as active in admin' }
+  $expiredSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+  $expiredLogin = PostJson '/auth/login' @{username="owner_$($id)_2";password=$ownerPass} $expiredSession $true
+  if ($expiredLogin.accessActive -ne $false) { throw 'Expired paid period granted workspace access' }
+  $expiredHistory = @((Invoke-RestMethod "$base/api/merchant/subscription" -WebSession $expiredSession) | Where-Object id -eq $expiredPeriod.id)[0]
+  if ($expiredHistory.effectiveStatus -ne 'expired') { throw 'Merchant subscription history disguised expiration' }
   $provisionedSubscription = @($tenantList | Where-Object id -eq $provisionedShop.id)[0].subscription
   if (-not $provisionedSubscription.id -or $provisionedSubscription.paymentStatus -ne 'pending') { throw 'Provisioned subscription was not visible to the owner' }
   $renewalSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
@@ -130,6 +140,10 @@ try {
   $overlapBlocked = $false
   try { $null = PostJson "/admin/tenants/$($tenant.id)/subscription" @{planId=$plan.id;startsAt=[datetime]::UtcNow.AddDays(2).ToString('o');endsAt=[datetime]::UtcNow.AddDays(32).ToString('o');paymentStatus='pending'} $adminSession } catch { $overlapBlocked = $_.Exception.Response.StatusCode -eq 409 }
   if (-not $overlapBlocked) { throw 'Overlapping subscription periods were accepted' }
+  $futurePeriod = PostJson "/admin/tenants/$($tenant.id)/subscription" @{planId=$plan.id;startsAt=$subscription.endsAt;endsAt=[datetime]::UtcNow.AddDays(60).ToString('o');paymentStatus='pending'} $adminSession
+  $mixedTenant = @((Invoke-RestMethod "$base/api/admin/tenants" -WebSession $adminSession) | Where-Object id -eq $tenant.id)[0]
+  if ($mixedTenant.subscriptionStatus -ne 'active' -or $mixedTenant.accessActive -ne $true -or
+      $mixedTenant.activeSubscription.id -ne $subscription.id -or $mixedTenant.subscription.id -ne $futurePeriod.id) { throw 'Future pending period obscured current active access in admin' }
   $adminOverview = Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession
   if ($adminOverview.tenants -ne 20 -or $adminOverview.activeSubscriptions -ne 2) { throw 'Admin overview active tenant count disagrees with subscription data' }
   $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $ownerSession $true
@@ -699,6 +713,8 @@ try {
   if (@($reactivated).Count -lt 1) { throw 'Reactivated tenant did not regain access' }
   $merchantSubscriptions = Invoke-RestMethod "$base/api/merchant/subscription" -WebSession $ownerSession
   if (@($merchantSubscriptions | Where-Object id -eq $subscription.id).Count -ne 1) { throw 'Admin and merchant subscription views disagree' }
+  if (@($merchantSubscriptions | Where-Object { $_.id -eq $subscription.id -and $_.effectiveStatus -eq 'active' }).Count -ne 1 -or
+      @($merchantSubscriptions | Where-Object { $_.id -eq $futurePeriod.id -and $_.effectiveStatus -eq 'pending_payment' }).Count -ne 1) { throw 'Merchant active and future period statuses disagree with admin' }
   $adminUsers = Invoke-RestMethod "$base/api/admin/users" -WebSession $adminSession
   if (@($adminUsers).Count -ne (Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession).users -or
       @($adminUsers | Where-Object username -eq "staff_$id").Count -ne 1) { throw 'Admin user list and overview disagree' }
