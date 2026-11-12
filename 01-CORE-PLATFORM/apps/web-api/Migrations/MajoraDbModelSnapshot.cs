@@ -691,6 +691,9 @@ namespace Majora.WebApi.Migrations
                     b.Property<int>("MaxDevices")
                         .HasColumnType("int");
 
+                    b.Property<int>("MaxPrepayMonths")
+                        .HasColumnType("int");
+
                     b.Property<int>("MaxUsers")
                         .HasColumnType("int");
 
@@ -700,6 +703,12 @@ namespace Majora.WebApi.Migrations
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("PrepayDiscountsJson")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("nvarchar(max)")
+                        .HasDefaultValue("{}");
 
                     b.HasKey("Id");
 
@@ -1281,6 +1290,9 @@ namespace Majora.WebApi.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
 
+                    b.Property<int>("Months")
+                        .HasColumnType("int");
+
                     b.Property<string>("PaymentMethod")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
@@ -1322,6 +1334,10 @@ namespace Majora.WebApi.Migrations
 
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<decimal>("TermDiscountPercentSnapshot")
+                        .HasPrecision(5, 2)
+                        .HasColumnType("decimal(5,2)");
 
                     b.Property<long>("TotalRial")
                         .HasColumnType("bigint");

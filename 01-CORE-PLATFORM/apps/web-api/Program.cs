@@ -193,6 +193,24 @@ using (var scope = app.Services.CreateScope())
                 upgrade.CommandText = "ALTER TABLE Plans ADD COLUMN MaxDevices INTEGER NOT NULL DEFAULT 6";
                 await upgrade.ExecuteNonQueryAsync();
             }
+            foreach (var (table, column, definition) in new[] {
+                ("Plans", "MaxPrepayMonths", "INTEGER NOT NULL DEFAULT 6"),
+                ("Plans", "PrepayDiscountsJson", "TEXT NOT NULL DEFAULT '{}'"),
+                ("SubscriptionOrders", "Months", "INTEGER NOT NULL DEFAULT 1"),
+                ("SubscriptionOrders", "TermDiscountPercentSnapshot", "TEXT NOT NULL DEFAULT '0'") })
+            {
+                using var columnsToCheck = connection.CreateCommand();
+                columnsToCheck.CommandText = $"PRAGMA table_info({table})";
+                using var schema = await columnsToCheck.ExecuteReaderAsync();
+                var exists = false;
+                while (await schema.ReadAsync())
+                    if (string.Equals(schema.GetString(1), column, StringComparison.OrdinalIgnoreCase)) exists = true;
+                await schema.CloseAsync();
+                if (exists) continue;
+                using var upgrade = connection.CreateCommand();
+                upgrade.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition}";
+                await upgrade.ExecuteNonQueryAsync();
+            }
             using var sessionTable = connection.CreateCommand();
             sessionTable.CommandText = "CREATE TABLE IF NOT EXISTS AppSessions (Id TEXT NOT NULL PRIMARY KEY, UserId TEXT NOT NULL, TenantId TEXT NULL, Panel TEXT NOT NULL, CreatedAt TEXT NOT NULL, LastSeenAt TEXT NOT NULL, ExpiresAt TEXT NOT NULL, RevokedAt TEXT NULL, UserAgent TEXT NOT NULL, IpAddress TEXT NOT NULL)";
             await sessionTable.ExecuteNonQueryAsync();
@@ -233,6 +251,12 @@ static void AuthAudit(MajoraDb db, AppUser? user, string action, string reason, 
     db.Audit.Add(new AuditEntry { ActorId = user?.Id ?? Guid.Empty, TenantId = user?.TenantId, Action = action,
         EntityType = "session", EntityId = sessionId?.ToString() ?? "", Detail = $"reason={reason};ip={c.Connection.RemoteIpAddress}" });
 static long DiscountedPrice(long price, decimal percent) => checked(price - (long)decimal.Round(price * percent / 100m, 0, MidpointRounding.AwayFromZero));
+static bool ValidPrepay(int months, Dictionary<int, decimal>? discounts) => months is >= 1 and <= 6 &&
+    (discounts is null || discounts.All(x => x.Key >= 2 && x.Key <= months && x.Value is >= 0 and <= 100));
+static decimal PrepayDiscount(Plan plan, int months) =>
+    JsonSerializer.Deserialize<Dictionary<int, decimal>>(plan.PrepayDiscountsJson)?.GetValueOrDefault(months) ?? 0;
+static long SubscriptionTotal(Plan plan, int months, decimal promoDiscount) =>
+    DiscountedPrice(DiscountedPrice(checked(plan.MonthlyRial * months), PrepayDiscount(plan, months)), promoDiscount);
 static bool ValidCheque(ChequeRequest body) =>
     body.Direction is "received" or "issued" && !string.IsNullOrWhiteSpace(body.Party) && body.Party.Trim().Length <= 200 &&
     !string.IsNullOrWhiteSpace(body.Serial) && body.Serial.Trim().Length <= 80 &&
@@ -251,7 +275,7 @@ static Cheque NewCheque(ChequeRequest body, Guid tid, Guid? invoiceId = null) =>
     BeneficiaryNationalId = body.BeneficiaryNationalId?.Trim() ?? "", RegistrationStatus = body.RegistrationStatus,
     Note = body.Note?.Trim() ?? "", ShowDetails = body.ShowDetails, ShowImage = body.ShowImage
 };
-static async Task<bool> Active(MajoraDb db, Guid tenantId) => await db.Tenants.AnyAsync(t => t.Id == tenantId && t.Enabled) && await db.Subscriptions.AnyAsync(s => s.TenantId == tenantId && s.PaymentStatus == "paid" && s.StartsAt <= DateTime.UtcNow && s.EndsAt > DateTime.UtcNow);
+static async Task<bool> Active(MajoraDb db, Guid tenantId) => await db.Tenants.AnyAsync(t => t.Id == tenantId && t.Enabled) && await db.Subscriptions.AnyAsync(s => s.TenantId == tenantId && (s.PaymentStatus == "paid" || s.PaymentStatus == "trial") && s.StartsAt <= DateTime.UtcNow && s.EndsAt > DateTime.UtcNow);
 static string AuthScheme(string panel) => panel == "admin" ? "MajoraAdmin" : CookieAuthenticationDefaults.AuthenticationScheme;
 static async Task RevokeUserSessions(MajoraDb db, Guid userId)
 {
@@ -325,7 +349,7 @@ app.MapPost("/api/auth/login", async (LoginRequest body, MajoraDb db, IPasswordH
         await using var capacityTx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
         var now = DateTime.UtcNow;
         var maxDevices = subscriptionActive
-            ? await db.Subscriptions.Where(s => s.TenantId == merchantTenantId && s.PaymentStatus == "paid" && s.StartsAt <= now && s.EndsAt > now)
+            ? await db.Subscriptions.Where(s => s.TenantId == merchantTenantId && (s.PaymentStatus == "paid" || s.PaymentStatus == "trial") && s.StartsAt <= now && s.EndsAt > now)
                 .OrderByDescending(s => s.EndsAt).Join(db.Plans, s => s.PlanId, p => p.Id, (s, p) => (int?)p.MaxDevices).FirstOrDefaultAsync()
             : await db.Subscriptions.Where(s => s.TenantId == merchantTenantId).OrderByDescending(s => s.EndsAt)
                 .Join(db.Plans, s => s.PlanId, p => p.Id, (s, p) => (int?)p.MaxDevices).FirstOrDefaultAsync() ?? 1;
@@ -437,11 +461,16 @@ admin.MapPost("/tenants/{id:guid}/sessions/{sessionId:guid}/revoke", async (Guid
 });
 admin.MapGet("/overview", async (MajoraDb db) =>
 {
-    var now = DateTime.UtcNow;
+    var now = DateTime.UtcNow; var cutoff = now.AddDays(3);
     return Results.Ok(new {
         tenants = await db.Tenants.CountAsync(),
         activeSubscriptions = await db.Tenants.CountAsync(t => t.Enabled && db.Subscriptions.Any(s =>
-            s.TenantId == t.Id && s.PaymentStatus == "paid" && s.StartsAt <= now && s.EndsAt > now)),
+            s.TenantId == t.Id && (s.PaymentStatus == "paid" || s.PaymentStatus == "trial") && s.StartsAt <= now && s.EndsAt > now)),
+        renewalsDue = await db.Tenants.CountAsync(t => t.Enabled && db.Subscriptions.Any(s =>
+            s.TenantId == t.Id && (s.PaymentStatus == "paid" || s.PaymentStatus == "trial") &&
+            s.StartsAt <= now && s.EndsAt > now && s.EndsAt <= cutoff &&
+            !db.Subscriptions.Any(next => next.TenantId == t.Id && (next.PaymentStatus == "paid" || next.PaymentStatus == "trial") && next.EndsAt > s.EndsAt))),
+        receiptsPending = await db.SubscriptionOrders.CountAsync(x => x.Status == "pending_approval"),
         users = await db.Users.CountAsync()
     });
 });
@@ -506,23 +535,25 @@ admin.MapPost("/ai-provider/test", async (MajoraDb db, IDataProtectionProvider p
 admin.MapGet("/plans", async (MajoraDb db) => Results.Ok(await db.Plans.OrderBy(x => x.MonthlyRial).ToListAsync()));
 admin.MapPost("/plans", async (PlanRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (string.IsNullOrWhiteSpace(body.Name) || body.MonthlyRial < 0 || body.MaxUsers < 1 || body.MaxDevices < 1 || body.MaxDevices > 1000 ||
+    if (string.IsNullOrWhiteSpace(body.Name) || body.MonthlyRial < 0 || body.MaxUsers < 1 || body.MaxDevices < 1 || body.MaxDevices > 1000 || !ValidPrepay(body.MaxPrepayMonths, body.PrepayDiscounts) ||
         (body.Description?.Length ?? 0) > 500 || (body.Features?.Count ?? 0) > 20 ||
         body.Features?.Any(x => string.IsNullOrWhiteSpace(x) || x.Length > 150) == true) return Fail("مشخصات طرح نامعتبر است.");
     var plan = new Plan { Name = body.Name.Trim(), Description = body.Description?.Trim() ?? "",
         FeaturesJson = JsonSerializer.Serialize(body.Features?.Select(x => x.Trim()).ToArray() ?? []),
-        MonthlyRial = body.MonthlyRial, MaxUsers = body.MaxUsers, MaxDevices = body.MaxDevices, Enabled = body.Enabled };
+        MonthlyRial = body.MonthlyRial, MaxUsers = body.MaxUsers, MaxDevices = body.MaxDevices,
+        MaxPrepayMonths = body.MaxPrepayMonths, PrepayDiscountsJson = JsonSerializer.Serialize(body.PrepayDiscounts ?? []), Enabled = body.Enabled };
     db.Plans.Add(plan); Audit(db, c.User, null, "plan.create", "plan", plan.Id); await db.SaveChangesAsync(); return Results.Created($"/api/admin/plans/{plan.Id}", plan);
 });
 admin.MapPut("/plans/{id:guid}", async (Guid id, PlanRequest body, MajoraDb db, HttpContext c) =>
 {
     var plan = await db.Plans.FindAsync(id); if (plan is null) return Results.NotFound();
-    if (string.IsNullOrWhiteSpace(body.Name) || body.MonthlyRial < 0 || body.MaxUsers < 1 || body.MaxDevices < 1 || body.MaxDevices > 1000 ||
+    if (string.IsNullOrWhiteSpace(body.Name) || body.MonthlyRial < 0 || body.MaxUsers < 1 || body.MaxDevices < 1 || body.MaxDevices > 1000 || !ValidPrepay(body.MaxPrepayMonths, body.PrepayDiscounts) ||
         (body.Description?.Length ?? 0) > 500 || (body.Features?.Count ?? 0) > 20 ||
         body.Features?.Any(x => string.IsNullOrWhiteSpace(x) || x.Length > 150) == true) return Fail("مشخصات طرح نامعتبر است.");
     plan.Name = body.Name.Trim(); plan.Description = body.Description?.Trim() ?? "";
     plan.FeaturesJson = JsonSerializer.Serialize(body.Features?.Select(x => x.Trim()).ToArray() ?? []);
-    plan.MonthlyRial = body.MonthlyRial; plan.MaxUsers = body.MaxUsers; plan.MaxDevices = body.MaxDevices; plan.Enabled = body.Enabled;
+    plan.MonthlyRial = body.MonthlyRial; plan.MaxUsers = body.MaxUsers; plan.MaxDevices = body.MaxDevices;
+    plan.MaxPrepayMonths = body.MaxPrepayMonths; plan.PrepayDiscountsJson = JsonSerializer.Serialize(body.PrepayDiscounts ?? []); plan.Enabled = body.Enabled;
     Audit(db, c.User, null, "plan.update", "plan", id); await db.SaveChangesAsync(); return Results.Ok(plan);
 });
 admin.MapGet("/promo-codes", async (MajoraDb db) => Results.Ok(await db.PromoCodes.AsNoTracking().OrderByDescending(x => x.ExpiresAt).ToListAsync()));
@@ -568,7 +599,7 @@ admin.MapPut("/billing", async (BillingRequest body, MajoraDb db, HttpContext c)
 admin.MapGet("/subscription-orders", async (MajoraDb db) => Results.Ok(await db.SubscriptionOrders.AsNoTracking()
     .OrderByDescending(x => x.CreatedAt).Take(100)
     .Select(x => new { x.Id, x.TenantId, TenantName = db.Tenants.Where(t => t.Id == x.TenantId).Select(t => t.Name).FirstOrDefault(),
-        x.PlanNameSnapshot, x.PromoCodeSnapshot, x.BasePriceRial, x.TotalRial, x.Status, x.PaymentMethod,
+        x.PlanNameSnapshot, x.PromoCodeSnapshot, x.Months, x.TermDiscountPercentSnapshot, x.BasePriceRial, x.TotalRial, x.Status, x.PaymentMethod,
         HasReceipt = x.ReceiptBytes != null, x.CreatedAt, x.ReviewedAt }).ToListAsync()));
 admin.MapGet("/subscription-orders/{id:guid}/receipt", async (Guid id, MajoraDb db, HttpContext c) =>
 {
@@ -590,11 +621,11 @@ admin.MapPost("/subscription-orders/{id:guid}/decision", async (Guid id, Subscri
     {
         var tenant = await db.Tenants.SingleOrDefaultAsync(x => x.Id == order.TenantId);
         if (tenant is null) return Results.NotFound();
-        var latestEnd = await db.Subscriptions.Where(x => x.TenantId == order.TenantId && x.PaymentStatus == "paid")
+        var latestEnd = await db.Subscriptions.Where(x => x.TenantId == order.TenantId && (x.PaymentStatus == "paid" || x.PaymentStatus == "trial"))
             .OrderByDescending(x => x.EndsAt).Select(x => (DateTime?)x.EndsAt).FirstOrDefaultAsync();
         var start = latestEnd is DateTime end && end > DateTime.UtcNow ? end : DateTime.UtcNow;
         var sub = new Subscription { TenantId = order.TenantId, PlanId = order.PlanId, StartsAt = start,
-            EndsAt = start.AddMonths(1), PaymentStatus = "paid", PriceRialSnapshot = order.TotalRial,
+            EndsAt = start.AddMonths(order.Months), PaymentStatus = "paid", PriceRialSnapshot = order.TotalRial,
             Note = $"order={order.Id};promo={order.PromoCodeSnapshot}" };
         db.Subscriptions.Add(sub); order.SubscriptionId = sub.Id; order.Status = "paid";
         Audit(db, c.User, order.TenantId, "subscription-order.approve", "subscription-order", id, $"subscription={sub.Id}");
@@ -608,17 +639,17 @@ admin.MapGet("/tenants", async (MajoraDb db) =>
     var tenants = await db.Tenants.AsNoTracking().OrderBy(x => x.Name).Select(x => new {
         x.Id, x.Name, x.Slug, x.Enabled, x.BrandColor, x.LogoUrl,
         Subscription = db.Subscriptions.Where(s => s.TenantId == x.Id).OrderByDescending(s => s.EndsAt)
-            .Select(s => new { s.Id, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot }).FirstOrDefault(),
-        ActiveSubscription = db.Subscriptions.Where(s => s.TenantId == x.Id && s.PaymentStatus == "paid" && s.StartsAt <= now && s.EndsAt > now)
-            .OrderByDescending(s => s.EndsAt).Select(s => new { s.Id, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot }).FirstOrDefault(),
+            .Select(s => new { s.Id, s.PlanId, s.StartsAt, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot }).FirstOrDefault(),
+        ActiveSubscription = db.Subscriptions.Where(s => s.TenantId == x.Id && (s.PaymentStatus == "paid" || s.PaymentStatus == "trial") && s.StartsAt <= now && s.EndsAt > now)
+            .OrderByDescending(s => s.EndsAt).Select(s => new { s.Id, s.PlanId, s.StartsAt, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot }).FirstOrDefault(),
         HasPending = db.Subscriptions.Any(s => s.TenantId == x.Id && s.PaymentStatus == "pending"),
-        LastPaidEnd = db.Subscriptions.Where(s => s.TenantId == x.Id && s.PaymentStatus == "paid")
+        LastPaidEnd = db.Subscriptions.Where(s => s.TenantId == x.Id && (s.PaymentStatus == "paid" || s.PaymentStatus == "trial"))
             .OrderByDescending(s => s.EndsAt).Select(s => (DateTime?)s.EndsAt).FirstOrDefault()
     }).ToListAsync();
     return Results.Ok(tenants.Select(x => new {
         x.Id, x.Name, x.Slug, x.Enabled, x.BrandColor, x.LogoUrl, x.Subscription, x.ActiveSubscription,
         AccessActive = x.Enabled && x.ActiveSubscription is not null,
-        SubscriptionStatus = !x.Enabled ? "suspended" : x.ActiveSubscription is not null ? "active" :
+        SubscriptionStatus = !x.Enabled ? "suspended" : x.ActiveSubscription is not null ? (x.ActiveSubscription.PaymentStatus == "trial" ? "trial" : "active") :
             x.LastPaidEnd > now ? "scheduled" : x.HasPending ? "pending_payment" :
             x.LastPaidEnd is not null ? "expired" : "draft"
     }));
@@ -655,12 +686,15 @@ admin.MapPost("/tenants", async (TenantRequest body, MajoraDb db, IPasswordHashe
         string.IsNullOrWhiteSpace(body.OwnerName) || body.OwnerName.Length > 200 ||
         body.BrandColor is not null && !System.Text.RegularExpressions.Regex.IsMatch(body.BrandColor, "^#[0-9a-fA-F]{6}$"))
         return Fail("نام، شناسه، رنگ یا رمز مالک نامعتبر است؛ رمز حداقل ۱۲ نویسه باشد.");
-    var hasSubscription = body.PlanId is not null || body.StartsAt is not null || body.EndsAt is not null || body.PaymentStatus is not null;
+    var hasSubscription = body.PlanId is not null || body.StartsAt is not null || body.EndsAt is not null || body.PaymentStatus is not null || body.TrialDays is not null;
+    var trial = body.TrialDays is > 0;
     Plan? selectedPlan = null;
     if (hasSubscription)
     {
-        if (body.PlanId is not Guid planId || body.StartsAt is not DateTime start || body.EndsAt is not DateTime end ||
-            body.PaymentStatus is not ("paid" or "pending") || end <= start || start.Kind != DateTimeKind.Utc || end.Kind != DateTimeKind.Utc)
+        if (body.PlanId is not Guid planId ||
+            (trial ? body.TrialDays is not (>= 1 and <= 90) || body.PaymentStatus != "trial" || body.StartsAt is not null || body.EndsAt is not null :
+                body.TrialDays is not null || body.StartsAt is not DateTime start || body.EndsAt is not DateTime end ||
+                body.PaymentStatus is not ("paid" or "pending") || end <= start || start.Kind != DateTimeKind.Utc || end.Kind != DateTimeKind.Utc))
             return Fail("طرح، بازه و وضعیت پرداخت اشتراک را کامل و درست وارد کنید.");
         selectedPlan = await db.Plans.AsNoTracking().SingleOrDefaultAsync(x => x.Id == planId && x.Enabled);
         if (selectedPlan is null) return Fail("طرح اشتراک انتخاب‌شده فعال یا موجود نیست.");
@@ -680,8 +714,8 @@ admin.MapPost("/tenants", async (TenantRequest body, MajoraDb db, IPasswordHashe
             hasher.VerifyHashedPassword(owner, owner.PasswordHash, body.OwnerPassword) != PasswordVerificationResult.Failed)
         {
             var subscriptionMatches = !hasSubscription || await db.Subscriptions.AsNoTracking().AnyAsync(x =>
-                x.TenantId == existing.Id && x.PlanId == body.PlanId && x.StartsAt == body.StartsAt &&
-                x.EndsAt == body.EndsAt && x.PaymentStatus == body.PaymentStatus);
+                x.TenantId == existing.Id && x.PlanId == body.PlanId && x.PaymentStatus == body.PaymentStatus &&
+                (trial ? x.Note == $"trial:days={body.TrialDays}" : x.StartsAt == body.StartsAt && x.EndsAt == body.EndsAt));
             var brand = body.Brand is null ? null : await db.InvoiceBrands.AsNoTracking().SingleOrDefaultAsync(x => x.TenantId == existing.Id);
             var brandMatches = body.Brand is null || brand is not null && brand.StoreName == body.Brand.StoreName.Trim() &&
                 brand.Slogan == body.Brand.Slogan.Trim() && brand.Phone == body.Brand.Phone.Trim() &&
@@ -705,9 +739,13 @@ admin.MapPost("/tenants", async (TenantRequest body, MajoraDb db, IPasswordHashe
     if (body.Brand is not null) InvoiceBrand.Apply(brandProfile, body.Brand);
     db.InvoiceBrands.Add(brandProfile);
     if (selectedPlan is not null)
+    {
+        var starts = trial ? DateTime.UtcNow : body.StartsAt!.Value;
         db.Subscriptions.Add(new Subscription { TenantId = tenant.Id, PlanId = selectedPlan.Id,
-            StartsAt = body.StartsAt!.Value, EndsAt = body.EndsAt!.Value, PaymentStatus = body.PaymentStatus!,
-            PriceRialSnapshot = selectedPlan.MonthlyRial });
+            StartsAt = starts, EndsAt = trial ? starts.AddDays(body.TrialDays!.Value) : body.EndsAt!.Value,
+            PaymentStatus = body.PaymentStatus!, PriceRialSnapshot = trial ? 0 : selectedPlan.MonthlyRial,
+            Note = trial ? $"trial:days={body.TrialDays}" : "" });
+    }
     Audit(db, c.User, tenant.Id, "tenant.create", "tenant", tenant.Id);
     try { await db.SaveChangesAsync(); }
     catch (DbUpdateException) { db.ChangeTracker.Clear(); return await ExistingResult() ?? Fail("ثبت هم‌زمان فروشگاه رخ داد؛ دوباره تلاش کنید.", 409); }
@@ -784,6 +822,31 @@ admin.MapPost("/tenants/{id:guid}/subscription", async (Guid id, SubscriptionReq
     await db.SaveChangesAsync(); await tx.CommitAsync();
     return Results.Created($"/api/admin/tenants/{id}/subscription", sub);
 });
+admin.MapPut("/tenants/{id:guid}/trial", async (Guid id, TrialRequest body, MajoraDb db, HttpContext c) =>
+{
+    if (body.Days is < 1 or > 90 || string.IsNullOrWhiteSpace(body.Reason) || body.Reason.Length > 500)
+        return Fail("مدت دمو باید ۱ تا ۹۰ روز و دلیل تغییر مشخص باشد.");
+    await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    if (!await db.Tenants.AnyAsync(x => x.Id == id)) return Results.NotFound();
+    if (await db.Subscriptions.AnyAsync(x => x.TenantId == id && x.PaymentStatus != "trial"))
+        return Fail("پس از ثبت اشتراک پرداختی یا در انتظار، مدت دمو قابل تغییر نیست؛ ابتدا وضعیت اشتراک را تعیین کنید.", 409);
+    var trial = await db.Subscriptions.SingleOrDefaultAsync(x => x.TenantId == id && x.PaymentStatus == "trial");
+    if (trial is null)
+    {
+        var plan = await db.Plans.SingleOrDefaultAsync(x => x.Id == body.PlanId && x.Enabled);
+        if (plan is null) return Fail("یک طرح فعال برای دمو انتخاب کنید.");
+        trial = new Subscription { TenantId = id, PlanId = plan.Id, StartsAt = DateTime.UtcNow,
+            PaymentStatus = "trial", PriceRialSnapshot = 0 };
+        db.Subscriptions.Add(trial);
+    }
+    var previousEnd = trial.EndsAt;
+    trial.EndsAt = trial.StartsAt.AddDays(body.Days);
+    trial.Note = $"trial:days={body.Days}";
+    Audit(db, c.User, id, "subscription.trial.update", "subscription", trial.Id,
+        JsonSerializer.Serialize(new { previousEnd, newEnd = trial.EndsAt, days = body.Days, reason = body.Reason.Trim() }));
+    await db.SaveChangesAsync(); await tx.CommitAsync();
+    return Results.Ok(new { trial.Id, trial.StartsAt, trial.EndsAt, trial.PaymentStatus, days = body.Days });
+});
 admin.MapPost("/tenants/{id:guid}/subscriptions/{subscriptionId:guid}/approve", async (Guid id, Guid subscriptionId, SubscriptionApproval body, MajoraDb db, HttpContext c) =>
 {
     if (string.IsNullOrWhiteSpace(body.Reason) || body.Reason.Length > 500)
@@ -792,7 +855,7 @@ admin.MapPost("/tenants/{id:guid}/subscriptions/{subscriptionId:guid}/approve", 
     if (subscription is null) return Results.NotFound();
     if (subscription.PaymentStatus == "paid") return Results.Ok(subscription);
     if (subscription.PaymentStatus != "pending") return Fail("این اشتراک در وضعیت قابل تأیید نیست.", 409);
-    if (await db.Subscriptions.AnyAsync(s => s.TenantId == id && s.Id != subscriptionId && s.PaymentStatus == "paid" &&
+    if (await db.Subscriptions.AnyAsync(s => s.TenantId == id && s.Id != subscriptionId && (s.PaymentStatus == "paid" || s.PaymentStatus == "trial") &&
         s.StartsAt < subscription.EndsAt && s.EndsAt > subscription.StartsAt))
         return Fail("این بازه با اشتراک پرداخت‌شدهٔ دیگری هم‌پوشانی دارد؛ پیش از تأیید تاریخ‌ها را اصلاح کنید.", 409);
     subscription.PaymentStatus = "paid";
@@ -910,17 +973,30 @@ merchant.MapGet("/subscription", async (MajoraDb db, HttpContext c) =>
         .Join(db.Plans, s => s.PlanId, p => p.Id, (s,p) => new { s.Id, Plan = p.Name, s.StartsAt, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot, p.MaxUsers, p.MaxDevices })
         .OrderByDescending(s => s.EndsAt).ToListAsync();
     return Results.Ok(history.Select(s => new { s.Id, s.Plan, s.StartsAt, s.EndsAt, s.PaymentStatus, s.PriceRialSnapshot,
-        s.MaxUsers, s.MaxDevices, EffectiveStatus = s.PaymentStatus != "paid" ? "pending_payment" :
-            s.StartsAt > now ? "scheduled" : s.EndsAt <= now ? "expired" : "active" }));
+        s.MaxUsers, s.MaxDevices, EffectiveStatus = s.PaymentStatus is not ("paid" or "trial") ? "pending_payment" :
+            s.StartsAt > now ? "scheduled" : s.EndsAt <= now ? "expired" : s.PaymentStatus == "trial" ? "trial" : "active" }));
+});
+merchant.MapGet("/subscription/notice", async (MajoraDb db, HttpContext c) =>
+{
+    var now = DateTime.UtcNow; var tid = TenantId(c.User);
+    var latest = await db.Subscriptions.AsNoTracking().Where(x => x.TenantId == tid &&
+        (x.PaymentStatus == "paid" || x.PaymentStatus == "trial"))
+        .OrderByDescending(x => x.EndsAt).Select(x => new { x.EndsAt, x.StartsAt, x.PaymentStatus }).FirstOrDefaultAsync();
+    if (latest is null) return Results.Ok(new { status = "draft", daysRemaining = 0, endsAt = (DateTime?)null, renewalDue = false });
+    var active = latest.StartsAt <= now && latest.EndsAt > now;
+    var days = active ? Math.Max(0, (int)Math.Ceiling((latest.EndsAt - now).TotalDays)) : 0;
+    return Results.Ok(new { status = active ? latest.PaymentStatus : latest.EndsAt <= now ? "expired" : "scheduled",
+        daysRemaining = days, endsAt = (DateTime?)latest.EndsAt, renewalDue = active && latest.EndsAt <= now.AddDays(3) });
 });
 merchant.MapGet("/plans", async (MajoraDb db) => Results.Ok(await db.Plans.AsNoTracking()
     .Where(x => x.Enabled).OrderBy(x => x.MonthlyRial).ToListAsync()));
 merchant.MapGet("/billing", async (MajoraDb db) => Results.Ok(await db.PlatformBilling.AsNoTracking().SingleOrDefaultAsync(x => x.Id == 1)
     ?? new PlatformBilling()));
-merchant.MapGet("/subscription/quote", async (Guid planId, string? code, MajoraDb db) =>
+merchant.MapGet("/subscription/quote", async (Guid planId, string? code, int? months, MajoraDb db) =>
 {
     var plan = await db.Plans.AsNoTracking().SingleOrDefaultAsync(x => x.Id == planId && x.Enabled);
     if (plan is null) return Results.NotFound();
+    var selectedMonths = months ?? 1;
     var normalized = code?.Trim().ToUpperInvariant() ?? "";
     decimal discount = 0;
     if (normalized.Length > 0)
@@ -930,15 +1006,18 @@ merchant.MapGet("/subscription/quote", async (Guid planId, string? code, MajoraD
         if (promo is null) return Fail("کد تخفیف معتبر نیست یا منقضی شده است.", 409);
         discount = promo.Percent;
     }
-    return Results.Ok(new { plan.Id, plan.Name, basePriceRial = plan.MonthlyRial, discountPercent = discount,
-        totalRial = DiscountedPrice(plan.MonthlyRial, discount), promoCode = normalized });
+    if (selectedMonths < 1 || selectedMonths > plan.MaxPrepayMonths) return Fail("مدت انتخابی این طرح مجاز نیست.");
+    try { return Results.Ok(new { plan.Id, plan.Name, months = selectedMonths, basePriceRial = checked(plan.MonthlyRial * selectedMonths),
+        termDiscountPercent = PrepayDiscount(plan, selectedMonths), discountPercent = discount,
+        totalRial = SubscriptionTotal(plan, selectedMonths, discount), promoCode = normalized }); }
+    catch (OverflowException) { return Fail("مبلغ دوره از محدودهٔ قابل ثبت بیشتر است."); }
 });
 merchant.MapGet("/subscription/orders", async (MajoraDb db, HttpContext c) =>
 {
     var tid = TenantId(c.User);
     return Results.Ok(await db.SubscriptionOrders.AsNoTracking().Where(x => x.TenantId == tid)
         .OrderByDescending(x => x.CreatedAt).Take(50)
-        .Select(x => new { x.Id, x.PlanNameSnapshot, x.PromoCodeSnapshot, x.BasePriceRial, x.TotalRial,
+        .Select(x => new { x.Id, x.PlanNameSnapshot, x.PromoCodeSnapshot, x.Months, x.TermDiscountPercentSnapshot, x.BasePriceRial, x.TotalRial,
             x.Status, x.PaymentMethod, x.CreatedAt, x.ReviewedAt }).ToListAsync());
 });
 merchant.MapPost("/subscription/orders", async (SubscriptionOrderRequest body, MajoraDb db, HttpContext c) =>
@@ -959,6 +1038,7 @@ merchant.MapPost("/subscription/orders", async (SubscriptionOrderRequest body, M
     if (billing is null || billing.CardNumber.Length == 0) return Fail("اطلاعات واریز هنوز در پنل ماژورا تنظیم نشده است.", 409);
     var plan = await db.Plans.AsNoTracking().SingleOrDefaultAsync(x => x.Id == body.PlanId && x.Enabled);
     if (plan is null) return Results.NotFound();
+    if (body.Months < 1 || body.Months > plan.MaxPrepayMonths) return Fail("مدت انتخابی این طرح مجاز نیست.");
     var normalized = body.PromoCode?.Trim().ToUpperInvariant() ?? "";
     decimal discount = 0;
     if (normalized.Length > 0)
@@ -968,11 +1048,15 @@ merchant.MapPost("/subscription/orders", async (SubscriptionOrderRequest body, M
         if (promo is null) return Fail("کد تخفیف معتبر نیست یا منقضی شده است.", 409);
         discount = promo.Percent;
     }
-    var total = DiscountedPrice(plan.MonthlyRial, discount);
+    long total;
+    long basePrice;
+    try { basePrice = checked(plan.MonthlyRial * body.Months); total = SubscriptionTotal(plan, body.Months, discount); }
+    catch (OverflowException) { return Fail("مبلغ دوره از محدودهٔ قابل ثبت بیشتر است."); }
     if (body.ExpectedTotalRial != total) return Fail("مبلغ طرح یا تخفیف تغییر کرده است؛ مبلغ را دوباره بررسی کنید.", 409);
     var order = new SubscriptionOrder { TenantId = tid, PlanId = plan.Id, PlanNameSnapshot = plan.Name,
         IdempotencyKey = body.IdempotencyKey, RequestHash = requestHash, PromoCodeSnapshot = normalized, DiscountPercentSnapshot = discount,
-        BasePriceRial = plan.MonthlyRial, TotalRial = total,
+        Months = body.Months, TermDiscountPercentSnapshot = PrepayDiscount(plan, body.Months),
+        BasePriceRial = basePrice, TotalRial = total,
         ReceiptBytes = bytes, ReceiptContentType = contentType, Status = "pending_approval" };
     db.SubscriptionOrders.Add(order); Audit(db, c.User, tid, "subscription-order.submit", "subscription-order", order.Id);
     try { await db.SaveChangesAsync(); await tx.CommitAsync(); }
@@ -1860,7 +1944,7 @@ merchant.MapPost("/staff", async (StaffRequest body, MajoraDb db, IPasswordHashe
 {
     if (Role(c.User) != "owner") return Results.Forbid();
     if (body.Role is not ("manager" or "staff" or "cashier" or "warehouse" or "accountant" or "viewer") || body.Password.Length < 12 || string.IsNullOrWhiteSpace(body.Username)) return Fail("مشخصات کاربر نامعتبر است.");
-    var tid = TenantId(c.User); var activePlan = await db.Subscriptions.Where(x => x.TenantId == tid && x.PaymentStatus == "paid" && x.EndsAt > DateTime.UtcNow).OrderByDescending(x => x.EndsAt).Join(db.Plans, x => x.PlanId, p => p.Id, (x,p) => p).FirstAsync();
+    var tid = TenantId(c.User); var activePlan = await db.Subscriptions.Where(x => x.TenantId == tid && (x.PaymentStatus == "paid" || x.PaymentStatus == "trial") && x.EndsAt > DateTime.UtcNow).OrderByDescending(x => x.EndsAt).Join(db.Plans, x => x.PlanId, p => p.Id, (x,p) => p).FirstAsync();
     if (await db.Users.CountAsync(x => x.TenantId == tid && x.Enabled) >= activePlan.MaxUsers) return Fail("سقف کاربران طرح تکمیل است.", 409);
     if (await db.Users.AnyAsync(x => x.Username == body.Username)) return Fail("نام کاربری تکراری است.", 409);
     var user = new AppUser { TenantId = tid, Username = body.Username.Trim(), DisplayName = body.DisplayName.Trim(), Role = body.Role };
@@ -1873,7 +1957,7 @@ merchant.MapPost("/staff/{id:guid}/enabled", async (Guid id, EnabledRequest body
     if (user is null) return Results.NotFound();
     if (body.Enabled && !user.Enabled)
     {
-        var maxUsers = await db.Subscriptions.Where(x => x.TenantId == tid && x.PaymentStatus == "paid" && x.EndsAt > DateTime.UtcNow)
+        var maxUsers = await db.Subscriptions.Where(x => x.TenantId == tid && (x.PaymentStatus == "paid" || x.PaymentStatus == "trial") && x.EndsAt > DateTime.UtcNow)
             .OrderByDescending(x => x.EndsAt).Join(db.Plans, x => x.PlanId, p => p.Id, (x, p) => p.MaxUsers).FirstAsync();
         if (await db.Users.CountAsync(x => x.TenantId == tid && x.Enabled) >= maxUsers) return Fail("سقف کاربران طرح تکمیل است.", 409);
     }
@@ -2170,19 +2254,20 @@ TenantFeatures.AssertEndpointCoverage(((IEndpointRouteBuilder)app).DataSources.S
 app.Run();
 
 public sealed record LoginRequest(string Username, string Password);
-public sealed record PlanRequest(string Name, long MonthlyRial, int MaxUsers, bool Enabled = true, string? Description = null, List<string>? Features = null, int MaxDevices = 6);
+public sealed record PlanRequest(string Name, long MonthlyRial, int MaxUsers, bool Enabled = true, string? Description = null, List<string>? Features = null, int MaxDevices = 6, int MaxPrepayMonths = 6, Dictionary<int, decimal>? PrepayDiscounts = null);
 public sealed record PromoCodeRequest(string Code, decimal Percent, DateTime StartsAt, DateTime ExpiresAt, bool Enabled = true);
 public sealed record BillingRequest(string CardNumber, string CardHolder);
-public sealed record SubscriptionOrderRequest(Guid PlanId, string IdempotencyKey, string? PromoCode, string? ReceiptDataUrl, long ExpectedTotalRial);
+public sealed record SubscriptionOrderRequest(Guid PlanId, string IdempotencyKey, string? PromoCode, string? ReceiptDataUrl, long ExpectedTotalRial, int Months = 1);
 public sealed record SubscriptionDecision(string Decision);
 public sealed record UsernameUpdate(string Username);
 public sealed record TenantRequest(string Name, string Slug, string OwnerUsername, string OwnerName, string OwnerPassword,
     string? BrandColor, bool ClassicPreset = false, InvoiceBrandUpdate? Brand = null,
-    Guid? PlanId = null, DateTime? StartsAt = null, DateTime? EndsAt = null, string? PaymentStatus = null);
+    Guid? PlanId = null, DateTime? StartsAt = null, DateTime? EndsAt = null, string? PaymentStatus = null, int? TrialDays = null);
 public sealed record TenantUpdate(string Name, bool Enabled, string? BrandColor, string? LogoUrl);
 public sealed record TenantFeatureUpdate(List<string> Disabled);
 public sealed record AdminInvoiceBrandUpdate(InvoiceBrandUpdate Brand, string Reason);
 public sealed record SubscriptionRequest(Guid PlanId, DateTime StartsAt, DateTime EndsAt, string PaymentStatus, long? PriceRial, string? Note);
+public sealed record TrialRequest(Guid PlanId, int Days, string Reason);
 public sealed record SubscriptionApproval(string Reason);
 public sealed record ProductRequest(string Name, string Sku, string Category, long PriceRial, long Stock, long? AverageCostRial = null, string? PhotoDataUrl = null);
 public sealed record ArchivePurgeRequest(string Kind, bool All, List<Guid>? Ids);

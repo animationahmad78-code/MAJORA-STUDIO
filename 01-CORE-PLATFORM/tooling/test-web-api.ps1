@@ -55,6 +55,7 @@ try {
   if (-not $ai.hasApiKey -or -not $aiRead.hasApiKey -or $aiRead.PSObject.Properties.Name -contains 'apiKey' -or $aiRead.PSObject.Properties.Name -contains 'protectedApiKey') { throw 'AI key was not saved or was disclosed' }
   $null = PutJson '/admin/ai-provider' @{enabled=$false;endpoint='https://api.example.com/v1/chat/completions';model='sample-model'} $adminSession
   $plan = PostJson '/admin/plans' @{name='پایه';monthlyRial=1000000;maxUsers=3} $adminSession
+  $plan = PutJson "/admin/plans/$($plan.id)" @{name='پایه';monthlyRial=1000000;maxUsers=3;maxDevices=6;maxPrepayMonths=6;prepayDiscounts=@{'3'=10;'6'=20};enabled=$true} $adminSession
   $ownerPass = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(20))
   $wrongBrandPresetBlocked = $false
   try { $null = PostJson '/admin/tenants' @{name='فروشگاه دیگر';slug="wrong-brand-$($id.Substring(0,8))";ownerUsername="wrong_brand_$id";ownerName='مالک دیگر';ownerPassword=$ownerPass;classicPreset=$true} $adminSession } catch { $wrongBrandPresetBlocked = $_.Exception.Response.StatusCode -eq 400 }
@@ -67,8 +68,14 @@ try {
   [void]$createdTenantIds.Add($tenant.id.ToString())
   $provisionedShop = $null
   $expiredShop = $null
+  $trialShop = $null
   for ($shopIndex = 2; $shopIndex -le 20; $shopIndex++) {
     $shopBody = @{name="فروشگاه آزمون $shopIndex";slug="shop-$($id.Substring(0,8))-$shopIndex";ownerUsername="owner_$($id)_$shopIndex";ownerName="مالک $shopIndex";ownerPassword=$ownerPass;classicPreset=$false}
+    if ($shopIndex -eq 19) {
+      $shopBody.planId = $plan.id
+      $shopBody.paymentStatus = 'trial'
+      $shopBody.trialDays = 10
+    }
     if ($shopIndex -eq 20) {
       $shopBody.planId = $plan.id
       $shopBody.startsAt = [datetime]::UtcNow.AddDays(-1).ToString('o')
@@ -78,6 +85,10 @@ try {
     }
     $shop = PostJson '/admin/tenants' $shopBody $adminSession
     if ($shopIndex -eq 2) { $expiredShop = $shop }
+    if ($shopIndex -eq 19) {
+      $trialShop = $shop
+      if ((PostJson '/admin/tenants' $shopBody $adminSession).id -ne $shop.id) { throw 'Repeated trial provisioning created another shop' }
+    }
     if ($shopIndex -eq 20) {
       $provisionedShop = $shop
       $repeatProvision = PostJson '/admin/tenants' $shopBody $adminSession
@@ -94,6 +105,22 @@ try {
   }
   $tenantList = Invoke-RestMethod "$base/api/admin/tenants" -WebSession $adminSession
   if (@($tenantList).Count -ne 20) { throw 'Consecutive tenant creation did not produce exactly 20 shops' }
+  $trialListed = @($tenantList | Where-Object id -eq $trialShop.id)[0]
+  if ($trialListed.subscriptionStatus -ne 'trial' -or $trialListed.accessActive -ne $true -or
+      $trialListed.subscription.paymentStatus -ne 'trial' -or $trialListed.subscription.priceRialSnapshot -ne 0 -or
+      [Math]::Abs((([datetime]$trialListed.subscription.endsAt) - ([datetime]$trialListed.subscription.startsAt)).TotalDays - 10) -gt 0.001) { throw 'Ten-day trial was not active for exactly ten days' }
+  $trialSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+  if ((PostJson '/auth/login' @{username="owner_$($id)_19";password=$ownerPass} $trialSession $true).accessActive -ne $true) { throw 'Trial owner could not enter the workspace' }
+  $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $trialSession
+  $resizedTrial = PutJson "/admin/tenants/$($trialShop.id)/trial" @{planId=$plan.id;days=14;reason='آزمون تغییر مدت دمو'} $adminSession
+  if ($resizedTrial.days -ne 14 -or $resizedTrial.startsAt -ne $trialListed.subscription.startsAt -or
+      [Math]::Abs((([datetime]$resizedTrial.endsAt) - ([datetime]$resizedTrial.startsAt)).TotalDays - 14) -gt 0.001) { throw 'Editing trial duration restarted or miscalculated the original period' }
+  $invalidTrialDays = $false
+  try { $null = PutJson "/admin/tenants/$($trialShop.id)/trial" @{planId=$plan.id;days=0;reason='bad'} $adminSession } catch { $invalidTrialDays = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $invalidTrialDays) { throw 'Invalid trial duration was accepted' }
+  $null = PutJson "/admin/tenants/$($trialShop.id)/trial" @{planId=$plan.id;days=2;reason='آزمون اعلان سه‌روزه'} $adminSession
+  $trialNotice = Invoke-RestMethod "$base/api/merchant/subscription/notice" -WebSession $trialSession
+  if (-not $trialNotice.renewalDue -or $trialNotice.daysRemaining -ne 2 -or $trialNotice.status -ne 'trial') { throw 'Trial renewal notice was not issued within three days' }
   $expiredPeriod = PostJson "/admin/tenants/$($expiredShop.id)/subscription" @{planId=$plan.id;startsAt=[datetime]::UtcNow.AddDays(-60).ToString('o');endsAt=[datetime]::UtcNow.AddDays(-30).ToString('o');paymentStatus='paid'} $adminSession
   $expiredList = @((Invoke-RestMethod "$base/api/admin/tenants" -WebSession $adminSession) | Where-Object id -eq $expiredShop.id)[0]
   if ($expiredList.subscriptionStatus -ne 'expired' -or $expiredList.accessActive -ne $false -or $expiredList.activeSubscription) { throw 'Expired paid period was shown as active in admin' }
@@ -145,7 +172,7 @@ try {
   if ($mixedTenant.subscriptionStatus -ne 'active' -or $mixedTenant.accessActive -ne $true -or
       $mixedTenant.activeSubscription.id -ne $subscription.id -or $mixedTenant.subscription.id -ne $futurePeriod.id) { throw 'Future pending period obscured current active access in admin' }
   $adminOverview = Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession
-  if ($adminOverview.tenants -ne 20 -or $adminOverview.activeSubscriptions -ne 2) { throw 'Admin overview active tenant count disagrees with subscription data' }
+  if ($adminOverview.tenants -ne 20 -or $adminOverview.activeSubscriptions -ne 3 -or $adminOverview.renewalsDue -ne 1) { throw 'Admin overview active tenant or renewal notice count disagrees with subscription data' }
   $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $ownerSession $true
   $badOwnerPasswordBlocked = $false
   try { $null = PostJson '/auth/login' @{username="owner_$id";password='wrong-password'} ([Microsoft.PowerShell.Commands.WebRequestSession]::new()) $true } catch { $badOwnerPasswordBlocked = $_.Exception.Response.StatusCode -eq 401 }
@@ -750,6 +777,11 @@ try {
   $promo = PostJson '/admin/promo-codes' @{code="TEST_$($id.Substring(0,8))";percent=10;startsAt=[datetime]::UtcNow.AddDays(-1).ToString('o');expiresAt=[datetime]::UtcNow.AddDays(7).ToString('o');enabled=$true} $adminSession
   $quote = Invoke-RestMethod "$base/api/merchant/subscription/quote?planId=$($plan.id)&code=$($promo.code)" -WebSession $ownerSession
   if ($quote.basePriceRial -ne 1000000 -or $quote.totalRial -ne 900000 -or $quote.discountPercent -ne 10) { throw 'Promo quote calculation mismatch' }
+  $threeMonthQuote = Invoke-RestMethod "$base/api/merchant/subscription/quote?planId=$($plan.id)&months=3&code=$($promo.code)" -WebSession $ownerSession
+  if ($threeMonthQuote.basePriceRial -ne 3000000 -or $threeMonthQuote.termDiscountPercent -ne 10 -or $threeMonthQuote.totalRial -ne 2430000) { throw 'Three-month term and promo discounts were not combined deterministically' }
+  $invalidMonthsBlocked = $false
+  try { $null = Invoke-RestMethod "$base/api/merchant/subscription/quote?planId=$($plan.id)&months=7" -WebSession $ownerSession } catch { $invalidMonthsBlocked = $_.Exception.Response.StatusCode -eq 400 }
+  if (-not $invalidMonthsBlocked) { throw 'Unavailable prepay duration was quoted' }
   $invalidPromoBlocked = $false
   try { $null = Invoke-RestMethod "$base/api/merchant/subscription/quote?planId=$($plan.id)&code=INVALID" -WebSession $ownerSession } catch { $invalidPromoBlocked = $_.Exception.Response.StatusCode -eq 409 }
   if (-not $invalidPromoBlocked) { throw 'Invalid promo code was accepted' }
@@ -770,6 +802,14 @@ try {
   if ($orderApproved.status -ne 'paid') { throw 'Subscription order was not approved' }
   $merchantSubscriptions = Invoke-RestMethod "$base/api/merchant/subscription" -WebSession $ownerSession
   if (@($merchantSubscriptions | Where-Object id -eq $orderApproved.subscriptionId).Count -ne 1) { throw 'Approved order did not create visible subscription' }
+  $expiredQuote = Invoke-RestMethod "$base/api/merchant/subscription/quote?planId=$($plan.id)&months=3&code=$($promo.code)" -WebSession $expiredSession
+  $expiredOrder = PostJson '/merchant/subscription/orders' @{planId=$plan.id;months=3;idempotencyKey="expired-renewal-$id";promoCode=$promo.code;receiptDataUrl=$png;expectedTotalRial=$expiredQuote.totalRial} $expiredSession
+  if ((Invoke-RestMethod "$base/api/auth/me?panel=merchant" -WebSession $expiredSession).accessActive -ne $false) { throw 'Pending renewal unlocked expired shop before approval' }
+  $expiredApproval = PostJson "/admin/subscription-orders/$($expiredOrder.id)/decision" @{decision='approve'} $adminSession
+  if ($expiredApproval.status -ne 'paid' -or (Invoke-RestMethod "$base/api/auth/me?panel=merchant" -WebSession $expiredSession).accessActive -ne $true) { throw 'Approved renewal did not unlock the existing expired shop session' }
+  $renewedPeriod = @((Invoke-RestMethod "$base/api/merchant/subscription" -WebSession $expiredSession) | Where-Object id -eq $expiredApproval.subscriptionId)[0]
+  if ($renewedPeriod.priceRialSnapshot -ne 2430000 -or ([datetime]$renewedPeriod.endsAt).Month -ne ([datetime]$renewedPeriod.startsAt).AddMonths(3).Month) { throw 'Approved three-month order did not activate the paid duration and frozen price' }
+  $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $expiredSession
   $secondApprovalBlocked = $false
   try { $null = PostJson "/admin/subscription-orders/$($order.id)/decision" @{decision='approve'} $adminSession } catch { $secondApprovalBlocked = $_.Exception.Response.StatusCode -eq 409 }
   if (-not $secondApprovalBlocked) { throw 'Subscription order approved twice' }

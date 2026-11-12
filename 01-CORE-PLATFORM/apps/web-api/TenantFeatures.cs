@@ -12,7 +12,7 @@ public static class TenantFeatures
     private static readonly HashSet<string> UngatedRoutes = new(StringComparer.OrdinalIgnoreCase)
     {
         "/features", "/sessions", "/sessions/{id:guid}/revoke",
-        "/subscription", "/subscription/quote", "/subscription/orders",
+        "/subscription", "/subscription/notice", "/subscription/quote", "/subscription/orders",
         "/plans", "/billing", "/workspace", "/search", "/dashboard"
     };
 
