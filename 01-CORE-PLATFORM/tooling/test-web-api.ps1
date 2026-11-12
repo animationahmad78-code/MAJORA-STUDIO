@@ -275,6 +275,10 @@ try {
   $customerStatuses = Invoke-RestMethod "$base/api/merchant/customers/with-status" -WebSession $ownerSession
   $customerWithStatus = $customerStatuses | Where-Object id -eq $customer.id | Select-Object -First 1
   if ($customerWithStatus.status -ne 'receivable' -or $customerWithStatus.receivableRial -ne 800000) { throw 'Customer payment badge disagrees with invoice receivable' }
+  $dossier = Invoke-RestMethod "$base/api/merchant/customers/$($customer.id)/dossier" -WebSession $ownerSession
+  if ($dossier.customer.id -ne $customer.id -or $dossier.invoiceCount -ne 1 -or $dossier.receivableRial -ne 800000 -or
+      @($dossier.payments).Count -ne 1 -or $dossier.payments[0].amountRial -ne 200000 -or
+      @($dossier.invoiceLines).Count -ne 1 -or $dossier.invoiceLines[0].quantity -ne 2) { throw 'Customer dossier did not reconcile initial invoice, line and payment' }
   $updatedCustomer = PutJson "/merchant/customers/$($customer.id)" @{name='مشتری آزمون';phone='09120000000';address='تهران';occupation='فروشنده';acquisitionSource='معرفی';referrerPhone='09121111111';notes='به‌روز'} $ownerSession
   if ($updatedCustomer.address -ne 'تهران') { throw 'Customer profile update failed' }
   $reminder = PostJson '/merchant/reminders' @{title='تماس با مشتری';dueAt=[datetime]::UtcNow.AddDays(2).ToString('o')} $ownerSession
@@ -335,6 +339,9 @@ try {
   if ($changedRefundRetry.StatusCode -ne 409) { throw 'Changed refund retry was reported as success' }
   $detail = Invoke-RestMethod "$base/api/merchant/invoices/$($invoice.id)" -WebSession $ownerSession
   if ($detail.returnedRial -ne 500000 -or $detail.refundedRial -ne 500000 -or $detail.lines[0].returnedQuantity -ne 1) { throw 'Return ledger/detail mismatch' }
+  $dossierAfterReturn = Invoke-RestMethod "$base/api/merchant/customers/$($customer.id)/dossier" -WebSession $ownerSession
+  if (@($dossierAfterReturn.returns).Count -ne 1 -or @($dossierAfterReturn.refunds).Count -ne 1 -or
+      $dossierAfterReturn.refundDueRial -ne 0) { throw 'Customer dossier omitted return/refund or disagreed with settlement' }
   $returns = Invoke-RestMethod "$base/api/merchant/accounting/returns" -WebSession $ownerSession
   if (@($returns).Count -ne 1 -or $returns[0].invoiceNumber -ne 1) { throw 'Return list mismatch' }
   $financeAfterReturn = Invoke-RestMethod "$base/api/merchant/accounting/overview" -WebSession $ownerSession
@@ -521,6 +528,8 @@ try {
   if ($crossProductPrice.StatusCode -ne 404) { throw 'Cross-tenant product price was mutable' }
   $crossCustomerUpdate = Invoke-WebRequest "$base/api/merchant/customers/$($customer.id)" -Method Put -WebSession $otherSession -Headers @{'X-CSRF'=$otherSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{name='تغییر غیرمجاز';phone='09120000000'} | ConvertTo-Json -Compress) -SkipHttpErrorCheck
   if ($crossCustomerUpdate.StatusCode -ne 404) { throw 'Cross-tenant customer was mutable' }
+  $crossDossier = Invoke-WebRequest "$base/api/merchant/customers/$($customer.id)/dossier" -WebSession $otherSession -SkipHttpErrorCheck
+  if ($crossDossier.StatusCode -ne 404) { throw 'Cross-tenant customer dossier was readable' }
   $crossPayment = Invoke-WebRequest "$base/api/merchant/invoices/$($invoice.id)/payments" -Method Post -WebSession $otherSession -Headers @{'X-CSRF'=$otherSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{idempotencyKey="cross-payment-$id";amountRial=1;method='cash'} | ConvertTo-Json -Compress) -SkipHttpErrorCheck
   if ($crossPayment.StatusCode -ne 404) { throw 'Cross-tenant invoice payment was accepted' }
   $crossChequeBlocked = $false

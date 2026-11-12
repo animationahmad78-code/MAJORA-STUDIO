@@ -45,8 +45,9 @@
 .inv-social { position:absolute;inset-inline:20px;inset-block-end:8px;display:flex;justify-content:space-around;align-items:center;gap:7px;color:#0755b5;font-weight:800;font-size:10px;direction:rtl;min-height:18px; }
 .inv-social-entry { min-width:0;max-width:25%;display:inline-flex;align-items:center;justify-content:center;gap:4px;overflow-wrap:anywhere;text-align:center; }
 .inv-social-entry b { font-weight:800;min-width:0; }
-.inv-social-icon { flex:none;width:15px;height:15px;display:inline-grid;place-items:center; }
+.inv-social-icon { flex:none;width:15px;height:15px;display:inline-grid;place-items:center;object-fit:contain; }
 .inv-social-letter { font-size:11px;border:1px solid currentColor;border-radius:50%;font-weight:900; }
+.invoice-document.mono .inv-social-icon { filter:grayscale(1) contrast(1.15); }
 .invoice-document.mono .invoice-paper { border-color:#222;color:#111; }
 .invoice-document.mono .inv-logo { background:#fff;border-color:#222;box-shadow:none; }
 .invoice-document.mono .inv-payment { background:#eee;color:#111; }

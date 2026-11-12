@@ -1338,6 +1338,47 @@ merchant.MapGet("/customers/with-status", async (string? q, MajoraDb db, HttpCon
             customer.AcquisitionSource, customer.ReferrerPhone, customer.Notes, status, receivableRial = receivable };
     }).ToList());
 });
+merchant.MapGet("/customers/{id:guid}/dossier", async (Guid id, MajoraDb db, HttpContext c) =>
+{
+    var tid = TenantId(c.User);
+    var customer = await db.Customers.AsNoTracking().SingleOrDefaultAsync(x => x.TenantId == tid && x.Id == id);
+    if (customer is null) return Results.NotFound();
+    // Include archived invoices: archiving changes the daily list, never the customer record.
+    var invoices = await db.Invoices.AsNoTracking().Where(x => x.TenantId == tid && x.CustomerId == id)
+        .OrderByDescending(x => x.IssuedAt).ThenByDescending(x => x.Number)
+        .Select(x => new { x.Id, x.Number, x.Revision, x.IssuedAt, x.Status, x.PaymentStatus, x.Archived,
+            x.TotalRial, x.PaidRial, x.ReturnedRial, x.RefundedRial }).ToListAsync();
+    var invoiceIds = invoices.Select(x => x.Id).ToArray();
+    var invoiceLines = await db.InvoiceLines.AsNoTracking().Where(x => invoiceIds.Contains(x.InvoiceId))
+        .OrderBy(x => x.Position).Select(x => new { x.Id, x.InvoiceId, x.Position, x.NameSnapshot, x.Quantity,
+            x.ReturnedQuantity, x.UnitPriceRial, x.TotalRial }).ToListAsync();
+    var payments = await db.Payments.AsNoTracking().Where(x => x.TenantId == tid && invoiceIds.Contains(x.InvoiceId))
+        .OrderByDescending(x => x.ReceivedAt).Select(x => new { x.Id, x.InvoiceId, x.AmountRial, x.Method, x.Reference, x.ReceivedAt }).ToListAsync();
+    var returns = await db.SalesReturns.AsNoTracking().Where(x => x.TenantId == tid && invoiceIds.Contains(x.InvoiceId))
+        .OrderByDescending(x => x.CreatedAt).Select(x => new { x.Id, x.InvoiceId, x.AmountRial, x.Reason, x.CreatedAt }).ToListAsync();
+    var refunds = await db.Refunds.AsNoTracking().Where(x => x.TenantId == tid && invoiceIds.Contains(x.InvoiceId))
+        .OrderByDescending(x => x.RefundedAt).Select(x => new { x.Id, x.InvoiceId, x.AmountRial, x.Method, x.Reference, x.RefundedAt }).ToListAsync();
+    var reminders = await db.Reminders.AsNoTracking().Where(x => x.TenantId == tid && x.InvoiceId != null && invoiceIds.Contains(x.InvoiceId.Value))
+        .OrderBy(x => x.Done).ThenBy(x => x.DueAt).Select(x => new { x.Id, x.InvoiceId, x.Title, x.DueAt, x.Done }).ToListAsync();
+    var hasReturnedCheque = await db.Cheques.AsNoTracking().AnyAsync(x => x.TenantId == tid && x.InvoiceId != null &&
+        invoiceIds.Contains(x.InvoiceId.Value) && x.Status == "returned");
+    var cheques = CanManageFinance(c.User)
+        ? await db.Cheques.AsNoTracking().Where(x => x.TenantId == tid && x.InvoiceId != null && invoiceIds.Contains(x.InvoiceId.Value))
+            .OrderByDescending(x => x.CreatedAt).Select(x => new { x.Id, x.InvoiceId, x.Serial, x.Bank, x.AmountRial,
+                x.DueAt, x.CreatedAt, x.Status, x.RegistrationStatus, x.SayadId, x.IssuerNationalId, x.BeneficiaryNationalId,
+                HasPhoto = x.PhotoBytes != null }).ToListAsync()
+        : [];
+    var receivable = invoices.Where(x => x.Status == "issued" && x.PaymentStatus != "proforma")
+        .Sum(x => Math.Max(0, x.TotalRial - x.ReturnedRial - x.PaidRial + x.RefundedRial));
+    var refundDue = invoices.Where(x => x.Status == "issued" && x.PaymentStatus != "proforma")
+        .Sum(x => Math.Max(0, x.PaidRial - x.RefundedRial - x.TotalRial + x.ReturnedRial));
+    var status = hasReturnedCheque ? "returned_cheque" : receivable > 0 ? "receivable" :
+        invoices.Any(x => x.Status == "issued" && x.PaymentStatus != "proforma") ? "settled" :
+        invoices.Count > 0 ? "proforma" : "no_sales";
+    c.Response.Headers.CacheControl = "no-store";
+    return Results.Ok(new { customer, status, receivableRial = receivable, refundDueRial = refundDue,
+        invoiceCount = invoices.Count, invoices, invoiceLines, payments, returns, refunds, reminders, cheques });
+});
 merchant.MapGet("/customers/export.csv", async (MajoraDb db, HttpContext c) =>
 {
     if (!CanWrite(c.User)) return Results.Forbid();

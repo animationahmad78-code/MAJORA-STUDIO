@@ -1,6 +1,9 @@
 import { formatRial } from '@majora/domain';
 import type { InvoiceReceipt } from '@majora/database';
 import { siInstagram, siTelegram, siWhatsapp, siX } from 'simple-icons';
+import baleIcon from './assets/social-icons/bale.svg';
+import eitaaIcon from './assets/social-icons/eitaa.svg';
+import rubikaIcon from './assets/social-icons/rubika.svg';
 import './invoice-document.css';
 
 export type PaperSize = 'a4' | 'a5';
@@ -11,19 +14,20 @@ export type InvoiceBrand = {
 };
 type Props = { brand: InvoiceBrand; receipt: InvoiceReceipt; mono: boolean; paper: PaperSize; logo: string; chequePhoto?: string; revisionLabel?: string };
 
-const socialSymbols: Record<string, { label: string; path?: string; short: string }> = {
+const socialSymbols: Record<string, { label: string; path?: string; image?: string; short: string }> = {
   telegram: { label: 'تلگرام', path: siTelegram.path, short: 'ت' },
   instagram: { label: 'اینستاگرام', path: siInstagram.path, short: 'ا' },
   whatsapp: { label: 'واتساپ', path: siWhatsapp.path, short: 'و' },
-  bale: { label: 'بله', short: 'ب' }, rubika: { label: 'روبیکا', short: 'ر' },
-  eitaa: { label: 'ایتا', short: 'ای' }, linkedin: { label: 'لینکدین', short: 'in' },
+  bale: { label: 'بله', image: baleIcon, short: 'ب' }, rubika: { label: 'روبیکا', image: rubikaIcon, short: 'ر' },
+  eitaa: { label: 'ایتا', image: eitaaIcon, short: 'ای' }, linkedin: { label: 'لینکدین', short: 'in' },
   x: { label: 'ایکس', path: siX.path, short: 'X' },
   website: { label: 'وب‌سایت', short: '🌐' }, phone: { label: 'تلفن', short: '☎' }
 };
 
 function SocialIcon({ platform }: { platform: string }) {
   const symbol = socialSymbols[platform] ?? { label: 'راه ارتباطی', short: '●' };
-  return symbol.path ? <svg className="inv-social-icon" viewBox="0 0 24 24" aria-label={symbol.label} role="img"><path fill="currentColor" d={symbol.path}/></svg>
+  return symbol.image ? <img className="inv-social-icon" src={symbol.image} alt={symbol.label} />
+    : symbol.path ? <svg className="inv-social-icon" viewBox="0 0 24 24" aria-label={symbol.label} role="img"><path fill="currentColor" d={symbol.path}/></svg>
     : <span className="inv-social-icon inv-social-letter" aria-label={symbol.label} role="img">{symbol.short}</span>;
 }
 
