@@ -993,6 +993,10 @@ namespace Majora.WebApi.Migrations
                     b.Property<long>("AmountRial")
                         .HasColumnType("bigint");
 
+                    b.Property<string>("IdempotencyKey")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
                     b.Property<string>("Method")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
@@ -1003,10 +1007,21 @@ namespace Majora.WebApi.Migrations
                     b.Property<Guid>("PurchaseId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)")
+                        .HasDefaultValue("");
+
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uniqueidentifier");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "IdempotencyKey")
+                        .IsUnique()
+                        .HasFilter("[IdempotencyKey] IS NOT NULL");
 
                     b.HasIndex("TenantId", "PurchaseId");
 

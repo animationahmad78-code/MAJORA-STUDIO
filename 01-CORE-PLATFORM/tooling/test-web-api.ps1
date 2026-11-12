@@ -446,6 +446,16 @@ try {
   if (@($autoCustomers).Count -ne 1 -or $autoCustomers[0].name -ne 'مشتری دوم') { throw 'New invoice customer was not added to customer list' }
   $finance = Invoke-RestMethod "$base/api/merchant/accounting/overview" -WebSession $otherSession
   if ($finance.supplierPayableRial -ne 200000 -or $finance.costOfGoodsSoldRial -ne 200000 -or $finance.estimatedOperatingRial -ne 750000) { throw 'Accounting estimate mismatch' }
+  $supplierPaymentBody = @{idempotencyKey="supplier-payment-$id";amountRial=100000;method='card';reference='SUP-PAY-1'}
+  $supplierPayment = PostJson "/merchant/accounting/purchases/$($purchase.id)/payments" $supplierPaymentBody $otherSession
+  $supplierPaymentAgain = PostJson "/merchant/accounting/purchases/$($purchase.id)/payments" $supplierPaymentBody $otherSession
+  if ($supplierPayment.id -ne $supplierPaymentAgain.id -or $supplierPaymentAgain.paidRial -ne 400000) { throw 'Supplier payment retry changed purchase balance' }
+  $changedSupplierPayment = Invoke-WebRequest "$base/api/merchant/accounting/purchases/$($purchase.id)/payments" -Method Post -WebSession $otherSession -Headers @{'X-CSRF'=$otherSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{idempotencyKey="supplier-payment-$id";amountRial=50000;method='card';reference='SUP-PAY-1'} | ConvertTo-Json -Compress) -SkipHttpErrorCheck
+  if ($changedSupplierPayment.StatusCode -ne 409) { throw 'Changed supplier payment retry was reported as success' }
+  $financeAfterSupplierPayment = Invoke-RestMethod "$base/api/merchant/accounting/overview" -WebSession $otherSession
+  if ($financeAfterSupplierPayment.supplierPayableRial -ne 100000) { throw 'Supplier payment was counted twice or omitted' }
+  $crossSupplierPayment = Invoke-WebRequest "$base/api/merchant/accounting/purchases/$($purchase.id)/payments" -Method Post -WebSession $ownerSession -Headers @{'X-CSRF'=$ownerSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{idempotencyKey="cross-supplier-payment-$id";amountRial=1;method='cash'} | ConvertTo-Json -Compress) -SkipHttpErrorCheck
+  if ($crossSupplierPayment.StatusCode -ne 404) { throw 'Cross-tenant supplier payment was accepted' }
   $blocked = $false
   try { $null = Invoke-RestMethod "$base/api/merchant/invoices/$($invoice.id)" -WebSession $otherSession } catch { $blocked = $_.Exception.Response.StatusCode -eq 404 }
   if (-not $blocked) { throw 'Cross-tenant invoice read was not blocked' }

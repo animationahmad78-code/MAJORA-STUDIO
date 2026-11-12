@@ -39,5 +39,5 @@ $after = & $Dotnet $snapshotTool --inspect $testDb | ConvertFrom-Json
 foreach ($table in @('Tenants','Users','Products','Customers','Invoices','InvoiceLines')) {
   if ($before.$table -ne $after.$table) { throw "Upgrade copy changed row count in $table. Test DB: $testDb" }
 }
-if ($after.RequestHashTables -ne 7) { throw "Upgrade copy did not add all request fingerprint columns. Test DB: $testDb" }
+if ($after.RequestHashTables -ne 8 -or $after.PurchasePaymentIdempotencyIndex -ne 1) { throw "Upgrade copy did not add all request fingerprint columns and payment index. Test DB: $testDb" }
 Write-Output "PASS: disposable upgrade; health/UI; core row counts preserved. Test DB: $testDb"

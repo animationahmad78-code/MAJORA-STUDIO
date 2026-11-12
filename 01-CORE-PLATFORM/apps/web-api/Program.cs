@@ -2026,12 +2026,28 @@ merchant.MapPost("/accounting/purchases", async (PurchaseRequest body, MajoraDb 
 });
 merchant.MapPost("/accounting/purchases/{id:guid}/payments", async (Guid id, PaymentRequest body, MajoraDb db, HttpContext c) =>
 {
-    if (!CanManageFinance(c.User)) return Results.Forbid(); var tid = TenantId(c.User);
+    if (!CanManageFinance(c.User)) return Results.Forbid();
+    if (string.IsNullOrWhiteSpace(body.IdempotencyKey) || body.IdempotencyKey.Length > 100 || string.IsNullOrWhiteSpace(body.Method))
+        return Fail("شناسهٔ درخواست و روش پرداخت خرید لازم است.");
+    var tid = TenantId(c.User);
     await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    var requestHash = Idempotency.Fingerprint(body);
+    var existing = await db.PurchasePayments.SingleOrDefaultAsync(x => x.TenantId == tid && x.IdempotencyKey == body.IdempotencyKey);
+    if (existing is not null)
+    {
+        if (existing.PurchaseId != id || !Idempotency.Matches(existing.RequestHash, requestHash))
+            return Fail("شناسهٔ درخواست برای پرداخت خرید متفاوتی استفاده شده است.", 409);
+        var paidRial = await db.Purchases.Where(x => x.Id == id && x.TenantId == tid).Select(x => x.PaidRial).SingleAsync();
+        return Results.Ok(new { existing.Id, existing.AmountRial, PaidRial = paidRial });
+    }
     var purchase = await db.Purchases.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid); if (purchase is null) return Results.NotFound();
     if (body.AmountRial < 1 || body.AmountRial > purchase.TotalRial - purchase.PaidRial) return Fail("مبلغ پرداخت خرید نامعتبر است.");
-    purchase.PaidRial = checked(purchase.PaidRial + body.AmountRial); db.PurchasePayments.Add(new PurchasePayment { TenantId = tid, PurchaseId = id, AmountRial = body.AmountRial, Method = body.Method.Trim() });
-    Audit(db, c.User, tid, "purchase.payment", "purchase", id, $"amount={body.AmountRial}"); await db.SaveChangesAsync(); await tx.CommitAsync(); return Results.Ok(new { purchase.PaidRial });
+    var payment = new PurchasePayment { TenantId = tid, PurchaseId = id, IdempotencyKey = body.IdempotencyKey, RequestHash = requestHash, AmountRial = body.AmountRial, Method = body.Method.Trim() };
+    purchase.PaidRial = checked(purchase.PaidRial + body.AmountRial); db.PurchasePayments.Add(payment);
+    Audit(db, c.User, tid, "purchase.payment", "purchase", id, $"amount={body.AmountRial}");
+    try { await db.SaveChangesAsync(); await tx.CommitAsync(); }
+    catch (DbUpdateException) { return Fail("پرداخت خرید هم‌زمان ثبت شد؛ خرید را تازه کنید.", 409); }
+    return Results.Ok(new { payment.Id, payment.AmountRial, purchase.PaidRial });
 });
 merchant.MapGet("/accounting/expenses", async (MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Expenses.Where(x => x.TenantId == tid && !x.Voided).OrderByDescending(x => x.IncurredAt).Take(100).ToListAsync()); });
 merchant.MapPost("/accounting/expenses", async (ExpenseRequest body, MajoraDb db, HttpContext c) =>

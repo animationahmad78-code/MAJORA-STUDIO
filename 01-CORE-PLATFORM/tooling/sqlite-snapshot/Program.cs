@@ -21,7 +21,7 @@ if (args.Length == 2 && args[0] == "--inspect")
         counts[table] = (long)(await count.ExecuteScalarAsync() ?? 0L);
     }
     long requestHashTables = 0;
-    foreach (var table in new[] { "SubscriptionOrders", "PriceBatches", "Invoices", "Payments", "SalesReturns", "Refunds", "Purchases" })
+    foreach (var table in new[] { "SubscriptionOrders", "PriceBatches", "Invoices", "Payments", "SalesReturns", "Refunds", "Purchases", "PurchasePayments" })
     {
         await using var columns = db.CreateCommand();
         columns.CommandText = $"PRAGMA table_info({table})";
@@ -30,6 +30,9 @@ if (args.Length == 2 && args[0] == "--inspect")
             if (string.Equals(reader.GetString(1), "RequestHash", StringComparison.OrdinalIgnoreCase)) requestHashTables++;
     }
     counts["RequestHashTables"] = requestHashTables;
+    await using var paymentIndex = db.CreateCommand();
+    paymentIndex.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='IX_PurchasePayments_TenantId_IdempotencyKey'";
+    counts["PurchasePaymentIdempotencyIndex"] = (long)(await paymentIndex.ExecuteScalarAsync() ?? 0L);
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(counts));
     return 0;
 }
