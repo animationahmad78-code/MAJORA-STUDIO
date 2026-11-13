@@ -514,6 +514,26 @@ try {
   if ($changedSupplierPayment.StatusCode -ne 409) { throw 'Changed supplier payment retry was reported as success' }
   $financeAfterSupplierPayment = Invoke-RestMethod "$base/api/merchant/accounting/overview" -WebSession $otherSession
   if ($financeAfterSupplierPayment.supplierPayableRial -ne 100000) { throw 'Supplier payment was counted twice or omitted' }
+  $oldPurchase = PostJson '/merchant/accounting/purchases' @{idempotencyKey="old-purchase-$id";supplierName='تأمین‌کننده قدیمی';supplierInvoiceNumber='OLD-1';purchasedAt=[datetime]::UtcNow.AddDays(-45).ToString('o');paidRial=0;lines=@(@{productId=$otherProduct.id;quantity=1;stockQuantity=0;unitCostRial=60000})} $otherSession
+  $financeWithOldDebt = Invoke-RestMethod "$base/api/merchant/accounting/overview" -WebSession $otherSession
+  $advisorWithOldDebt = Invoke-RestMethod "$base/api/merchant/advisor" -WebSession $otherSession
+  $chatWithOldDebt = PostJson '/merchant/advisor/ask' @{question='مانده بدهی خرید چقدر است؟'} $otherSession
+  if ($oldPurchase.totalRial -ne 60000 -or $financeWithOldDebt.purchasesRial -ne 500000 -or
+      $financeWithOldDebt.supplierPayableRial -ne 160000 -or
+      $advisorWithOldDebt.supplierPayableRial -ne 160000 -or
+      $chatWithOldDebt.facts.supplierPayableRial -ne 160000) {
+    throw "Old supplier debt mismatch: old=$($oldPurchase.totalRial), period=$($financeWithOldDebt.purchasesRial), accounting=$($financeWithOldDebt.supplierPayableRial), advisor=$($advisorWithOldDebt.supplierPayableRial), AI=$($chatWithOldDebt.facts.supplierPayableRial)"
+  }
+  $payables = Invoke-RestMethod "$base/api/merchant/accounting/payables" -WebSession $otherSession
+  $oldPayable = Invoke-RestMethod "$base/api/merchant/accounting/payables?q=OLD-1" -WebSession $otherSession
+  $foreignPayables = Invoke-RestMethod "$base/api/merchant/accounting/payables" -WebSession $ownerSession
+  if ($payables.total -ne 2 -or $payables.items[0].id -ne $oldPurchase.id -or
+      $oldPayable.total -ne 1 -or $oldPayable.items[0].remainingRial -ne 60000 -or
+      $foreignPayables.total -ne 0) { throw 'Supplier debt list, search order or tenant isolation failed' }
+  $null = PostJson "/merchant/accounting/purchases/$($oldPurchase.id)/payments" @{idempotencyKey="old-purchase-payment-$id";amountRial=60000;method='card'} $otherSession
+  $closedOldDebt = Invoke-RestMethod "$base/api/merchant/accounting/payables?q=OLD-1" -WebSession $otherSession
+  $financeAfterOldPayment = Invoke-RestMethod "$base/api/merchant/accounting/overview" -WebSession $otherSession
+  if ($closedOldDebt.total -ne 0 -or $financeAfterOldPayment.supplierPayableRial -ne 100000) { throw 'Settled old supplier debt remained open or balance was not refreshed' }
   $crossSupplierPayment = Invoke-WebRequest "$base/api/merchant/accounting/purchases/$($purchase.id)/payments" -Method Post -WebSession $ownerSession -Headers @{'X-CSRF'=$ownerSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body (@{idempotencyKey="cross-supplier-payment-$id";amountRial=1;method='cash'} | ConvertTo-Json -Compress) -SkipHttpErrorCheck
   if ($crossSupplierPayment.StatusCode -ne 404) { throw 'Cross-tenant supplier payment was accepted' }
   $blocked = $false

@@ -2021,7 +2021,8 @@ merchant.MapGet("/accounting/overview", async (MajoraDb db, HttpContext c) =>
     var cogs = costComplete ? checked(sales.SelectMany(x => x.Lines).Sum(x => checked(x.UnitCostRialSnapshot * x.Quantity)) - returns.SelectMany(x => x.Lines).Sum(x => checked(x.UnitCostRialSnapshot * x.Quantity))) : (long?)null;
     var received = await db.Payments.Where(x => x.TenantId == tid && x.ReceivedAt >= since).SumAsync(x => x.AmountRial);
     var refunded = await db.Refunds.Where(x => x.TenantId == tid && x.RefundedAt >= since).SumAsync(x => x.AmountRial);
-    return Results.Ok(new { periodDays = 30, revenueRial = revenue, returnsRial = metrics.ReturnsRial, receivedRial = received - refunded, refundedRial = refunded, customerReceivableRial = metrics.ReceivableRial, refundDueRial = metrics.RefundDueRial, purchasesRial = purchases.Sum(x => x.TotalRial), supplierPayableRial = purchases.Sum(x => x.TotalRial - x.PaidRial), expensesRial = expenses.Sum(x => x.AmountRial), costComplete, costOfGoodsSoldRial = cogs, estimatedOperatingRial = cogs is null ? null : (long?)(revenue - cogs.Value - expenses.Sum(x => x.AmountRial)), note = "برآورد ۳۰روزهٔ عملیاتی است؛ مالیات، استهلاک و ماندهٔ ابتدای دوره در آن نیست. طلب و بازپرداخت، ماندهٔ باز همهٔ فاکتورهاست." });
+    var supplierPayable = await FinanceMath.LoadSupplierPayableAsync(db, tid);
+    return Results.Ok(new { periodDays = 30, revenueRial = revenue, returnsRial = metrics.ReturnsRial, receivedRial = received - refunded, refundedRial = refunded, customerReceivableRial = metrics.ReceivableRial, refundDueRial = metrics.RefundDueRial, purchasesRial = purchases.Sum(x => x.TotalRial), supplierPayableRial = supplierPayable, expensesRial = expenses.Sum(x => x.AmountRial), costComplete, costOfGoodsSoldRial = cogs, estimatedOperatingRial = cogs is null ? null : (long?)(revenue - cogs.Value - expenses.Sum(x => x.AmountRial)), note = "برآورد ۳۰روزهٔ عملیاتی است؛ مالیات، استهلاک و ماندهٔ ابتدای دوره در آن نیست. طلب مشتری، بدهی خرید و بازپرداخت، ماندهٔ باز همهٔ دوره‌هاست." });
 });
 merchant.MapGet("/accounting/cheques", async (string? q, string? status, string? direction, MajoraDb db, HttpContext c) =>
 {
@@ -2125,6 +2126,21 @@ merchant.MapPost("/accounting/cheques/{id:guid}/status", async (Guid id, ChequeS
     return Results.Ok(new { cheque.Id, cheque.Status });
 });
 merchant.MapGet("/accounting/purchases", async (MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); return Results.Ok(await db.Purchases.Where(x => x.TenantId == tid).OrderByDescending(x => x.PurchasedAt).Take(100).Select(x => new { x.Id, x.SupplierName, x.SupplierInvoiceNumber, x.PurchasedAt, x.TotalRial, x.PaidRial }).ToListAsync()); });
+merchant.MapGet("/accounting/payables", async (string? q, int? page, MajoraDb db, HttpContext c) =>
+{
+    var tid = TenantId(c.User);
+    var term = q?.Trim() ?? "";
+    if (term.Length > 100) return Fail("جست‌وجوی بدهی نباید بیش از ۱۰۰ نویسه باشد.");
+    var selectedPage = Math.Clamp(page ?? 1, 1, 100_000);
+    var query = db.Purchases.AsNoTracking().Where(x => x.TenantId == tid && x.TotalRial > x.PaidRial &&
+        (term == "" || x.SupplierName.Contains(term) || x.SupplierInvoiceNumber.Contains(term)));
+    var total = await query.CountAsync();
+    var items = await query.OrderBy(x => x.PurchasedAt).ThenBy(x => x.Id)
+        .Skip((selectedPage - 1) * 10).Take(10)
+        .Select(x => new { x.Id, x.SupplierName, x.SupplierInvoiceNumber, x.PurchasedAt,
+            x.TotalRial, x.PaidRial, RemainingRial = x.TotalRial - x.PaidRial }).ToListAsync();
+    return Results.Ok(new { items, total, page = selectedPage, pageSize = 10 });
+});
 merchant.MapPost("/accounting/purchases", async (PurchaseRequest body, MajoraDb db, HttpContext c) =>
 {
     if (!CanManageFinance(c.User)) return Results.Forbid();
@@ -2251,7 +2267,8 @@ merchant.MapGet("/advisor", async (MajoraDb db, HttpContext c) =>
     var purchases = await db.Purchases.Where(x => x.TenantId == tid && x.PurchasedAt >= date).ToListAsync();
     var expenses = await db.Expenses.Where(x => x.TenantId == tid && !x.Voided && x.IncurredAt >= date).ToListAsync();
     var lowStock = await db.Products.Where(x => x.TenantId == tid && !x.Archived && x.Stock <= 3).OrderBy(x => x.Stock).Take(5).Select(x => new { x.Name, x.Stock }).ToListAsync();
-    return Results.Ok(new { periodDays = 30, invoices = sales.InvoiceCount, salesRial = sales.NetSalesRial, outstandingRial = sales.ReceivableRial, purchasesRial = purchases.Sum(x => x.TotalRial), supplierPayableRial = purchases.Sum(x => x.TotalRial - x.PaidRial), expensesRial = expenses.Sum(x => x.AmountRial), lowStock, suggestions = new[] { sales.ReceivableRial > 0 ? "ماندهٔ فاکتورها را بر اساس تاریخ سررسید پیگیری کنید." : "ماندهٔ باز ثبت‌شده‌ای دیده نمی‌شود.", lowStock.Count > 0 ? "برای کالاهای کم‌موجودی نقطهٔ سفارش تعریف کنید." : "موجودی بحرانی ثبت‌شده‌ای دیده نمی‌شود.", purchases.Sum(x=>x.TotalRial-x.PaidRial)>0 ? "بدهی تأمین‌کنندگان را با وصول مطالبات هماهنگ کنید." : "بدهی خرید ثبت‌شده‌ای در ۳۰ روز اخیر دیده نمی‌شود." }, note = "این تحلیل فقط از داده‌های ثبت‌شده استفاده می‌کند و جای رسیدگی حسابداری تخصصی را نمی‌گیرد." });
+    var supplierPayable = await FinanceMath.LoadSupplierPayableAsync(db, tid);
+    return Results.Ok(new { periodDays = 30, invoices = sales.InvoiceCount, salesRial = sales.NetSalesRial, outstandingRial = sales.ReceivableRial, purchasesRial = purchases.Sum(x => x.TotalRial), supplierPayableRial = supplierPayable, expensesRial = expenses.Sum(x => x.AmountRial), lowStock, suggestions = new[] { sales.ReceivableRial > 0 ? "ماندهٔ فاکتورها را بر اساس تاریخ سررسید پیگیری کنید." : "ماندهٔ باز ثبت‌شده‌ای دیده نمی‌شود.", lowStock.Count > 0 ? "برای کالاهای کم‌موجودی نقطهٔ سفارش تعریف کنید." : "موجودی بحرانی ثبت‌شده‌ای دیده نمی‌شود.", supplierPayable > 0 ? "بدهی تأمین‌کنندگان را با وصول مطالبات هماهنگ کنید." : "بدهی باز خرید ثبت‌شده‌ای دیده نمی‌شود." }, note = "خرید و هزینهٔ دورهٔ ۳۰روزه گزارش می‌شود؛ بدهی تأمین‌کنندگان ماندهٔ باز همهٔ دوره‌هاست." });
 });
 merchant.MapPost("/advisor/ask", async (AdvisorQuestion body, MajoraDb db, HttpContext c, IHttpClientFactory clients, IConfiguration config, IDataProtectionProvider protection) =>
 {
@@ -2261,7 +2278,7 @@ merchant.MapPost("/advisor/ask", async (AdvisorQuestion body, MajoraDb db, HttpC
     var purchases = await db.Purchases.Where(x => x.TenantId == tid && x.PurchasedAt >= since).Select(x => new { x.TotalRial, x.PaidRial }).ToListAsync();
     var expenses = await db.Expenses.Where(x => x.TenantId == tid && !x.Voided && x.IncurredAt >= since).Select(x => x.AmountRial).ToListAsync();
     var lowStock = await db.Products.Where(x => x.TenantId == tid && !x.Archived && x.Stock <= 3).CountAsync();
-    var facts = new { periodDays = 30, invoiceCount = sales.InvoiceCount, salesRial = sales.NetSalesRial, outstandingRial = sales.ReceivableRial, refundDueRial = sales.RefundDueRial, purchasesRial = purchases.Sum(x => x.TotalRial), supplierPayableRial = purchases.Sum(x => x.TotalRial - x.PaidRial), expensesRial = expenses.Sum(), lowStockCount = lowStock };
+    var facts = new { periodDays = 30, invoiceCount = sales.InvoiceCount, salesRial = sales.NetSalesRial, outstandingRial = sales.ReceivableRial, refundDueRial = sales.RefundDueRial, purchasesRial = purchases.Sum(x => x.TotalRial), supplierPayableRial = await FinanceMath.LoadSupplierPayableAsync(db, tid), expensesRial = expenses.Sum(), lowStockCount = lowStock };
     var profile = await db.AiProviderProfiles.AsNoTracking().SingleOrDefaultAsync(x => x.Id == 1);
     var endpoint = profile is null ? config["MAJORA_AI_ENDPOINT"] : profile.Enabled ? profile.Endpoint : null;
     var model = profile is null ? config["MAJORA_AI_MODEL"] : profile.Enabled ? profile.Model : null;

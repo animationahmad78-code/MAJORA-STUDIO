@@ -31,6 +31,12 @@ public static class FinanceMath
         return SummarizeSales(issued, returnsRial, open);
     }
 
+    // Outstanding supplier debt is a balance, so it must include purchases
+    // from every period even when a dashboard's flow metrics cover 30 days.
+    public static Task<long> LoadSupplierPayableAsync(MajoraDb db, Guid tenantId) =>
+        db.Purchases.AsNoTracking().Where(x => x.TenantId == tenantId && x.TotalRial > x.PaidRial)
+            .SumAsync(x => x.TotalRial - x.PaidRial);
+
     public static void UpdateStatus(Invoice invoice)
     {
         if (invoice.PaymentStatus == "proforma") return;
