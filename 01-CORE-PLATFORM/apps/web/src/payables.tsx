@@ -13,6 +13,8 @@ export function Payables({ run, onPayment }: { run:(fn:()=>Promise<unknown>,msg?
   const [selected,setSelected]=useState<Payable|null>(null);
   const [amount,setAmount]=useState('');
   const [method,setMethod]=useState('card');
+  const [requestKey,setRequestKey]=useState('');
+  const [busy,setBusy]=useState(false);
   const [revision,setRevision]=useState(0);
   useEffect(()=>{
     let active=true;
@@ -32,19 +34,19 @@ export function Payables({ run, onPayment }: { run:(fn:()=>Promise<unknown>,msg?
     <div className="list">{data?.items.map(item=><div className="list-row payable-row" key={item.id}>
       <div><strong>{item.supplierName}</strong><small>{dateFa(item.purchasedAt)} · سند {item.supplierInvoiceNumber||'بدون شماره'}</small></div>
       <div className="money"><b>{rial(item.remainingRial)}</b><small>از کل {rial(item.totalRial)}</small></div>
-      <button type="button" aria-label={`ثبت پرداخت برای ${item.supplierName}`} onClick={()=>{setSelected(item);setAmount('')}}>ثبت پرداخت</button>
+      <button type="button" aria-label={`ثبت پرداخت برای ${item.supplierName}`} onClick={()=>{setSelected(item);setAmount('');setRequestKey(crypto.randomUUID())}}>ثبت پرداخت</button>
     </div>)}</div>
     {pages>1&&<nav className="payable-pages" aria-label="صفحات بدهی"><button type="button" disabled={page<=1} onClick={()=>setPage(page-1)}>قبلی</button><span>صفحه {page} از {pages}</span><button type="button" disabled={page>=pages} onClick={()=>setPage(page+1)}>بعدی</button></nav>}
-    {selected&&<form className="payable-payment" onSubmit={event=>{event.preventDefault();void run(async()=>{
+    {selected&&<form className="payable-payment" onSubmit={event=>{event.preventDefault();if(busy)return;setBusy(true);void run(async()=>{
       const parsed=Number(amount);
       if(!Number.isSafeInteger(parsed)||parsed<1||parsed>selected.remainingRial)throw new Error('مبلغ پرداخت باید مثبت و حداکثر برابر ماندهٔ این خرید باشد.');
-      await api(`/merchant/accounting/purchases/${selected.id}/payments`,'POST',{idempotencyKey:crypto.randomUUID(),amountRial:parsed,method});
+      await api(`/merchant/accounting/purchases/${selected.id}/payments`,'POST',{idempotencyKey:requestKey,amountRial:parsed,method});
       setSelected(null);setAmount('');setRevision(value=>value+1);await onPayment();
-    },'پرداخت خرید ثبت و مانده به‌روز شد.')}}>
+    },'پرداخت خرید ثبت و مانده به‌روز شد.').finally(()=>setBusy(false))}}>
       <h3>پرداخت به {selected.supplierName}</h3><p className="hint">ماندهٔ فعلی: {rial(selected.remainingRial)}</p>
       <div className="form-grid"><label>مبلغ پرداخت (ریال)<RialInput value={amount} onValueChange={setAmount} required/></label>
         <label>روش پرداخت<select value={method} onChange={event=>setMethod(event.target.value)}><option value="card">کارت</option><option value="transfer">انتقال بانکی</option><option value="cash">نقد</option></select></label></div>
-      <div className="form-actions"><button className="primary" type="submit">ثبت پرداخت</button><button type="button" onClick={()=>setSelected(null)}>انصراف</button></div>
+      <div className="form-actions"><button className="primary" type="submit" disabled={busy}>{busy?'در حال ثبت…':'ثبت پرداخت'}</button><button type="button" disabled={busy} onClick={()=>setSelected(null)}>انصراف</button></div>
     </form>}
   </section>;
 }
