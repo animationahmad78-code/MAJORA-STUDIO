@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, dateFa, rial, type Plan } from './api';
 import { JalaliDateField } from '../../mobile/src/jalali-date';
 import { RialInput } from './rial-input';
+import { prepareImage } from './image-upload';
 import { promoDateBounds, promoJalaliDate } from './promo-dates';
 import './subscription-billing.css';
 
@@ -13,7 +14,6 @@ const statusLabel: Record<string, string> = { pending_approval: 'در انتظا
 const periodLabel: Record<string, string> = { active: 'فعال', trial: 'دموی رایگان فعال', expired: 'منقضی', scheduled: 'شروع در آینده', pending_payment: 'در انتظار پرداخت' };
 const features = (plan: Plan): string[] => { try { const parsed: unknown = JSON.parse(plan.featuresJson || '[]'); return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []; } catch { return []; } };
 const discounts = (plan: Plan): Record<string, number> => { try { return JSON.parse(plan.prepayDiscountsJson || '{}') as Record<string, number>; } catch { return {}; } };
-const fileData = (file: File) => new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(new Error('خواندن تصویر رسید انجام نشد.')); reader.readAsDataURL(file); });
 
 export function MerchantSubscription() {
   const [plans, setPlans] = useState<Plan[]>([]); const [orders, setOrders] = useState<Order[]>([]);
@@ -50,11 +50,10 @@ export function MerchantSubscription() {
   const submit = async () => {
     if (!selected || !receipt || busy) return;
     if (!quote || quote.promoCode !== promo.trim().toUpperCase() || quote.months !== months) { setError('مبلغ نهایی را برای مدت و کد تخفیف فعلی دوباره بررسی کنید.'); return; }
-    if (receipt.size > 1024 * 1024 || !['image/jpeg', 'image/png', 'image/webp'].includes(receipt.type)) { setError('تصویر رسید باید JPEG، PNG یا WebP و کمتر از یک مگابایت باشد.'); return; }
     if (!window.confirm(`رسید پرداخت طرح ${selected.name} برای بررسی ماژورا ثبت شود؟`)) return;
     setBusy(true); setError(''); setNotice('');
     try {
-      const receiptDataUrl = await fileData(receipt);
+      const receiptDataUrl = await prepareImage(receipt);
       await api('/merchant/subscription/orders', 'POST', { planId: selected.id, months, idempotencyKey: key.current, promoCode: promo.trim(), receiptDataUrl, expectedTotalRial: quote?.totalRial });
       key.current = crypto.randomUUID(); setSelected(null); setMonths(1); setReceipt(null); setQuote(null); setPromo('');
       setNotice('رسید ثبت شد. تا تأیید ماژورا اشتراک جدید فعال نمی‌شود.');

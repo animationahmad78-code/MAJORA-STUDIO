@@ -176,6 +176,13 @@ try {
   $adminOverview = Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession
   if ($adminOverview.tenants -ne 20 -or $adminOverview.activeSubscriptions -ne 3 -or $adminOverview.renewalsDue -ne 1) { throw 'Admin overview active tenant or renewal notice count disagrees with subscription data' }
   $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $ownerSession $true
+  $invalidTimer = Invoke-WebRequest "$base/api/admin/marketing-settings" -Method Put -WebSession $adminSession -Headers @{'X-CSRF'=$adminSession.Cookies.GetCookies([uri]$base)['majora.admin.csrf'].Value} -ContentType 'application/json' -Body '{"intervalSeconds":0}' -SkipHttpErrorCheck
+  if ($invalidTimer.StatusCode -ne 400) { throw 'Invalid carousel timer was accepted' }
+  $timer = PutJson '/admin/marketing-settings' @{intervalSeconds=9} $adminSession
+  $merchantTimer = Invoke-RestMethod "$base/api/merchant/marketing-settings" -WebSession $ownerSession
+  if ($timer.intervalSeconds -ne 9 -or $merchantTimer.intervalSeconds -ne 9) { throw 'Carousel timer was not shared with merchant' }
+  $merchantTimerWrite = Invoke-WebRequest "$base/api/admin/marketing-settings" -Method Put -WebSession $ownerSession -Headers @{'X-CSRF'=$ownerSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body '{"intervalSeconds":4}' -SkipHttpErrorCheck
+  if ($merchantTimerWrite.StatusCode -notin 401,403) { throw 'Merchant could change platform carousel timer' }
   $badSlide = Invoke-WebRequest "$base/api/admin/marketing-slides/1" -Method Put -WebSession $adminSession -Headers @{'X-CSRF'=$adminSession.Cookies.GetCookies([uri]$base)['majora.admin.csrf'].Value} -ContentType 'application/json' -Body (@{altText='بنر آزمون';targetUrl='javascript:alert(1)';linkEnabled=$true;enabled=$true;imageDataUrl=$null}|ConvertTo-Json -Compress) -SkipHttpErrorCheck
   if ($badSlide.StatusCode -ne 400) { throw 'Unsafe marketing slide target was accepted' }
   Add-Type -AssemblyName System.Drawing

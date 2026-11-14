@@ -14,7 +14,7 @@ public static class TenantFeatures
         "/features", "/sessions", "/sessions/{id:guid}/revoke",
         "/subscription", "/subscription/notice", "/subscription/quote", "/subscription/orders",
         "/plans", "/billing", "/workspace", "/search", "/dashboard",
-        "/marketing-slides", "/marketing-slides/{slot:int}/image",
+        "/marketing-slides", "/marketing-settings", "/marketing-slides/{slot:int}/image",
         "/announcements", "/announcements/{id:guid}/image", "/announcements/{id:guid}/read",
         "/announcement-fonts/{id:int}/file"
     };

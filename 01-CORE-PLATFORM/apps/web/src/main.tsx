@@ -19,7 +19,10 @@ import { MajoraSupport } from './majora-support';
 import { AdminFeatures } from './admin-features';
 import { Customers } from './customers';
 import { GlobalSearch, type SearchHit } from './global-search';
-import { AdminMarketingSlides, MarketingCarousel, WhyMajora } from './marketing';
+import { MarketingCarousel, WhyMajora } from './marketing';
+import { AdminMarketingSlides } from './marketing-admin';
+import { ErrorDialog } from './error-dialog';
+import './error-dialog.css';
 import { AdminAnnouncements, MerchantAnnouncements, type Announcement } from './announcements';
 import { RialInput } from './rial-input';
 import { JalaliDateField, isoToJalaliDate, jalaliToIsoDate } from '../../mobile/src/jalali-date';
@@ -48,6 +51,8 @@ function App() {
   const [openedInvoiceId,setOpenedInvoiceId]=useState<string|null>(null);
   const [searchTarget,setSearchTarget]=useState<{kind:SearchHit['kind'];id:string;query:string}|null>(null);
   const [error,setError] = useState(''); const [notice,setNotice] = useState(''); const [brand,setBrand] = useState<{ name:string; logoUrl?:string; brandColor:string }|null>(null);
+  const [actionError,setActionError]=useState('');
+  useEffect(()=>{const show=(event:Event)=>setActionError((event as CustomEvent<string>).detail);window.addEventListener('majora:action-error',show);return()=>window.removeEventListener('majora:action-error',show)},[]);
   const [disabledFeatures,setDisabledFeatures] = useState<string[]>([]);
   const [featuresLoadedFor,setFeaturesLoadedFor] = useState<string|null>(null);
   const [featureLoadError,setFeatureLoadError] = useState('');
@@ -140,6 +145,7 @@ function App() {
       <main className="content" key={tab}>{tab==='majora-support'?<MajoraSupport/>:user.role==='platform_admin' ? (tab==='plans'?<AdminBilling/>:tab==='marketing'?<AdminMarketingSlides/>:tab==='announcements'?<AdminAnnouncements/>:tab==='admin-users'?<UserManagement admin/>:tab==='tenants'?<Tenants/>:tab==='admin-features'?<AdminFeatures/>:tab==='ai-settings'?<AiSettings/>:tab==='admin-brand'?<AdminInvoiceBrandSettings/>:<AdminDashboard/>) : (tab==='announcements'?<MerchantAnnouncements onRead={refreshAnnouncements}/>:tab==='why-majora'?<WhyMajora onOpen={route=>navigate(route as Tab)} canOpen={route=>tabs.some(([id])=>id===route)}/>:tab==='sale'?<SaleWorkspace onDone={id=>{setOpenedInvoiceId(id);navigate('invoices')}}/>:tab==='products'?<ProductsCatalog role={user.role} initialQuery={searchTarget?.kind==='product'?searchTarget.query:''}/>:tab==='price-batches'?<PriceBatches run={run}/>:tab==='customers'?<Customers role={user.role} initialQuery={searchTarget?.kind==='customer'?searchTarget.query:''}/>:tab==='invoices'?<Invoices role={user.role} run={run} initialId={openedInvoiceId} onInitialViewed={()=>setOpenedInvoiceId(null)} onReturn={id=>{setReturnTarget(id);navigate('returns')}} onCheque={()=>navigate('cheques')}/>:tab==='archive'?<Archive run={run}/>:tab==='returns'?<Returns initialId={returnTarget} onTargetUsed={()=>setReturnTarget(null)}/>:tab==='invoice-brand'?<InvoiceBrandSettings editable={false} onSaved={refreshBrand}/>:tab==='accounting'?<Accounting run={run} focusId={searchTarget?.kind==='purchase'||searchTarget?.kind==='expense'?searchTarget.id:undefined}/>:tab==='cheques'?<Cheques initialQuery={searchTarget?.kind==='cheque'?searchTarget.query:''}/>:tab==='reminders'?<Reminders run={run} initialQuery={searchTarget?.kind==='reminder'?searchTarget.query:''}/>:tab==='advisor'?<><Advisor/><AdvisorChat/></>:tab==='subscription'?<MerchantSubscription/>:tab==='staff'?<><Staff run={run} role={user.role}/>{user.role==='owner'&&<UserManagement admin={false}/>}</>:<Dashboard go={navigate} role={user.role} brand={brand?.name??'فروشگاه شما'} logo={brand?.logoUrl} disabledFeatures={disabledFeatures} unreadAnnouncements={unreadAnnouncements}/>)}</main>
       <footer className="footer">نرم‌افزار به سبک کار شما · Powered by MAJORA</footer>
     </div><nav className="mobile-nav" aria-label="دسترسی سریع">{(user.role==='platform_admin'?adminTabs:tabs.filter(([id])=>['dashboard','sale','products','customers','invoices'].includes(id))).map(([id,label,icon])=><button key={id} className={tab===id?'active':''} onClick={()=>navigate(id)}><span>{icon}</span><small>{label}</small></button>)}</nav>{menuOpen&&<div className="drawer-backdrop" onClick={()=>setMenuOpen(false)}><nav className="drawer" aria-label="منوی کامل" onClick={e=>e.stopPropagation()}><div className="card-head"><h2>همهٔ بخش‌ها</h2><button onClick={()=>setMenuOpen(false)} aria-label="بستن منو">×</button></div>{tabs.map(([id,label,icon])=><button key={id} className={`${tab===id?'active':''} ${id==='why-majora'?'nav-why':''}`} onClick={()=>navigate(id)}><span>{icon}</span>{label}{id==='announcements'&&unreadAnnouncements>0&&user.role!=='platform_admin'&&<i className="unread-dot announcement-nav-dot" aria-label="خوانده‌نشده"/>}</button>)}</nav></div>}
+    <ErrorDialog message={actionError} onClose={()=>setActionError('')}/>
   </div>;
 }
 

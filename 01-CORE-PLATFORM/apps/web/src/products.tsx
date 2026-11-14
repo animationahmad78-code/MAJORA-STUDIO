@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, rial, type Product } from './api';
 import { CategoryTree } from './category-tree';
 import { RialInput } from './rial-input';
+import { prepareImage } from './image-upload';
 import './products.css';
 
 type ProductForm = { name: string; sku: string; category: string; subcategory: string; priceRial: string; stock: string; averageCostRial: string; photoDataUrl: string | null };
@@ -10,23 +11,7 @@ const parseRial = (value: string) => value.replace(/[۰-۹]/g, c => String('۰۱
 const photoUrl = (p: Product) => `/api/merchant/products/${p.id}/photo?v=${encodeURIComponent(p.updatedAt)}`;
 
 async function imageData(file: File): Promise<string> {
-  if (!file.type.startsWith('image/')) throw new Error('فایل انتخابی تصویر نیست.');
-  const url = URL.createObjectURL(file);
-  try {
-    const img = new Image();
-    img.src = url;
-    await img.decode();
-    const scale = Math.min(1, 800 / Math.max(img.naturalWidth, img.naturalHeight));
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
-    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
-    const context = canvas.getContext('2d');
-    if (!context) throw new Error('پردازش تصویر در این مرورگر ممکن نیست.');
-    context.drawImage(img, 0, 0, canvas.width, canvas.height);
-    const data = canvas.toDataURL('image/webp', .8);
-    if (data.length > 1_400_000) throw new Error('تصویر پس از فشرده‌سازی هنوز بزرگ است؛ تصویر کوچک‌تری انتخاب کنید.');
-    return data;
-  } finally { URL.revokeObjectURL(url); }
+  return prepareImage(file, 1200);
 }
 
 export function ProductsCatalog({ initialQuery = '', role = 'viewer' }: { initialQuery?: string; role?: string }) {

@@ -709,6 +709,19 @@ namespace Majora.WebApi.Migrations
                     b.ToTable("InvoiceRevisions");
                 });
 
+            modelBuilder.Entity("Majora.WebApi.MarketingSettings", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("int");
+
+                    b.Property<int>("IntervalSeconds")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("MarketingSettings");
+                });
+
             modelBuilder.Entity("Majora.WebApi.MarketingSlide", b =>
                 {
                     b.Property<int>("Slot")

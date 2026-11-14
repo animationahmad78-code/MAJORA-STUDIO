@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, dateFa, rial, type InvoiceSocialLink, type Plan, type Tenant } from './api';
+import { prepareImage } from './image-upload';
 import { JalaliDateField, isoToJalaliDate, jalaliToIsoDate } from '../../mobile/src/jalali-date';
 import './tenants.css';
 
@@ -76,15 +77,9 @@ export function Tenants() {
   const next = () => { if (valid(stage)) setStage(value => Math.min(4, value + 1)); };
   const logo = async (file?: File) => {
     if (!file) return;
-    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 1_048_576 || file.size < 100) {
-      setError('لوگو باید PNG، JPEG یا WebP معتبر و حداکثر یک مگابایت باشد.'); return;
-    }
     try {
-      const data = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = reject; reader.readAsDataURL(file);
-      });
-      set('logoDataUrl', data); setError('');
-    } catch { setError('فایل لوگو خوانده نشد؛ دوباره انتخاب کنید.'); }
+      set('logoDataUrl', await prepareImage(file)); setError('');
+    } catch (e) { setError(e instanceof Error ? e.message : 'فایل لوگو خوانده نشد؛ دوباره انتخاب کنید.'); }
   };
   const create = async () => {
     if (busy) return;

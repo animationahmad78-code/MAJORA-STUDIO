@@ -242,6 +242,9 @@ using (var scope = app.Services.CreateScope())
             using var marketingSlides = connection.CreateCommand();
             marketingSlides.CommandText = "CREATE TABLE IF NOT EXISTS MarketingSlides (Slot INTEGER NOT NULL PRIMARY KEY, AltText TEXT NOT NULL, TargetUrl TEXT NOT NULL, LinkEnabled INTEGER NOT NULL, Enabled INTEGER NOT NULL, ImageContentType TEXT NOT NULL, ImageBytes BLOB NOT NULL, UpdatedAt TEXT NOT NULL)";
             await marketingSlides.ExecuteNonQueryAsync();
+            using var marketingSettings = connection.CreateCommand();
+            marketingSettings.CommandText = "CREATE TABLE IF NOT EXISTS MarketingSettings (Id INTEGER NOT NULL PRIMARY KEY, IntervalSeconds INTEGER NOT NULL DEFAULT 6)";
+            await marketingSettings.ExecuteNonQueryAsync();
             foreach (var sql in new[] {
                 "CREATE TABLE IF NOT EXISTS Announcements (Id TEXT NOT NULL PRIMARY KEY, Title TEXT NOT NULL, Body TEXT NOT NULL, Alignment TEXT NOT NULL, FontSize INTEGER NOT NULL, FontId INTEGER NULL, ImageContentType TEXT NULL, ImageBytes BLOB NULL, CreatedAt TEXT NOT NULL, UpdatedAt TEXT NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS AnnouncementReads (AnnouncementId TEXT NOT NULL, UserId TEXT NOT NULL, ReadAt TEXT NOT NULL, PRIMARY KEY (AnnouncementId, UserId))",
@@ -282,7 +285,7 @@ static async Task<string?> AnnouncementError(AnnouncementRequest body, MajoraDb 
     if (string.IsNullOrWhiteSpace(body.Body) || body.Body.Trim().Length > 6000) return "متن اعلان باید بین ۱ تا ۶۰۰۰ نویسه باشد.";
     if (body.Alignment is not ("right" or "center" or "left") || body.FontSize is < 12 or > 24) return "چینش یا اندازه متن خارج از محدوده مجاز است.";
     if (body.FontId is int fontId && !await db.AnnouncementFonts.AnyAsync(x => x.Id == fontId)) return "فونت انتخابی وجود ندارد.";
-    if (body.ImageDataUrl is not null && (!ProductPhotos.TryDecode(body.ImageDataUrl, out var type, out _) || type is not ("image/png" or "image/jpeg" or "image/webp"))) return "تصویر اعلان باید PNG، JPEG یا WebP و کمتر از یک مگابایت باشد.";
+    if (body.ImageDataUrl is not null && (!ProductPhotos.TryDecode(body.ImageDataUrl, out var type, out _) || type is not ("image/png" or "image/jpeg" or "image/webp"))) return "تصویر اعلان معتبر نیست؛ PNG، JPEG یا WebP انتخاب کنید. تصویر بزرگ به‌صورت خودکار بهینه می‌شود.";
     return null;
 }
 static void Audit(MajoraDb db, ClaimsPrincipal p, Guid? tenantId, string action, string entity, Guid id, string detail = "") => db.Audit.Add(new AuditEntry { ActorId = UserId(p), TenantId = tenantId, Action = action, EntityType = entity, EntityId = id.ToString(), Detail = detail });
@@ -488,6 +491,18 @@ admin.MapGet("/marketing-slides", async (MajoraDb db) =>
     return Results.Ok(slides.Select(x => new { x.Slot, x.AltText, x.TargetUrl, x.LinkEnabled, x.Enabled, x.UpdatedAt,
         imageUrl = $"/api/admin/marketing-slides/{x.Slot}/image?v={x.UpdatedAt.Ticks}" }));
 });
+admin.MapGet("/marketing-settings", async (MajoraDb db) => Results.Ok(new { intervalSeconds =
+    await db.MarketingSettings.AsNoTracking().Where(x => x.Id == 1).Select(x => (int?)x.IntervalSeconds).SingleOrDefaultAsync() ?? 6 }));
+admin.MapPut("/marketing-settings", async (MarketingSettingsRequest body, MajoraDb db, HttpContext c) =>
+{
+    if (body.IntervalSeconds is < 3 or > 30) return Fail("زمان تعویض بنر باید بین ۳ تا ۳۰ ثانیه باشد.");
+    var settings = await db.MarketingSettings.SingleOrDefaultAsync(x => x.Id == 1);
+    if (settings is null) { settings = new MarketingSettings(); db.MarketingSettings.Add(settings); }
+    settings.IntervalSeconds = body.IntervalSeconds;
+    Audit(db, c.User, null, "marketing-settings.save", "marketing-settings", Guid.Empty, $"intervalSeconds={body.IntervalSeconds}");
+    await db.SaveChangesAsync();
+    return Results.Ok(new { settings.IntervalSeconds });
+});
 admin.MapGet("/marketing-slides/{slot:int}/image", async (int slot, MajoraDb db, HttpContext c) =>
 {
     var slide = await db.MarketingSlides.AsNoTracking().SingleOrDefaultAsync(x => x.Slot == slot);
@@ -507,7 +522,7 @@ admin.MapPut("/marketing-slides/{slot:int}", async (int slot, MarketingSlideRequ
     var slide = await db.MarketingSlides.SingleOrDefaultAsync(x => x.Slot == slot);
     if (slide is null && body.ImageDataUrl is null) return Fail("برای بنر تازه، تصویر افقی ۱۶:۹ لازم است.");
     if (body.ImageDataUrl is not null && !MarketingImages.TryDecodeLandscape(body.ImageDataUrl, out _, out _))
-        return Fail("تصویر بنر باید PNG یا JPEG افقی ۱۶:۹، بین ۶۴۰×۳۶۰ و ۳۸۴۰×۲۱۶۰، و کمتر از یک مگابایت باشد.");
+        return Fail("تصویر بنر معتبر نیست. قاب باید افقی ۱۶:۹ و اندازهٔ تصویر بین ۶۴۰×۳۶۰ تا ۳۸۴۰×۲۱۶۰ باشد.");
     if (slide is null) { slide = new MarketingSlide { Slot = slot }; db.MarketingSlides.Add(slide); }
     if (body.ImageDataUrl is not null && MarketingImages.TryDecodeLandscape(body.ImageDataUrl, out var type, out var bytes))
     { slide.ImageContentType = type; slide.ImageBytes = bytes; }
@@ -1181,7 +1196,7 @@ merchant.MapPost("/subscription/orders", async (SubscriptionOrderRequest body, M
     if (Role(c.User) != "owner") return Results.Forbid();
     if (string.IsNullOrWhiteSpace(body.IdempotencyKey) || body.IdempotencyKey.Length > 100) return Fail("شناسهٔ درخواست نامعتبر است.");
     if (!ProductPhotos.TryDecode(body.ReceiptDataUrl ?? "", out var contentType, out var bytes))
-        return Fail("تصویر رسید باید JPEG، PNG یا WebP معتبر و کمتر از یک مگابایت باشد.");
+        return Fail("تصویر رسید معتبر نیست؛ JPEG، PNG یا WebP انتخاب کنید و دوباره بارگذاری کنید.");
     var tid = TenantId(c.User);
     await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
     var requestHash = Idempotency.Fingerprint(body);
@@ -1226,6 +1241,8 @@ merchant.MapGet("/marketing-slides", async (MajoraDb db) =>
     return Results.Ok(slides.Select(x => new { x.Slot, x.AltText, x.TargetUrl, x.LinkEnabled,
         imageUrl = $"/api/merchant/marketing-slides/{x.Slot}/image?v={x.UpdatedAt.Ticks}" }));
 });
+merchant.MapGet("/marketing-settings", async (MajoraDb db) => Results.Ok(new { intervalSeconds =
+    await db.MarketingSettings.AsNoTracking().Where(x => x.Id == 1).Select(x => (int?)x.IntervalSeconds).SingleOrDefaultAsync() ?? 6 }));
 merchant.MapGet("/marketing-slides/{slot:int}/image", async (int slot, MajoraDb db, HttpContext c) =>
 {
     var slide = await db.MarketingSlides.AsNoTracking().SingleOrDefaultAsync(x => x.Slot == slot && x.Enabled);
@@ -1418,7 +1435,7 @@ merchant.MapPut("/products/{id:guid}/photo", async (Guid id, ProductPhotoRequest
     var tid = TenantId(c.User);
     var product = await db.Products.SingleOrDefaultAsync(x => x.Id == id && x.TenantId == tid && !x.Archived);
     if (product is null) return Results.NotFound();
-    if (!ProductPhotos.TryDecode(body.DataUrl, out var contentType, out var bytes)) return Fail("تصویر باید JPEG، PNG یا WebP معتبر و کمتر از یک مگابایت باشد.");
+    if (!ProductPhotos.TryDecode(body.DataUrl, out var contentType, out var bytes)) return Fail("تصویر معتبر نیست؛ JPEG، PNG یا WebP انتخاب کنید و دوباره بارگذاری کنید.");
     var photo = await db.ProductPhotos.SingleOrDefaultAsync(x => x.ProductId == id && x.TenantId == tid);
     if (photo is null) db.ProductPhotos.Add(new ProductPhoto { ProductId = id, TenantId = tid, ContentType = contentType, Bytes = bytes });
     else { photo.ContentType = contentType; photo.Bytes = bytes; }
@@ -2520,6 +2537,7 @@ public sealed record PlanRequest(string Name, long MonthlyRial, int MaxUsers, bo
 public sealed record PromoCodeRequest(string Code, decimal Percent, DateTime StartsAt, DateTime ExpiresAt, bool Enabled = true);
 public sealed record BillingRequest(string CardNumber, string CardHolder);
 public sealed record MarketingSlideRequest(string? AltText, string? TargetUrl, bool LinkEnabled, bool Enabled, string? ImageDataUrl);
+public sealed record MarketingSettingsRequest(int IntervalSeconds);
 public sealed record AnnouncementRequest(string Title, string Body, string Alignment, int FontSize, int? FontId, string? ImageDataUrl, bool RemoveImage = false);
 public sealed record AnnouncementFontRequest(string Name, string DataUrl);
 public sealed record SubscriptionOrderRequest(Guid PlanId, string IdempotencyKey, string? PromoCode, string? ReceiptDataUrl, long ExpectedTotalRial, int Months = 1);

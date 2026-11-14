@@ -26,12 +26,17 @@ async function request(response: () => Promise<Response>): Promise<Response> {
   }
 }
 function sessionChanged(panel: Panel) { localStorage.setItem('majora.session.changed', `${panel}:${Date.now()}:${crypto.randomUUID()}`); }
-export async function api<T>(path: string, method = 'GET', data?: unknown): Promise<T> {
+export async function api<T>(path: string, method = 'GET', data?: unknown, options?: { silentError?: boolean }): Promise<T> {
   const panel = panelFor(path);
   const url = path === '/auth/me' ? `/api/auth/me?panel=${panel}` : `/api${path}`;
   const body = data === undefined ? undefined : JSON.stringify(data);
   const send = () => fetch(url, { method, credentials: 'same-origin', headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(method !== 'GET' ? { 'X-CSRF': csrf(panel), 'X-Majora-Panel': panel } : {}) }, body });
-  let response = await request(send);
+  let response: Response;
+  try { response = await request(send); }
+  catch (error) {
+    if (method !== 'GET' && !options?.silentError) window.dispatchEvent(new CustomEvent('majora:action-error', { detail: error instanceof Error ? error.message : 'ارتباط با سرور برقرار نشد. دوباره تلاش کنید.' }));
+    throw error;
+  }
   // A rejected CSRF request has not reached the mutation endpoint. Refresh the
   // readable token and retry that one request without discarding the form.
   if (response.status === 400 && method !== 'GET') {
@@ -44,7 +49,9 @@ export async function api<T>(path: string, method = 'GET', data?: unknown): Prom
   if (!response.ok) {
     const json = await response.json().catch(() => ({})) as { error?: string; message?: string; errorCode?: string; correlationId?: string };
     if (response.status === 401 && path !== '/auth/me') window.dispatchEvent(new Event('majora:session-changed'));
-    throw new ApiError(json.error ?? json.message ?? (response.status === 403 ? 'برای این عملیات دسترسی ندارید.' : `خطای ${response.status}`), response.status, json.errorCode, json.correlationId ?? response.headers.get('X-Correlation-ID') ?? undefined);
+    const message = json.error ?? json.message ?? (response.status === 403 ? 'برای این عملیات دسترسی ندارید.' : `خطای ${response.status}`);
+    if (method !== 'GET' && !options?.silentError) window.dispatchEvent(new CustomEvent('majora:action-error', { detail: message }));
+    throw new ApiError(message, response.status, json.errorCode, json.correlationId ?? response.headers.get('X-Correlation-ID') ?? undefined);
   }
   if (path === '/auth/logout' || path === '/auth/logout-all') {
     sessionChanged(panel);

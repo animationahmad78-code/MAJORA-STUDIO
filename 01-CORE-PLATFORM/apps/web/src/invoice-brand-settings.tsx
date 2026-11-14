@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, type InvoiceBrand, type InvoiceSocialLink, type Tenant } from './api';
+import { prepareImage } from './image-upload';
 
 const socialPlatforms: { value: InvoiceSocialLink['platform']; label: string }[] = [
   { value: 'telegram', label: 'تلگرام' }, { value: 'instagram', label: 'اینستاگرام' },
@@ -23,16 +24,9 @@ export function InvoiceBrandSettings({ editable, tenantId, onSaved }: { editable
   } : p);
   const image = async (file?: File) => {
     if (!file) return;
-    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 1_048_576) {
-      setError('لوگو باید PNG، JPEG یا WebP و حداکثر یک مگابایت باشد.'); return;
-    }
     try {
-      const result = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-      update('logoDataUrl', result); setError('');
-    } catch { setError('خواندن فایل لوگو انجام نشد؛ فایل دیگری انتخاب کنید.'); }
+      update('logoDataUrl', await prepareImage(file)); setError('');
+    } catch (e) { setError(e instanceof Error ? e.message : 'خواندن فایل لوگو انجام نشد؛ فایل دیگری انتخاب کنید.'); }
   };
   if (!profile) return <div className="card">{error || 'در حال دریافت تنظیمات فاکتور…'}</div>;
   return <div className="brand-settings">

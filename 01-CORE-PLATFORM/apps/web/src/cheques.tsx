@@ -50,7 +50,7 @@ export function ChequeFields({ draft, setDraft, standalone = false, existingPhot
   const set = <K extends keyof ChequeDraft>(key: K, value: ChequeDraft[K]) => setDraft(current => ({ ...current, [key]: value }));
   const selectPhoto = async (file?: File) => {
     if (!file) return;
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 20_000_000) { window.alert('عکس JPG، PNG یا WebP با حجم کمتر از ۲۰ مگابایت انتخاب کنید.'); return; }
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) { window.alert('برای تصویر چک، عکس JPG، PNG یا WebP انتخاب کنید.'); return; }
     try {
       const photo = await createImageBitmap(file);
       let width = Math.min(photo.width, 1600); let height = Math.round(photo.height * width / photo.width);

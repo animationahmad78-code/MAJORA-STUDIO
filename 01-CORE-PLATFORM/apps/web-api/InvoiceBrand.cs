@@ -94,7 +94,7 @@ public static class InvoiceBrand
             (x.Enabled && string.IsNullOrWhiteSpace(x.Text))) == true)
             return "حداکثر چهار راه ارتباطی با نوع و متن معتبر وارد کنید.";
         if (!string.IsNullOrEmpty(input.LogoDataUrl) && !IsValidLogo(input.LogoDataUrl))
-            return "لوگو باید PNG، JPEG یا WebP و حداکثر یک مگابایت باشد.";
+            return "لوگو معتبر نیست. تصویر PNG، JPEG یا WebP دیگری انتخاب کنید.";
         return null;
     }
 
@@ -102,7 +102,7 @@ public static class InvoiceBrand
 
     private static bool IsValidLogo(string dataUrl)
     {
-        if (dataUrl.Length > 1_400_000) return false;
+        if (dataUrl.Length > 5_600_000) return false;
         var comma = dataUrl.IndexOf(',');
         if (comma < 0) return false;
         var media = dataUrl[..comma];
@@ -110,7 +110,7 @@ public static class InvoiceBrand
         try
         {
             var bytes = Convert.FromBase64String(dataUrl[(comma + 1)..]);
-            if (bytes.Length is < 100 or > 1_048_576) return false;
+            if (bytes.Length is < 100 or > 4_000_000) return false;
             return media switch {
                 "data:image/png;base64" => bytes.AsSpan().StartsWith(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }),
                 "data:image/jpeg;base64" => bytes[0] == 255 && bytes[1] == 216,
