@@ -11,6 +11,10 @@ public sealed class Plan { public Guid Id { get; set; } = Guid.NewGuid(); public
 public sealed class Subscription { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public Guid PlanId { get; set; } public DateTime StartsAt { get; set; } public DateTime EndsAt { get; set; } public string PaymentStatus { get; set; } = "pending"; public long PriceRialSnapshot { get; set; } public string Note { get; set; } = ""; }
 public sealed class PromoCode { public Guid Id { get; set; } = Guid.NewGuid(); public string Code { get; set; } = ""; public decimal Percent { get; set; } public DateTime StartsAt { get; set; } public DateTime ExpiresAt { get; set; } public bool Enabled { get; set; } = true; }
 public sealed class PlatformBilling { public int Id { get; set; } = 1; public string CardNumber { get; set; } = ""; public string CardHolder { get; set; } = ""; }
+public sealed class MarketingSlide { public int Slot { get; set; } public string AltText { get; set; } = ""; public string TargetUrl { get; set; } = ""; public bool LinkEnabled { get; set; } public bool Enabled { get; set; } = true; public string ImageContentType { get; set; } = ""; public byte[] ImageBytes { get; set; } = []; public DateTime UpdatedAt { get; set; } = DateTime.UtcNow; }
+public sealed class Announcement { public Guid Id { get; set; } = Guid.NewGuid(); public string Title { get; set; } = ""; public string Body { get; set; } = ""; public string Alignment { get; set; } = "right"; public int FontSize { get; set; } = 16; public int? FontId { get; set; } public string? ImageContentType { get; set; } public byte[]? ImageBytes { get; set; } public DateTime CreatedAt { get; set; } = DateTime.UtcNow; public DateTime UpdatedAt { get; set; } = DateTime.UtcNow; }
+public sealed class AnnouncementRead { public Guid AnnouncementId { get; set; } public Guid UserId { get; set; } public DateTime ReadAt { get; set; } = DateTime.UtcNow; }
+public sealed class AnnouncementFont { public int Id { get; set; } public string Name { get; set; } = ""; public byte[] Bytes { get; set; } = []; public DateTime CreatedAt { get; set; } = DateTime.UtcNow; }
 public sealed class SubscriptionOrder { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public Guid PlanId { get; set; } public string PlanNameSnapshot { get; set; } = ""; public string IdempotencyKey { get; set; } = ""; public string RequestHash { get; set; } = ""; public string PromoCodeSnapshot { get; set; } = ""; public decimal DiscountPercentSnapshot { get; set; } public decimal TermDiscountPercentSnapshot { get; set; } public int Months { get; set; } = 1; public long BasePriceRial { get; set; } public long TotalRial { get; set; } public string Status { get; set; } = "awaiting_receipt"; public string PaymentMethod { get; set; } = "card_transfer"; public string? ReceiptContentType { get; set; } public byte[]? ReceiptBytes { get; set; } public DateTime CreatedAt { get; set; } = DateTime.UtcNow; public DateTime? ReviewedAt { get; set; } public Guid? SubscriptionId { get; set; } }
 public sealed class Product { public Guid Id { get; set; } = Guid.NewGuid(); public Guid TenantId { get; set; } public string Name { get; set; } = ""; public string Sku { get; set; } = ""; public string Category { get; set; } = ""; public long PriceRial { get; set; } public long AverageCostRial { get; set; } public bool CostKnown { get; set; } public long Stock { get; set; } public bool Archived { get; set; } public bool HasPhoto { get; set; } public DateTime UpdatedAt { get; set; } = DateTime.UtcNow; }
 public sealed class ProductPhoto { public Guid ProductId { get; set; } public Guid TenantId { get; set; } public string ContentType { get; set; } = ""; public byte[] Bytes { get; set; } = []; }
@@ -38,6 +42,8 @@ public sealed class MajoraDb(DbContextOptions<MajoraDb> options) : DbContext(opt
 {
     public DbSet<AiProviderProfile> AiProviderProfiles => Set<AiProviderProfile>();
     public DbSet<AppSession> AppSessions => Set<AppSession>();
+    public DbSet<MarketingSlide> MarketingSlides => Set<MarketingSlide>();
+    public DbSet<Announcement> Announcements => Set<Announcement>(); public DbSet<AnnouncementRead> AnnouncementReads => Set<AnnouncementRead>(); public DbSet<AnnouncementFont> AnnouncementFonts => Set<AnnouncementFont>();
     public DbSet<Tenant> Tenants => Set<Tenant>(); public DbSet<InvoiceBrandProfile> InvoiceBrands => Set<InvoiceBrandProfile>(); public DbSet<AppUser> Users => Set<AppUser>(); public DbSet<Plan> Plans => Set<Plan>(); public DbSet<Subscription> Subscriptions => Set<Subscription>(); public DbSet<PromoCode> PromoCodes => Set<PromoCode>(); public DbSet<PlatformBilling> PlatformBilling => Set<PlatformBilling>(); public DbSet<SubscriptionOrder> SubscriptionOrders => Set<SubscriptionOrder>(); public DbSet<Product> Products => Set<Product>(); public DbSet<ProductPhoto> ProductPhotos => Set<ProductPhoto>(); public DbSet<PriceBatch> PriceBatches => Set<PriceBatch>(); public DbSet<PriceBatchLine> PriceBatchLines => Set<PriceBatchLine>(); public DbSet<Customer> Customers => Set<Customer>(); public DbSet<Invoice> Invoices => Set<Invoice>(); public DbSet<InvoiceRevision> InvoiceRevisions => Set<InvoiceRevision>(); public DbSet<InvoiceLine> InvoiceLines => Set<InvoiceLine>(); public DbSet<Payment> Payments => Set<Payment>(); public DbSet<SalesReturn> SalesReturns => Set<SalesReturn>(); public DbSet<SalesReturnLine> SalesReturnLines => Set<SalesReturnLine>(); public DbSet<Refund> Refunds => Set<Refund>(); public DbSet<StockMovement> StockMovements => Set<StockMovement>(); public DbSet<Reminder> Reminders => Set<Reminder>(); public DbSet<AuditEntry> Audit => Set<AuditEntry>(); public DbSet<Purchase> Purchases => Set<Purchase>(); public DbSet<PurchaseLine> PurchaseLines => Set<PurchaseLine>(); public DbSet<PurchasePayment> PurchasePayments => Set<PurchasePayment>(); public DbSet<Expense> Expenses => Set<Expense>(); public DbSet<Cheque> Cheques => Set<Cheque>();
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -53,6 +59,12 @@ public sealed class MajoraDb(DbContextOptions<MajoraDb> options) : DbContext(opt
         b.Entity<AppSession>().Property(x => x.Panel).HasMaxLength(20);
         b.Entity<AppSession>().Property(x => x.UserAgent).HasMaxLength(200);
         b.Entity<AppSession>().Property(x => x.IpAddress).HasMaxLength(50);
+        b.Entity<Announcement>().Property(x => x.Title).HasMaxLength(160);
+        b.Entity<Announcement>().Property(x => x.Body).HasMaxLength(6000);
+        b.Entity<Announcement>().Property(x => x.Alignment).HasMaxLength(10);
+        b.Entity<AnnouncementRead>().HasKey(x => new { x.AnnouncementId, x.UserId });
+        b.Entity<AnnouncementRead>().HasIndex(x => x.UserId);
+        b.Entity<AnnouncementFont>().Property(x => x.Name).HasMaxLength(80);
         b.Entity<Product>().Property(x => x.Sku).HasMaxLength(100);
         b.Entity<Invoice>().Property(x => x.IdempotencyKey).HasMaxLength(100);
         b.Entity<Purchase>().Property(x => x.IdempotencyKey).HasMaxLength(100);
@@ -81,6 +93,11 @@ public sealed class MajoraDb(DbContextOptions<MajoraDb> options) : DbContext(opt
         b.Entity<Plan>().Property(x => x.PrepayDiscountsJson).HasDefaultValue("{}");
         b.Entity<PlatformBilling>().Property(x => x.CardNumber).HasMaxLength(30);
         b.Entity<PlatformBilling>().Property(x => x.CardHolder).HasMaxLength(120);
+        b.Entity<MarketingSlide>().HasKey(x => x.Slot);
+        b.Entity<MarketingSlide>().Property(x => x.Slot).ValueGeneratedNever();
+        b.Entity<MarketingSlide>().Property(x => x.AltText).HasMaxLength(160);
+        b.Entity<MarketingSlide>().Property(x => x.TargetUrl).HasMaxLength(500);
+        b.Entity<MarketingSlide>().Property(x => x.ImageContentType).HasMaxLength(30);
         b.Entity<PromoCode>().HasIndex(x => x.Code).IsUnique();
         b.Entity<PromoCode>().Property(x => x.Code).HasMaxLength(40);
         b.Entity<PromoCode>().Property(x => x.Percent).HasPrecision(5, 2);

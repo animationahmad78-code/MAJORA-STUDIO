@@ -29,7 +29,8 @@ try {
   if (-not $ready) { throw "Published app did not start. Log: $log" }
   $page = Invoke-WebRequest $base -TimeoutSec 5
   if ($page.StatusCode -ne 200 -or $page.Content -notmatch '<html') { throw 'Published web UI was not served.' }
-  Write-Output 'PASS: published executable served health endpoint and React entry page.'
+  if ($page.Headers['Cache-Control'] -notmatch 'no-cache') { throw 'Entry page may remain stale after a release.' }
+  Write-Output 'PASS: published executable served health endpoint and update-aware React entry page.'
 } finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
 }

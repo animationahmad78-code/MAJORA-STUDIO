@@ -73,7 +73,16 @@ if (!app.Environment.IsDevelopment() && builder.Configuration["MAJORA_TRUSTED_PR
     });
 }
 if (!app.Environment.IsDevelopment()) { app.UseHsts(); app.UseHttpsRedirection(); }
-app.UseDefaultFiles(); app.UseStaticFiles();
+app.UseDefaultFiles();
+app.UseStaticFiles(new StaticFileOptions { OnPrepareResponse = context =>
+{
+    // A release changes index.html to point at new fingerprinted assets.
+    // Revalidate the entry page on every visit while keeping hashed assets cacheable.
+    if (context.File.Name.Equals("index.html", StringComparison.OrdinalIgnoreCase))
+        context.Context.Response.Headers.CacheControl = "no-cache, must-revalidate";
+    else if (context.Context.Request.Path.StartsWithSegments("/assets"))
+        context.Context.Response.Headers.CacheControl = "public, max-age=31536000, immutable";
+} });
 app.Use(async (ctx, next) =>
 {
     if (!ctx.Request.Path.StartsWithSegments("/api")) { await next(); return; }
@@ -217,6 +226,14 @@ using (var scope = app.Services.CreateScope())
             using var sessionIndex = connection.CreateCommand();
             sessionIndex.CommandText = "CREATE INDEX IF NOT EXISTS IX_AppSessions_UserId_ExpiresAt ON AppSessions (UserId, ExpiresAt); CREATE INDEX IF NOT EXISTS IX_AppSessions_TenantId_ExpiresAt ON AppSessions (TenantId, ExpiresAt)";
             await sessionIndex.ExecuteNonQueryAsync();
+            using var marketingSlides = connection.CreateCommand();
+            marketingSlides.CommandText = "CREATE TABLE IF NOT EXISTS MarketingSlides (Slot INTEGER NOT NULL PRIMARY KEY, AltText TEXT NOT NULL, TargetUrl TEXT NOT NULL, LinkEnabled INTEGER NOT NULL, Enabled INTEGER NOT NULL, ImageContentType TEXT NOT NULL, ImageBytes BLOB NOT NULL, UpdatedAt TEXT NOT NULL)";
+            await marketingSlides.ExecuteNonQueryAsync();
+            foreach (var sql in new[] {
+                "CREATE TABLE IF NOT EXISTS Announcements (Id TEXT NOT NULL PRIMARY KEY, Title TEXT NOT NULL, Body TEXT NOT NULL, Alignment TEXT NOT NULL, FontSize INTEGER NOT NULL, FontId INTEGER NULL, ImageContentType TEXT NULL, ImageBytes BLOB NULL, CreatedAt TEXT NOT NULL, UpdatedAt TEXT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS AnnouncementReads (AnnouncementId TEXT NOT NULL, UserId TEXT NOT NULL, ReadAt TEXT NOT NULL, PRIMARY KEY (AnnouncementId, UserId))",
+                "CREATE TABLE IF NOT EXISTS AnnouncementFonts (Id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, Name TEXT NOT NULL, Bytes BLOB NOT NULL, CreatedAt TEXT NOT NULL)" })
+            { using var add = connection.CreateCommand(); add.CommandText = sql; await add.ExecuteNonQueryAsync(); }
             await SqliteLocalSchema.EnsureRequestHashesAsync(connection);
         }
         finally { if (openedHere) await connection.CloseAsync(); }
@@ -246,6 +263,15 @@ static IResult Fail(string message, int status = 400) => Results.Json(new {
     errorCode = status == 409 ? "conflict" : status == 403 ? "access_denied" : status == 401 ? "authentication_required" : "invalid_request",
     error = message
 }, statusCode: status);
+static async Task<string?> AnnouncementError(AnnouncementRequest body, MajoraDb db)
+{
+    if (string.IsNullOrWhiteSpace(body.Title) || body.Title.Trim().Length > 160) return "عنوان اعلان باید بین ۱ تا ۱۶۰ نویسه باشد.";
+    if (string.IsNullOrWhiteSpace(body.Body) || body.Body.Trim().Length > 6000) return "متن اعلان باید بین ۱ تا ۶۰۰۰ نویسه باشد.";
+    if (body.Alignment is not ("right" or "center" or "left") || body.FontSize is < 12 or > 24) return "چینش یا اندازه متن خارج از محدوده مجاز است.";
+    if (body.FontId is int fontId && !await db.AnnouncementFonts.AnyAsync(x => x.Id == fontId)) return "فونت انتخابی وجود ندارد.";
+    if (body.ImageDataUrl is not null && (!ProductPhotos.TryDecode(body.ImageDataUrl, out var type, out _) || type is not ("image/png" or "image/jpeg" or "image/webp"))) return "تصویر اعلان باید PNG، JPEG یا WebP و کمتر از یک مگابایت باشد.";
+    return null;
+}
 static void Audit(MajoraDb db, ClaimsPrincipal p, Guid? tenantId, string action, string entity, Guid id, string detail = "") => db.Audit.Add(new AuditEntry { ActorId = UserId(p), TenantId = tenantId, Action = action, EntityType = entity, EntityId = id.ToString(), Detail = detail });
 static void AuthAudit(MajoraDb db, AppUser? user, string action, string reason, HttpContext c, Guid? sessionId = null) =>
     db.Audit.Add(new AuditEntry { ActorId = user?.Id ?? Guid.Empty, TenantId = user?.TenantId, Action = action,
@@ -443,6 +469,113 @@ app.MapPost("/api/auth/logout-all", async (MajoraDb db, HttpContext c) =>
 });
 
 var admin = app.MapGroup("/api/admin").RequireAuthorization(p => p.AddAuthenticationSchemes("MajoraAdmin").RequireRole("platform_admin"));
+admin.MapGet("/marketing-slides", async (MajoraDb db) =>
+{
+    var slides = await db.MarketingSlides.AsNoTracking().OrderBy(x => x.Slot).ToListAsync();
+    return Results.Ok(slides.Select(x => new { x.Slot, x.AltText, x.TargetUrl, x.LinkEnabled, x.Enabled, x.UpdatedAt,
+        imageUrl = $"/api/admin/marketing-slides/{x.Slot}/image?v={x.UpdatedAt.Ticks}" }));
+});
+admin.MapGet("/marketing-slides/{slot:int}/image", async (int slot, MajoraDb db, HttpContext c) =>
+{
+    var slide = await db.MarketingSlides.AsNoTracking().SingleOrDefaultAsync(x => x.Slot == slot);
+    if (slide is null) return Results.NotFound();
+    c.Response.Headers.XContentTypeOptions = "nosniff";
+    c.Response.Headers.CacheControl = "private, no-store";
+    return Results.File(slide.ImageBytes, slide.ImageContentType);
+});
+admin.MapPut("/marketing-slides/{slot:int}", async (int slot, MarketingSlideRequest body, MajoraDb db, HttpContext c) =>
+{
+    if (slot is < 1 or > 5) return Fail("جایگاه بنر باید بین ۱ تا ۵ باشد.");
+    var alt = body.AltText?.Trim() ?? "";
+    var target = body.TargetUrl?.Trim() ?? "";
+    if (alt.Length is < 4 or > 160) return Fail("توضیح خوانای تصویر باید بین ۴ تا ۱۶۰ نویسه باشد.");
+    if (target.Length > 500 || target.Length > 0 && !MarketingImages.ValidTarget(target) || body.LinkEnabled && target.Length == 0)
+        return Fail("لینک باید HTTPS یا مسیر داخلی معتبر باشد؛ برای بنر قابل کلیک، لینک لازم است.");
+    var slide = await db.MarketingSlides.SingleOrDefaultAsync(x => x.Slot == slot);
+    if (slide is null && body.ImageDataUrl is null) return Fail("برای بنر تازه، تصویر افقی ۱۶:۹ لازم است.");
+    if (body.ImageDataUrl is not null && !MarketingImages.TryDecodeLandscape(body.ImageDataUrl, out _, out _))
+        return Fail("تصویر بنر باید PNG یا JPEG افقی ۱۶:۹، بین ۶۴۰×۳۶۰ و ۳۸۴۰×۲۱۶۰، و کمتر از یک مگابایت باشد.");
+    if (slide is null) { slide = new MarketingSlide { Slot = slot }; db.MarketingSlides.Add(slide); }
+    if (body.ImageDataUrl is not null && MarketingImages.TryDecodeLandscape(body.ImageDataUrl, out var type, out var bytes))
+    { slide.ImageContentType = type; slide.ImageBytes = bytes; }
+    slide.AltText = alt; slide.TargetUrl = target; slide.LinkEnabled = body.LinkEnabled;
+    slide.Enabled = body.Enabled; slide.UpdatedAt = DateTime.UtcNow;
+    Audit(db, c.User, null, "marketing-slide.save", "marketing-slide", Guid.Empty, $"slot={slot};enabled={body.Enabled};linkEnabled={body.LinkEnabled}");
+    await db.SaveChangesAsync();
+    return Results.Ok(new { slide.Slot, slide.Enabled, slide.UpdatedAt });
+});
+admin.MapDelete("/marketing-slides/{slot:int}", async (int slot, MajoraDb db, HttpContext c) =>
+{
+    if (slot is < 1 or > 5) return Fail("جایگاه بنر نامعتبر است.");
+    var slide = await db.MarketingSlides.SingleOrDefaultAsync(x => x.Slot == slot);
+    if (slide is null) return Results.NotFound();
+    db.MarketingSlides.Remove(slide);
+    Audit(db, c.User, null, "marketing-slide.delete", "marketing-slide", Guid.Empty, $"slot={slot}");
+    await db.SaveChangesAsync(); return Results.NoContent();
+});
+admin.MapGet("/announcements", async (MajoraDb db) => Results.Ok(await db.Announcements.AsNoTracking().OrderByDescending(x => x.CreatedAt)
+    .Select(x => new { x.Id, x.Title, x.Body, x.Alignment, x.FontSize, x.FontId, hasImage = x.ImageBytes != null, x.CreatedAt, x.UpdatedAt }).ToListAsync()));
+admin.MapPost("/announcements", async (AnnouncementRequest body, MajoraDb db, HttpContext c) =>
+{
+    var error = await AnnouncementError(body, db); if (error is not null) return Fail(error);
+    var item = new Announcement { Title = body.Title.Trim(), Body = body.Body.Trim(), Alignment = body.Alignment, FontSize = body.FontSize, FontId = body.FontId };
+    if (body.ImageDataUrl is not null) { ProductPhotos.TryDecode(body.ImageDataUrl, out var type, out var bytes); item.ImageContentType = type; item.ImageBytes = bytes; }
+    await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+    db.Announcements.Add(item); await db.SaveChangesAsync();
+    var excess = await db.Announcements.OrderByDescending(x => x.CreatedAt).ThenByDescending(x => x.Id).Skip(50).Select(x => x.Id).ToListAsync();
+    if (excess.Count > 0) { await db.AnnouncementReads.Where(x => excess.Contains(x.AnnouncementId)).ExecuteDeleteAsync(); await db.Announcements.Where(x => excess.Contains(x.Id)).ExecuteDeleteAsync(); }
+    Audit(db, c.User, null, "announcement.create", "announcement", item.Id);
+    await db.SaveChangesAsync(); await tx.CommitAsync(); return Results.Created($"/api/admin/announcements/{item.Id}", new { item.Id });
+});
+admin.MapPut("/announcements/{id:guid}", async (Guid id, AnnouncementRequest body, MajoraDb db, HttpContext c) =>
+{
+    var error = await AnnouncementError(body, db); if (error is not null) return Fail(error);
+    var item = await db.Announcements.SingleOrDefaultAsync(x => x.Id == id); if (item is null) return Results.NotFound();
+    item.Title = body.Title.Trim(); item.Body = body.Body.Trim(); item.Alignment = body.Alignment; item.FontSize = body.FontSize; item.FontId = body.FontId;
+    if (body.RemoveImage) { item.ImageBytes = null; item.ImageContentType = null; }
+    else if (body.ImageDataUrl is not null) { ProductPhotos.TryDecode(body.ImageDataUrl, out var type, out var bytes); item.ImageContentType = type; item.ImageBytes = bytes; }
+    item.UpdatedAt = DateTime.UtcNow;
+    Audit(db, c.User, null, "announcement.update", "announcement", item.Id);
+    await db.SaveChangesAsync(); return Results.Ok(new { item.Id });
+});
+admin.MapDelete("/announcements/{id:guid}", async (Guid id, MajoraDb db, HttpContext c) =>
+{
+    var item = await db.Announcements.SingleOrDefaultAsync(x => x.Id == id); if (item is null) return Results.NotFound();
+    await using var tx = await db.Database.BeginTransactionAsync();
+    await db.AnnouncementReads.Where(x => x.AnnouncementId == id).ExecuteDeleteAsync(); db.Announcements.Remove(item);
+    Audit(db, c.User, null, "announcement.delete", "announcement", id);
+    await db.SaveChangesAsync(); await tx.CommitAsync(); return Results.NoContent();
+});
+admin.MapGet("/announcements/{id:guid}/image", async (Guid id, MajoraDb db, HttpContext c) =>
+{
+    var item = await db.Announcements.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id);
+    if (item?.ImageBytes is null || item.ImageContentType is null) return Results.NotFound();
+    c.Response.Headers.XContentTypeOptions = "nosniff"; c.Response.Headers.CacheControl = "private, no-store";
+    return Results.File(item.ImageBytes, item.ImageContentType);
+});
+admin.MapGet("/announcement-fonts", async (MajoraDb db) => Results.Ok(await db.AnnouncementFonts.AsNoTracking().OrderBy(x => x.Name).Select(x => new { x.Id, x.Name }).ToListAsync()));
+admin.MapPost("/announcement-fonts", async (AnnouncementFontRequest body, MajoraDb db, HttpContext c) =>
+{
+    var name = body.Name?.Trim() ?? "";
+    if (name.Length is < 2 or > 80 || !AnnouncementAssets.TryFont(body.DataUrl, out var bytes)) return Fail("نام فونت یا فایل WOFF2 معتبر نیست؛ حداکثر حجم ۵۰۰ کیلوبایت است.");
+    if (await db.AnnouncementFonts.CountAsync() >= 10) return Fail("حداکثر ۱۰ فونت در مخزن مجاز است.");
+    var font = new AnnouncementFont { Name = name, Bytes = bytes }; db.AnnouncementFonts.Add(font);
+    Audit(db, c.User, null, "announcement-font.create", "announcement-font", Guid.Empty, name);
+    await db.SaveChangesAsync(); return Results.Created($"/api/admin/announcement-fonts/{font.Id}", new { font.Id, font.Name });
+});
+admin.MapDelete("/announcement-fonts/{id:int}", async (int id, MajoraDb db, HttpContext c) =>
+{
+    var font = await db.AnnouncementFonts.SingleOrDefaultAsync(x => x.Id == id); if (font is null) return Results.NotFound();
+    if (await db.Announcements.AnyAsync(x => x.FontId == id)) return Fail("این فونت در یک اعلان استفاده شده است. ابتدا فونت اعلان را تغییر دهید.");
+    db.AnnouncementFonts.Remove(font); Audit(db, c.User, null, "announcement-font.delete", "announcement-font", Guid.Empty, font.Name);
+    await db.SaveChangesAsync(); return Results.NoContent();
+});
+admin.MapGet("/announcement-fonts/{id:int}/file", async (int id, MajoraDb db, HttpContext c) =>
+{
+    var font = await db.AnnouncementFonts.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id); if (font is null) return Results.NotFound();
+    c.Response.Headers.XContentTypeOptions = "nosniff"; c.Response.Headers.CacheControl = "private, no-store";
+    return Results.File(font.Bytes, "font/woff2");
+});
 admin.MapGet("/tenants/{id:guid}/sessions", async (Guid id, MajoraDb db) =>
 {
     if (!await db.Tenants.AnyAsync(x => x.Id == id)) return Results.NotFound();
@@ -918,7 +1051,9 @@ merchant.AddEndpointFilter(async (invocation, next) =>
         c.Request.Path.StartsWithSegments("/api/merchant/plans") ||
         c.Request.Path.StartsWithSegments("/api/merchant/billing") ||
         c.Request.Path.StartsWithSegments("/api/merchant/features") ||
-        c.Request.Path.StartsWithSegments("/api/merchant/workspace");
+        c.Request.Path.StartsWithSegments("/api/merchant/workspace") ||
+        c.Request.Path.StartsWithSegments("/api/merchant/announcements") ||
+        c.Request.Path.StartsWithSegments("/api/merchant/announcement-fonts");
     if (!await db.Tenants.AnyAsync(x => x.Id == tenantId && x.Enabled))
         return Fail("دسترسی این فروشگاه توسط ماژورا متوقف شده است.", 403);
     if (!await Active(db, TenantId(c.User)) && !subscriptionSelfService) return Fail("اشتراک فعال نیست؛ ابتدا اشتراک را تمدید کنید.", 403);
@@ -1072,6 +1207,54 @@ merchant.MapPost("/subscription/orders", async (SubscriptionOrderRequest body, M
     return Results.Created($"/api/merchant/subscription/orders/{order.Id}", new { order.Id, order.Status, order.TotalRial });
 });
 merchant.MapGet("/workspace", async (MajoraDb db, HttpContext c) => { var tid = TenantId(c.User); var tenant = await db.Tenants.SingleAsync(t => t.Id == tid); var profile = await db.InvoiceBrands.AsNoTracking().SingleOrDefaultAsync(x => x.TenantId == tid); return Results.Ok(new { tenant.Name, tenant.Slug, LogoUrl = profile?.LogoDataUrl ?? tenant.LogoUrl, tenant.BrandColor }); });
+merchant.MapGet("/marketing-slides", async (MajoraDb db) =>
+{
+    var slides = await db.MarketingSlides.AsNoTracking().Where(x => x.Enabled).OrderBy(x => x.Slot).ToListAsync();
+    return Results.Ok(slides.Select(x => new { x.Slot, x.AltText, x.TargetUrl, x.LinkEnabled,
+        imageUrl = $"/api/merchant/marketing-slides/{x.Slot}/image?v={x.UpdatedAt.Ticks}" }));
+});
+merchant.MapGet("/marketing-slides/{slot:int}/image", async (int slot, MajoraDb db, HttpContext c) =>
+{
+    var slide = await db.MarketingSlides.AsNoTracking().SingleOrDefaultAsync(x => x.Slot == slot && x.Enabled);
+    if (slide is null) return Results.NotFound();
+    c.Response.Headers.XContentTypeOptions = "nosniff";
+    c.Response.Headers.CacheControl = "private, no-store";
+    return Results.File(slide.ImageBytes, slide.ImageContentType);
+});
+merchant.MapGet("/announcements", async (MajoraDb db, HttpContext c) =>
+{
+    var userId = Guid.Parse(c.User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    var items = await db.Announcements.AsNoTracking().OrderByDescending(x => x.CreatedAt)
+        .Select(x => new { x.Id, x.Title, x.Body, x.Alignment, x.FontSize, x.FontId, hasImage = x.ImageBytes != null, x.CreatedAt, x.UpdatedAt }).Take(50).ToListAsync();
+    var ids = items.Select(x => x.Id).ToList();
+    var reads = await db.AnnouncementReads.AsNoTracking().Where(x => x.UserId == userId && ids.Contains(x.AnnouncementId))
+        .ToDictionaryAsync(x => x.AnnouncementId, x => x.ReadAt);
+    return Results.Ok(items.Select(x => new { x.Id, x.Title, x.Body, x.Alignment, x.FontSize, x.FontId, x.hasImage, x.CreatedAt, x.UpdatedAt,
+        isUnread = !reads.TryGetValue(x.Id, out var seenAt) || seenAt < x.UpdatedAt }).ToList());
+});
+merchant.MapPost("/announcements/{id:guid}/read", async (Guid id, MajoraDb db, HttpContext c) =>
+{
+    var item = await db.Announcements.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id); if (item is null) return Results.NotFound();
+    var userId = Guid.Parse(c.User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    var read = await db.AnnouncementReads.SingleOrDefaultAsync(x => x.AnnouncementId == id && x.UserId == userId);
+    if (read is null) db.AnnouncementReads.Add(new AnnouncementRead { AnnouncementId = id, UserId = userId, ReadAt = DateTime.UtcNow });
+    else read.ReadAt = DateTime.UtcNow;
+    await db.SaveChangesAsync(); return Results.NoContent();
+});
+merchant.MapGet("/announcements/{id:guid}/image", async (Guid id, MajoraDb db, HttpContext c) =>
+{
+    var item = await db.Announcements.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id);
+    if (item?.ImageBytes is null || item.ImageContentType is null) return Results.NotFound();
+    c.Response.Headers.XContentTypeOptions = "nosniff"; c.Response.Headers.CacheControl = "private, no-store";
+    return Results.File(item.ImageBytes, item.ImageContentType);
+});
+merchant.MapGet("/announcement-fonts/{id:int}/file", async (int id, MajoraDb db, HttpContext c) =>
+{
+    if (!await db.Announcements.AnyAsync(x => x.FontId == id)) return Results.NotFound();
+    var font = await db.AnnouncementFonts.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id); if (font is null) return Results.NotFound();
+    c.Response.Headers.XContentTypeOptions = "nosniff"; c.Response.Headers.CacheControl = "private, no-store";
+    return Results.File(font.Bytes, "font/woff2");
+});
 merchant.MapGet("/search", async (string? q, MajoraDb db, HttpContext c) =>
 {
     var term = q?.Trim();
@@ -2323,6 +2506,9 @@ public sealed record LoginRequest(string Username, string Password);
 public sealed record PlanRequest(string Name, long MonthlyRial, int MaxUsers, bool Enabled = true, string? Description = null, List<string>? Features = null, int MaxDevices = 6, int MaxPrepayMonths = 6, Dictionary<int, decimal>? PrepayDiscounts = null);
 public sealed record PromoCodeRequest(string Code, decimal Percent, DateTime StartsAt, DateTime ExpiresAt, bool Enabled = true);
 public sealed record BillingRequest(string CardNumber, string CardHolder);
+public sealed record MarketingSlideRequest(string? AltText, string? TargetUrl, bool LinkEnabled, bool Enabled, string? ImageDataUrl);
+public sealed record AnnouncementRequest(string Title, string Body, string Alignment, int FontSize, int? FontId, string? ImageDataUrl, bool RemoveImage = false);
+public sealed record AnnouncementFontRequest(string Name, string DataUrl);
 public sealed record SubscriptionOrderRequest(Guid PlanId, string IdempotencyKey, string? PromoCode, string? ReceiptDataUrl, long ExpectedTotalRial, int Months = 1);
 public sealed record SubscriptionDecision(string Decision);
 public sealed record UsernameUpdate(string Username);

@@ -174,6 +174,45 @@ try {
   $adminOverview = Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession
   if ($adminOverview.tenants -ne 20 -or $adminOverview.activeSubscriptions -ne 3 -or $adminOverview.renewalsDue -ne 1) { throw 'Admin overview active tenant or renewal notice count disagrees with subscription data' }
   $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $ownerSession $true
+  $badSlide = Invoke-WebRequest "$base/api/admin/marketing-slides/1" -Method Put -WebSession $adminSession -Headers @{'X-CSRF'=$adminSession.Cookies.GetCookies([uri]$base)['majora.admin.csrf'].Value} -ContentType 'application/json' -Body (@{altText='بنر آزمون';targetUrl='javascript:alert(1)';linkEnabled=$true;enabled=$true;imageDataUrl=$null}|ConvertTo-Json -Compress) -SkipHttpErrorCheck
+  if ($badSlide.StatusCode -ne 400) { throw 'Unsafe marketing slide target was accepted' }
+  Add-Type -AssemblyName System.Drawing
+  $bitmap = [System.Drawing.Bitmap]::new(640,360)
+  $stream = [System.IO.MemoryStream]::new()
+  try { $bitmap.Save($stream,[System.Drawing.Imaging.ImageFormat]::Png); $slideImage='data:image/png;base64,'+[Convert]::ToBase64String($stream.ToArray()) }
+  finally { $bitmap.Dispose(); $stream.Dispose() }
+  $slide = PutJson '/admin/marketing-slides/1' @{altText='بنر معرفی ماژورا';targetUrl='/#/why-majora';linkEnabled=$true;enabled=$true;imageDataUrl=$slideImage} $adminSession
+  if ($slide.slot -ne 1) { throw 'Marketing slide did not save' }
+  $shopSlides = Invoke-RestMethod "$base/api/merchant/marketing-slides" -WebSession $ownerSession
+  if (@($shopSlides).Count -ne 1 -or $shopSlides[0].altText -ne 'بنر معرفی ماژورا') { throw 'Published slide was not visible to merchant' }
+  $slideImageResponse = Invoke-WebRequest "$base$($shopSlides[0].imageUrl)" -WebSession $ownerSession
+  if ($slideImageResponse.StatusCode -ne 200 -or $slideImageResponse.Headers['Content-Type'] -notlike 'image/png*') { throw 'Marketing slide image was unavailable' }
+  $null = PutJson '/admin/marketing-slides/1' @{altText='بنر معرفی ماژورا';targetUrl='';linkEnabled=$false;enabled=$false;imageDataUrl=$null} $adminSession
+  $hiddenSlides = Invoke-WebRequest "$base/api/merchant/marketing-slides" -WebSession $ownerSession
+  if ($hiddenSlides.Content.Trim() -ne '[]') { throw "Disabled slide remained visible: $($hiddenSlides.Content)" }
+  $news = PostJson '/admin/announcements' @{title='خبر آزمون';body='نسخه **تازه** [راهنما](https://majoraapp.ir)';alignment='right';fontSize=16;fontId=$null;imageDataUrl=$null} $adminSession
+  $newsList = Invoke-RestMethod "$base/api/merchant/announcements" -WebSession $ownerSession
+  if (@($newsList).Count -ne 1 -or !$newsList[0].isUnread) { throw 'New announcement was not unread for merchant' }
+  $null = PostJson "/merchant/announcements/$($news.id)/read" @{} $ownerSession
+  $newsList = Invoke-RestMethod "$base/api/merchant/announcements" -WebSession $ownerSession
+  if ($newsList[0].isUnread) { throw 'Opening announcement did not mark it read' }
+  $null = PutJson "/admin/announcements/$($news.id)" @{title='خبر ویرایش‌شده';body='متن جدید';alignment='center';fontSize=18;fontId=$null;imageDataUrl=$slideImage} $adminSession
+  $newsList = Invoke-RestMethod "$base/api/merchant/announcements" -WebSession $ownerSession
+  if (!$newsList[0].isUnread -or !$newsList[0].hasImage -or $newsList[0].title -ne 'خبر ویرایش‌شده') { throw 'Editing announcement was not propagated or did not reset unread state' }
+  $newsImage = Invoke-WebRequest "$base/api/merchant/announcements/$($news.id)/image" -WebSession $ownerSession
+  if ($newsImage.StatusCode -ne 200 -or $newsImage.Headers['Content-Type'] -notlike 'image/png*') { throw 'Announcement attachment was unavailable' }
+  $deleteNews = Invoke-WebRequest "$base/api/admin/announcements/$($news.id)" -Method Delete -WebSession $adminSession -Headers @{'X-CSRF'=$adminSession.Cookies.GetCookies([uri]$base)['majora.admin.csrf'].Value} -SkipHttpErrorCheck
+  $deletedNewsList = Invoke-WebRequest "$base/api/merchant/announcements" -WebSession $ownerSession
+  if ($deleteNews.StatusCode -ne 204 -or $deletedNewsList.Content.Trim() -ne '[]') { throw 'Deleted announcement remained visible' }
+  $merchantWriteNews = Invoke-WebRequest "$base/api/admin/announcements" -Method Post -WebSession $ownerSession -Headers @{'X-CSRF'=$ownerSession.Cookies.GetCookies([uri]$base)['majora.csrf'].Value} -ContentType 'application/json' -Body '{}' -SkipHttpErrorCheck
+  if ($merchantWriteNews.StatusCode -notin 401,403) { throw 'Merchant could write platform announcements' }
+  $oldestNews = $null
+  for ($newsIndex = 1; $newsIndex -le 51; $newsIndex++) {
+    $createdNews = PostJson '/admin/announcements' @{title="خبر $newsIndex";body="متن پیام $newsIndex";alignment='right';fontSize=16;fontId=$null;imageDataUrl=$null} $adminSession
+    if ($newsIndex -eq 1) { $oldestNews = $createdNews.id }
+  }
+  $cappedNews = Invoke-RestMethod "$base/api/merchant/announcements" -WebSession $ownerSession
+  if (@($cappedNews).Count -ne 50 -or @($cappedNews | Where-Object id -eq $oldestNews).Count -ne 0) { throw 'Announcement retention did not cap at 50 newest messages' }
   $badOwnerPasswordBlocked = $false
   try { $null = PostJson '/auth/login' @{username="owner_$id";password='wrong-password'} ([Microsoft.PowerShell.Commands.WebRequestSession]::new()) $true } catch { $badOwnerPasswordBlocked = $_.Exception.Response.StatusCode -eq 401 }
   if (-not $badOwnerPasswordBlocked) { throw 'Incorrect password did not return generic unauthorized response' }
@@ -930,7 +969,7 @@ try {
   $null = PostJson '/auth/login' @{username="owner_$id";password=$ownerPass} $blockedBrowser $true
   $null = Invoke-RestMethod "$base/api/merchant/products" -WebSession $blockedBrowser
   $null = Invoke-RestMethod "$base/api/admin/overview" -WebSession $adminSession
-  Write-Output 'PASS: 20 tenants; subscriptions/orders; archive; invoice order; tenant isolation; device cap and session revocation; logout-all; finance, brand and CSRF scenarios'
+  Write-Output 'PASS: 20 tenants; subscriptions/orders; archive; invoice order; tenant isolation; device cap and session revocation; logout-all; finance, brand, CSRF; marketing slides and announcements'
 } finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
   Write-Output "Test log: $log"

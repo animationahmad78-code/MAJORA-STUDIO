@@ -17,6 +17,10 @@ public static class MerchantRoles
         if (role == "owner") return true;
         var p = path.StartsWith("/api/merchant", StringComparison.OrdinalIgnoreCase) ? path[13..] : path;
         var read = method.Equals("GET", StringComparison.OrdinalIgnoreCase);
+        if (p.Equals("/announcements", StringComparison.OrdinalIgnoreCase) || p.StartsWith("/announcements/", StringComparison.OrdinalIgnoreCase) ||
+            p.StartsWith("/announcement-fonts/", StringComparison.OrdinalIgnoreCase))
+            return read || p.EndsWith("/read", StringComparison.OrdinalIgnoreCase) && method == "POST";
+        if (p.StartsWith("/marketing-slides", StringComparison.OrdinalIgnoreCase)) return read;
         if (p is "/features" or "/workspace" or "/sessions") return read;
         if (p.StartsWith("/sessions/", StringComparison.OrdinalIgnoreCase)) return method == "POST" && p.EndsWith("/revoke", StringComparison.OrdinalIgnoreCase);
         if (role == "manager") return true; // Staff and activity mutations still require owner inside their endpoint.
