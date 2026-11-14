@@ -36,7 +36,7 @@ try {
   $sourceCommit = (& git -C $root rev-parse HEAD).Trim()
   $sourceDirty = @(& git -C $root status --porcelain).Count -gt 0
   $latestMigration = Get-ChildItem (Join-Path $core 'apps/web-api/Migrations') -Filter '*.cs' |
-    Where-Object { $_.Name -match '^\d{14}_.+\.cs$' } | Sort-Object Name | Select-Object -Last 1 -ExpandProperty BaseName
+    Where-Object { $_.Name -match '^\d{14}_.+\.cs$' -and $_.Name -notmatch '\.Designer\.cs$' } | Sort-Object Name | Select-Object -Last 1 -ExpandProperty BaseName
   $manifest = [ordered]@{
     format = 1
     builtAtUtc = [DateTime]::UtcNow.ToString('o')
@@ -52,6 +52,7 @@ try {
   $kitFolder = Join-Path $release "MAJORA-web-update-kit-$stamp"
   New-Item -ItemType Directory -Path $kitFolder | Out-Null
   Copy-Item -LiteralPath $manifestPath -Destination $kitFolder
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'build-web-release.ps1') -Destination $kitFolder
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'stage-web-update.ps1') -Destination $kitFolder
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'web-update-assistant.ps1') -Destination $kitFolder
   Copy-Item -LiteralPath (Join-Path $root '05-DOCUMENTATION/web-deployment.md') -Destination $kitFolder
