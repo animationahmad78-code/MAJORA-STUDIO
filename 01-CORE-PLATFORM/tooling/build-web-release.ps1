@@ -59,6 +59,13 @@ try {
   $kitZip = "$kitFolder.zip"
   Compress-Archive -Path (Join-Path $kitFolder '*') -DestinationPath $kitZip -CompressionLevel Optimal
   Write-Output "$kitZip | SHA-256 $((Get-FileHash -Algorithm SHA256 -LiteralPath $kitZip).Hash)"
+  $deliveryFolder = Join-Path $release "MAJORA-web-delivery-$stamp"
+  New-Item -ItemType Directory -Path $deliveryFolder | Out-Null
+  foreach ($file in @($packages.file) + @((Split-Path $sql -Leaf), (Split-Path $manifestPath -Leaf), (Split-Path $kitZip -Leaf)))
+  { Copy-Item -LiteralPath (Join-Path $release $file) -Destination $deliveryFolder }
+  $deliveryZip = "$deliveryFolder.zip"
+  Compress-Archive -Path (Join-Path $deliveryFolder '*') -DestinationPath $deliveryZip -CompressionLevel Optimal
+  Write-Output "$deliveryZip | SHA-256 $((Get-FileHash -Algorithm SHA256 -LiteralPath $deliveryZip).Hash)"
 } finally {
   Pop-Location
 }
