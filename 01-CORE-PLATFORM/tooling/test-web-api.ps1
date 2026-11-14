@@ -831,6 +831,13 @@ try {
   if ($orderApproved.status -ne 'paid') { throw 'Subscription order was not approved' }
   $merchantSubscriptions = Invoke-RestMethod "$base/api/merchant/subscription" -WebSession $ownerSession
   if (@($merchantSubscriptions | Where-Object id -eq $orderApproved.subscriptionId).Count -ne 1) { throw 'Approved order did not create visible subscription' }
+  $prepaidNotice = Invoke-RestMethod "$base/api/merchant/subscription/notice" -WebSession $ownerSession
+  $prepaidPeriod = @($merchantSubscriptions | Where-Object id -eq $orderApproved.subscriptionId)[0]
+  if ($prepaidNotice.status -ne 'paid' -or $prepaidNotice.renewalDue -or
+      $prepaidNotice.daysRemaining -le 30 -or
+      [Math]::Abs((([datetime]$prepaidNotice.endsAt) - ([datetime]$prepaidPeriod.endsAt)).TotalSeconds) -gt 1) {
+    throw 'Future approved renewal obscured the current subscription or shortened the paid countdown'
+  }
   $expiredQuote = Invoke-RestMethod "$base/api/merchant/subscription/quote?planId=$($plan.id)&months=3&code=$($promo.code)" -WebSession $expiredSession
   $expiredOrder = PostJson '/merchant/subscription/orders' @{planId=$plan.id;months=3;idempotencyKey="expired-renewal-$id";promoCode=$promo.code;receiptDataUrl=$png;expectedTotalRial=$expiredQuote.totalRial} $expiredSession
   if ((Invoke-RestMethod "$base/api/auth/me?panel=merchant" -WebSession $expiredSession).accessActive -ne $false) { throw 'Pending renewal unlocked expired shop before approval' }

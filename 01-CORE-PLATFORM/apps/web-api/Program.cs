@@ -979,14 +979,22 @@ merchant.MapGet("/subscription", async (MajoraDb db, HttpContext c) =>
 merchant.MapGet("/subscription/notice", async (MajoraDb db, HttpContext c) =>
 {
     var now = DateTime.UtcNow; var tid = TenantId(c.User);
-    var latest = await db.Subscriptions.AsNoTracking().Where(x => x.TenantId == tid &&
+    var periods = await db.Subscriptions.AsNoTracking().Where(x => x.TenantId == tid &&
         (x.PaymentStatus == "paid" || x.PaymentStatus == "trial"))
-        .OrderByDescending(x => x.EndsAt).Select(x => new { x.EndsAt, x.StartsAt, x.PaymentStatus }).FirstOrDefaultAsync();
-    if (latest is null) return Results.Ok(new { status = "draft", daysRemaining = 0, endsAt = (DateTime?)null, renewalDue = false });
-    var active = latest.StartsAt <= now && latest.EndsAt > now;
-    var days = active ? Math.Max(0, (int)Math.Ceiling((latest.EndsAt - now).TotalDays)) : 0;
-    return Results.Ok(new { status = active ? latest.PaymentStatus : latest.EndsAt <= now ? "expired" : "scheduled",
-        daysRemaining = days, endsAt = (DateTime?)latest.EndsAt, renewalDue = active && latest.EndsAt <= now.AddDays(3) });
+        .OrderBy(x => x.StartsAt).Select(x => new { x.StartsAt, x.EndsAt, x.PaymentStatus }).ToListAsync();
+    var current = periods.Where(x => x.StartsAt <= now && x.EndsAt > now).OrderByDescending(x => x.EndsAt).FirstOrDefault();
+    if (current is null)
+    {
+        var latest = periods.OrderByDescending(x => x.EndsAt).FirstOrDefault();
+        return Results.Ok(new { status = latest is null ? "draft" : latest.StartsAt > now ? "scheduled" : "expired",
+            daysRemaining = 0, endsAt = (DateTime?)latest?.EndsAt, renewalDue = false });
+    }
+    var entitlementEnd = current.EndsAt;
+    foreach (var period in periods.Where(x => x.StartsAt > now && x.EndsAt > entitlementEnd))
+        if (period.StartsAt <= entitlementEnd) entitlementEnd = period.EndsAt;
+    return Results.Ok(new { status = current.PaymentStatus,
+        daysRemaining = Math.Max(0, (int)Math.Ceiling((entitlementEnd - now).TotalDays)),
+        endsAt = (DateTime?)entitlementEnd, renewalDue = entitlementEnd <= now.AddDays(3) });
 });
 merchant.MapGet("/plans", async (MajoraDb db) => Results.Ok(await db.Plans.AsNoTracking()
     .Where(x => x.Enabled).OrderBy(x => x.MonthlyRial).ToListAsync()));

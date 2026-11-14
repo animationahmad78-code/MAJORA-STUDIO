@@ -28,7 +28,15 @@ export function MerchantSubscription() {
   useEffect(() => { void load().catch(e => setError(e.message)); }, []);
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 60000); return () => window.clearInterval(timer); }, []);
   const current = history.find(item => item.effectiveStatus === 'active' || item.effectiveStatus === 'trial');
-  const daysLeft = current ? Math.max(0, Math.ceil((Date.parse(current.endsAt) - now) / 86_400_000)) : 0;
+  let accessEnd = current ? Date.parse(current.endsAt) : 0;
+  if (current) {
+    for (const period of [...history].sort((a, b) => Date.parse(a.startsAt) - Date.parse(b.startsAt))) {
+      if ((period.paymentStatus === 'paid' || period.paymentStatus === 'trial') &&
+          Date.parse(period.startsAt) <= accessEnd && Date.parse(period.endsAt) > accessEnd)
+        accessEnd = Date.parse(period.endsAt);
+    }
+  }
+  const daysLeft = current ? Math.max(0, Math.ceil((accessEnd - now) / 86_400_000)) : 0;
   const price = async () => {
     if (!selected) return;
     const request = ++quoteRequest.current;
@@ -55,7 +63,7 @@ export function MerchantSubscription() {
   };
   return <div className="billing-page"><div className="page-intro"><h2>اشتراک من</h2><p>طرح مناسب را ببینید و درخواست پرداخت کارت‌به‌کارت را برای تأیید ارسال کنید.</p></div>
     {error && <div className="field-error" role="alert">{error}</div>}{notice && <div className="field-success" role="status">{notice}</div>}
-    <section className="card subscription-countdown" aria-live="polite"><div><small>وضعیت دسترسی</small><h3>{current ? current.effectiveStatus === 'trial' ? 'دموی رایگان شما فعال است' : 'اشتراک شما فعال است' : 'اشتراک فعال ندارید'}</h3><p>{current ? `تا ${dateFa(current.endsAt)} · ${daysLeft} روز باقی‌مانده` : 'برای ادامهٔ کار طرحی را انتخاب و رسید پرداخت را ثبت کنید.'}</p></div><strong>{current ? daysLeft.toLocaleString('fa-IR') : '۰'} <small>روز</small></strong>{current && daysLeft <= 3 && <p className="field-error" role="alert">اعتبار این فروشگاه رو به پایان است؛ درخواست تمدید را پیش از پایان ثبت کنید.</p>}</section>
+    <section className="card subscription-countdown" aria-live="polite"><div><small>وضعیت دسترسی</small><h3>{current ? current.effectiveStatus === 'trial' ? 'دموی رایگان شما فعال است' : 'اشتراک شما فعال است' : 'اشتراک فعال ندارید'}</h3><p>{current ? `دسترسی تا ${dateFa(new Date(accessEnd).toISOString())} · ${daysLeft.toLocaleString('fa-IR')} روز باقی‌مانده` : 'برای ادامهٔ کار طرحی را انتخاب و رسید پرداخت را ثبت کنید.'}</p></div><strong>{current ? daysLeft.toLocaleString('fa-IR') : '۰'} <small>روز</small></strong>{current && daysLeft <= 3 && <p className="field-error" role="alert">اعتبار این فروشگاه رو به پایان است؛ درخواست تمدید را پیش از پایان ثبت کنید.</p>}</section>
     <div className="plan-grid">{plans.map(plan => <section className="card plan-card" key={plan.id}><h3>{plan.name}</h3><strong>{rial(plan.monthlyRial)} <small>/ ماه</small></strong><p>{plan.description}</p><ul>{features(plan).map((feature, i) => <li key={i}>{feature}</li>)}<li>تا {plan.maxUsers} کاربر</li><li>تا {plan.maxDevices} مرورگر فعال هم‌زمان</li></ul><button className="primary" onClick={() => { quoteRequest.current++; setSelected(plan); setMonths(1); setQuote(null); setReceipt(null); setPromo(''); }}>انتخاب این طرح</button></section>)}</div>
     {selected && <section className="card checkout-card"><div className="card-head"><h2>پرداخت طرح {selected.name}</h2><button onClick={() => setSelected(null)}>بستن</button></div>
       <p>قیمت ماهانه: {rial(selected.monthlyRial)} · دوره پس از تأیید به انتهای اعتبار فعلی افزوده می‌شود.</p><label>مدت تمدید<select value={months} onChange={e => { quoteRequest.current++; setMonths(Number(e.target.value)); setQuote(null); }}>{Array.from({ length: selected.maxPrepayMonths }, (_, i) => i + 1).map(count => <option key={count} value={count}>{count.toLocaleString('fa-IR')} ماه{discounts(selected)[String(count)] ? ` · ${discounts(selected)[String(count)]}٪ تخفیف دوره` : ''}</option>)}</select></label>
