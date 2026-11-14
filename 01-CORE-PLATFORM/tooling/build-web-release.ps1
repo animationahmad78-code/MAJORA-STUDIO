@@ -49,6 +49,15 @@ try {
   $manifestPath = Join-Path $release "MAJORA-web-release-$stamp.json"
   $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -Encoding utf8
   Write-Output $manifestPath
+  $kitFolder = Join-Path $release "MAJORA-web-update-kit-$stamp"
+  New-Item -ItemType Directory -Path $kitFolder | Out-Null
+  Copy-Item -LiteralPath $manifestPath -Destination $kitFolder
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'stage-web-update.ps1') -Destination $kitFolder
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'web-update-assistant.ps1') -Destination $kitFolder
+  Copy-Item -LiteralPath (Join-Path $root '05-DOCUMENTATION/web-deployment.md') -Destination $kitFolder
+  $kitZip = "$kitFolder.zip"
+  Compress-Archive -Path (Join-Path $kitFolder '*') -DestinationPath $kitZip -CompressionLevel Optimal
+  Write-Output "$kitZip | SHA-256 $((Get-FileHash -Algorithm SHA256 -LiteralPath $kitZip).Hash)"
 } finally {
   Pop-Location
 }

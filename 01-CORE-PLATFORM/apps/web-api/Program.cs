@@ -73,6 +73,19 @@ if (!app.Environment.IsDevelopment() && builder.Configuration["MAJORA_TRUSTED_PR
     });
 }
 if (!app.Environment.IsDevelopment()) { app.UseHsts(); app.UseHttpsRedirection(); }
+app.Use(async (ctx, next) =>
+{
+    var path = ctx.Request.Path.Value ?? "";
+    if (!ctx.Request.Path.StartsWithSegments("/api") &&
+        (path == "/" || path.EndsWith("/index.html", StringComparison.OrdinalIgnoreCase) || !Path.HasExtension(path)))
+        ctx.Response.OnStarting(() =>
+        {
+            if (ctx.Response.ContentType?.StartsWith("text/html", StringComparison.OrdinalIgnoreCase) == true)
+                ctx.Response.Headers.CacheControl = "no-cache, must-revalidate";
+            return Task.CompletedTask;
+        });
+    await next();
+});
 app.UseDefaultFiles();
 app.UseStaticFiles(new StaticFileOptions { OnPrepareResponse = context =>
 {

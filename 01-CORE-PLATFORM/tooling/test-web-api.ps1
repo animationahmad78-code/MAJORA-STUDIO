@@ -23,6 +23,8 @@ try {
     try { $health = Invoke-RestMethod "$base/api/health" -TimeoutSec 2; if ($health.status -eq 'ok') { $ready=$true; break } } catch { Start-Sleep -Milliseconds 500 }
   }
   if (-not $ready) { throw "API did not start. See $log" }
+  $entry = Invoke-WebRequest $base -TimeoutSec 5
+  if ($entry.StatusCode -ne 200 -or $entry.Headers['Cache-Control'] -notmatch 'no-cache') { throw 'Web entry page does not revalidate after an update' }
   $adminSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
   $ownerSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
   $otherSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
