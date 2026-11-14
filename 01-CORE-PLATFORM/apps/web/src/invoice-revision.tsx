@@ -1,0 +1,105 @@
+import { useEffect, useState } from 'react';
+import { JalaliDateField, isoToJalaliDate, jalaliToIsoDate } from '../../mobile/src/jalali-date';
+import { api, rial, type InvoiceDetail, type Product } from './api';
+import { rialDigits } from './invoice-quote';
+import { RialInput } from './rial-input';
+import { formatBigRial } from './purchase-money';
+import { invoiceRevisionMoney } from './invoice-revision-money';
+import { normalizedIranPhone } from './phone';
+import { InvoicePreview, type InvoiceRecord } from './invoice-preview';
+import './invoice-revision.css';
+
+type EditLine = { key: string; lineId: string | null; productId: string | null; name: string; price: string; quantity: string; discount: string };
+type Revision = { revisionNo: number; reason: string; recordedAt: string; snapshotJson: string };
+
+
+export function InvoiceRevisionEditor({ id, close, saved }: { id: string; close: () => void; saved: () => void }) {
+  const [invoice, setInvoice] = useState<InvoiceDetail | null>(null);
+  const [name, setName] = useState('');
+  const [phone, setPhone] = useState('');
+  const [date, setDate] = useState('');
+  const [reason, setReason] = useState('');
+  const [lines, setLines] = useState<EditLine[]>([]);
+  const [history, setHistory] = useState<Revision[]>([]);
+  const [historicalPreview, setHistoricalPreview] = useState<InvoiceRecord | null>(null);
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [productQuery, setProductQuery] = useState('');
+  const [products, setProducts] = useState<Product[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    void Promise.all([api<InvoiceDetail>(`/merchant/invoices/${id}`), api<Revision[]>(`/merchant/invoices/${id}/revisions`)]).then(([current, revisions]) => {
+      if (![current.totalRial, current.paidRial, current.refundedRial, ...current.lines.flatMap(line => [line.unitPriceRial, line.quantity, line.totalRial])].every(Number.isSafeInteger))
+        setError('مبلغ این فاکتور از محدودهٔ نمایش دقیق مرورگر بیشتر است؛ اصلاح آن در این نسخه مجاز نیست.');
+      setInvoice(current); setHistory(revisions); setName(current.customerName); setPhone(current.customerPhone);
+      setDate(isoToJalaliDate(current.issuedAt));
+      setLines(current.lines.map(line => ({ key: line.id, lineId: line.id, productId: line.productId ?? null,
+        name: line.nameSnapshot, price: String(line.unitPriceRial), quantity: String(line.quantity),
+        discount: BigInt(line.unitPriceRial) * BigInt(line.quantity) === BigInt(line.totalRial) ? '' : String(BigInt(line.unitPriceRial) * BigInt(line.quantity) - BigInt(line.totalRial)) })));
+    }).catch(e => setError(e instanceof Error ? e.message : 'فاکتور دریافت نشد.'));
+  }, [id]);
+  useEffect(() => {
+    if (!catalogOpen) return;
+    const timer = window.setTimeout(() => {
+      void api<Product[]>(`/merchant/products?q=${encodeURIComponent(productQuery)}&page=1`)
+        .then(setProducts).catch(() => setProducts([]));
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [catalogOpen, productQuery]);
+  const edit = (key: string, part: keyof EditLine, value: string) => setLines(previous => previous.map(line => line.key === key ? { ...line, [part]: value } : line));
+  const sourceAmountsExact = !!invoice && [invoice.totalRial, invoice.paidRial, invoice.refundedRial, ...invoice.lines.flatMap(line => [line.unitPriceRial, line.quantity, line.totalRial])].every(Number.isSafeInteger);
+  const money = invoiceRevisionMoney(lines, invoice && sourceAmountsExact ? BigInt(invoice.paidRial) - BigInt(invoice.refundedRial) : 0n);
+  const valid = !!invoice && !!name.trim() && !!reason.trim() && !!jalaliToIsoDate(date) && normalizedIranPhone(phone) !== null && lines.length > 0 &&
+    sourceAmountsExact && lines.every(line => line.name.trim()) && !money.error;
+  async function submit() {
+    if (!invoice || !valid || busy) return;
+    const iso = jalaliToIsoDate(date);
+    if (!iso) return;
+    setBusy(true); setError('');
+    try {
+      await api(`/merchant/invoices/${id}/revisions`, 'POST', {
+        expectedRevision: invoice.revision, reason: reason.trim(), customerName: name.trim(), customerPhone: phone.trim(),
+        issuedAt: date === isoToJalaliDate(invoice.issuedAt) ? null : `${iso}T12:00:00Z`,
+        lines: lines.map(line => ({ lineId: line.lineId, productId: line.productId, name: line.name.trim(),
+          unitPriceRial: Number(line.price), quantity: Number(line.quantity), discountRial: Number(line.discount) }))
+      });
+      saved();
+    } catch (e) { setError(e instanceof Error ? e.message : 'اصلاح فاکتور ثبت نشد.'); }
+    finally { setBusy(false); }
+  }
+  return <><div className="modal-backdrop" onClick={() => !busy && close()}>
+    <div className="invoice-revision-dialog" role="dialog" aria-modal="true" aria-label="ویرایش فاکتور" onClick={e => e.stopPropagation()}>
+      <div className="invoice-revision-head"><div><h2>ویرایش فاکتور {invoice?.number ?? ''}</h2><small>نسخهٔ {invoice?.revision ?? '…'} · شماره و نسخه‌های پیشین حفظ می‌شوند</small></div><button onClick={close} disabled={busy} aria-label="بستن ویرایش">بستن</button></div>
+      {error && <div className="field-error" role="alert">{error}</div>}
+      {invoice ? <div className="invoice-revision-body">
+        <div className="invoice-revision-fields"><label>نام مشتری<input value={name} maxLength={200} onChange={e => setName(e.target.value)}/></label><label>شماره تماس<input value={phone} maxLength={30} inputMode="tel" onChange={e => setPhone(e.target.value)} aria-invalid={normalizedIranPhone(phone) === null}/>{normalizedIranPhone(phone) === null && <small className="field-error">شماره تماس باید ۱۱ رقمی باشد.</small>}</label></div>
+        <JalaliDateField label="تاریخ فاکتور به شمسی" value={date} onChange={setDate}/>
+        <p className="hint">تعداد و قیمت را می‌توانید اصلاح کنید. موجودی کالا و ماندهٔ فاکتور هنگام ثبت دوباره بررسی می‌شوند. فاکتور دارای مرجوعی از این مسیر تغییر نمی‌کند.</p>
+        <div className="invoice-revision-lines">{lines.map((line, index) => <div className="invoice-revision-line" key={line.key}>
+          <div className="invoice-revision-line-title"><b>ردیف {index + 1}</b><button onClick={() => setLines(previous => previous.filter(item => item.key !== line.key))} disabled={busy || lines.length === 1}>حذف ردیف</button></div>
+          <label>شرح کالا<input value={line.name} maxLength={300} onChange={e => edit(line.key, 'name', e.target.value)}/></label>
+          <div className="invoice-revision-fields"><label>تعداد<input value={line.quantity} inputMode="numeric" onChange={e => edit(line.key, 'quantity', rialDigits(e.target.value))}/></label><label>قیمت واحد (ریال)<RialInput value={line.price} onValueChange={value => edit(line.key, 'price', value)}/></label><label>تخفیف ردیف (ریال)<RialInput value={line.discount} onValueChange={value => edit(line.key, 'discount', value)}/></label></div>
+          <small>جمع ردیف: {money.lineTotals[index] !== null && money.lineTotals[index] !== undefined ? formatBigRial(money.lineTotals[index]) : 'نامعتبر'}</small>
+        </div>)}</div>
+        <div className="invoice-revision-catalog">
+          <button onClick={() => setCatalogOpen(value => !value)} disabled={busy}>{catalogOpen ? 'بستن فهرست کالا' : 'افزودن کالا از فهرست'}</button>
+          {catalogOpen && <div><label>جست‌وجوی کالا<input value={productQuery} onChange={e => setProductQuery(e.target.value)} placeholder="نام، کد یا مدل کالا"/></label>
+            <div className="invoice-revision-product-list">{products.length ? products.map(product => {
+              const alreadyAdded = lines.some(line => line.productId === product.id);
+              return <div key={product.id}><span><b>{product.name}</b><small>{rial(product.priceRial)} · موجودی {product.stock.toLocaleString('fa-IR')}</small></span>
+                <button disabled={alreadyAdded || product.stock < 1 || busy || lines.length >= 200} onClick={() => setLines(previous => [...previous, {
+                  key: crypto.randomUUID(), lineId: null, productId: product.id, name: product.name,
+                  price: String(product.priceRial), quantity: '1', discount: '' }])}>{alreadyAdded ? 'در فاکتور است' : 'افزودن'}</button></div>;
+            }) : <p className="hint">کالایی پیدا نشد.</p>}</div></div>}
+        </div>
+        <button onClick={() => setLines(previous => [...previous, { key: crypto.randomUUID(), lineId: null, productId: null, name: '', price: '', quantity: '1', discount: '' }])} disabled={busy || lines.length >= 200}>افزودن قلم دستی</button>
+        <label>دلیل اصلاح فاکتور<input value={reason} maxLength={500} onChange={e => setReason(e.target.value)} placeholder="مثلاً اصلاح تعداد یا قیمت"/></label>
+        <details className="invoice-revision-history"><summary>سابقهٔ نسخه‌ها ({history.length || 1})</summary>{history.length ? history.map(entry => {
+          const snapshot = JSON.parse(entry.snapshotJson) as InvoiceRecord;
+          return <div key={entry.revisionNo}><b>نسخهٔ {entry.revisionNo}</b> · {entry.reason}<small>{isoToJalaliDate(entry.recordedAt)} · {rial(snapshot.totalRial)}</small><button onClick={() => setHistoricalPreview(snapshot)}>نمایش و چاپ این نسخه</button></div>;
+        }) : <p>نسخهٔ صادرشده پس از نخستین اصلاح در این فهرست ثبت می‌شود.</p>}</details>
+      </div> : <div className="empty">در حال دریافت جزئیات فاکتور…</div>}
+      <div className="invoice-revision-foot"><strong>جمع جدید: {money.error ? 'نامعتبر' : formatBigRial(money.totalRial)}</strong>{money.error && <span className="field-error" role="alert">{money.error}</span>}<button className="primary" disabled={!valid || busy} onClick={() => void submit()}>{busy ? 'در حال ثبت اصلاح…' : 'ثبت نسخهٔ جدید'}</button></div>
+    </div>
+  </div>{historicalPreview && <InvoicePreview id={id} snapshot={historicalPreview} close={() => setHistoricalPreview(null)}/>}</>;
+}

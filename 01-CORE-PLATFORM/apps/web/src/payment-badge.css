@@ -1,0 +1,5 @@
+.badge.red{background:#fff0ee;color:#ab332b}
+.sale-customer-list button{flex-wrap:wrap;align-items:center}
+.sale-customer-list button strong{flex:1;min-width:120px}
+.sale-customer-list .badge{margin-inline-start:auto}
+.sale-choice .badge,.sale-review .badge{vertical-align:middle}

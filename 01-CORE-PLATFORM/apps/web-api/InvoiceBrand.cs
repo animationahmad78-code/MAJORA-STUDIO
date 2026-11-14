@@ -1,0 +1,135 @@
+using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
+
+namespace Majora.WebApi;
+
+public sealed record InvoiceSocialLink(string Platform, string Text, bool Enabled);
+
+public sealed record InvoiceBrandView(
+    int Revision, string StoreName, string Slogan, string Phone, string Address,
+    string Card, string CardHolder, string Note, List<string> Conditions,
+    string SocialTelegram, string SocialInstagram, string SocialContact, string? LogoDataUrl,
+    List<InvoiceSocialLink> SocialLinks);
+
+public sealed record InvoiceBrandUpdate(
+    int Revision, string StoreName, string Slogan, string Phone, string Address,
+    string Card, string CardHolder, string Note, List<string> Conditions,
+    string SocialTelegram, string SocialInstagram, string SocialContact, string? LogoDataUrl,
+    List<InvoiceSocialLink>? SocialLinks = null);
+
+public static class InvoiceBrand
+{
+    private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
+
+    public static InvoiceBrandProfile Create(Guid tenantId, string tenantName, bool classicPreset, string? webRoot)
+    {
+        var profile = new InvoiceBrandProfile { TenantId = tenantId, StoreName = tenantName };
+        if (!classicPreset) return profile;
+
+        profile.StoreName = "کیف و کمربند کلاسیک";
+        profile.Slogan = "استایل کامل از کیف و کمربند";
+        profile.Phone = "051-33662794 | 051-33662795 | 0910-500-3669";
+        profile.Address = "مشهد، بلوار مصلی، بازار مولوی، فاز یک، طبقه فوقانی، پلاک ۱۴۰ و ۱۴۱";
+        profile.Card = "6219861034642404";
+        profile.CardHolder = "رضا ابراهیم‌زاده";
+        profile.Note = "حتماً فیش واریزی را به شماره همراه فوق در پیامک و یا فضای مجازی ارسال بفرمایید.";
+        profile.ConditionsJson = JsonSerializer.Serialize(new[] {
+            "اجناس فوق صحیح و سالم به خریدار تحویل گردید. این فاکتور سند بدهی خریدار بوده و تا تسویه کامل، اجناس نزد وی شرعاً و قانوناً امانت محسوب می‌شود.",
+            "خریدار موظف است تعداد، مدل، رنگ و مشخصات کالاهای دریافتی را با فاکتور تطبیق داده و هرگونه مغایرت ظاهری را در اولین فرصت به فروشنده اطلاع دهد.",
+            "کالاهای دارای ایراد تولید یا مغایرت با سفارش، پس از بررسی و تأیید، مطابق توافق و مقررات مربوط تعیین تکلیف می‌شوند.",
+            "هزینه ارسال و مسئولیت حمل کالا طبق توافق طرفین و روش ارسال درج‌شده در فاکتور تعیین می‌شود.",
+            "در فروش اعتباری، خریدار موظف است مانده بدهی را در تاریخ سررسید مندرج در فاکتور تسویه نماید.",
+            "قیمت‌ها و تخفیفات این فاکتور مختص همین معامله بوده و شامل سفارش‌های آینده نمی‌شوند."
+        });
+        profile.SocialTelegram = "@CLASSICBAG33662880";
+        profile.SocialInstagram = "@CLASSIC_STORE_GALLERY";
+        profile.SocialContact = "@CLASSIC33662795";
+        profile.SocialLinksJson = JsonSerializer.Serialize(new[] {
+            new InvoiceSocialLink("telegram", profile.SocialTelegram, true),
+            new InvoiceSocialLink("instagram", profile.SocialInstagram, true),
+            new InvoiceSocialLink("telegram", profile.SocialContact, true)
+        }, WebJson);
+        var logoPath = webRoot is null ? null : Path.Combine(webRoot, "store-logo-gold.png");
+        if (logoPath is not null && File.Exists(logoPath))
+            profile.LogoDataUrl = "data:image/png;base64," + Convert.ToBase64String(File.ReadAllBytes(logoPath));
+        return profile;
+    }
+
+    public static InvoiceBrandView View(InvoiceBrandProfile profile)
+    {
+        List<InvoiceSocialLink> socialLinks;
+        try { socialLinks = JsonSerializer.Deserialize<List<InvoiceSocialLink>>(profile.SocialLinksJson, WebJson) ?? []; }
+        catch (JsonException) { socialLinks = []; }
+        if (socialLinks.Count == 0 && (profile.SocialTelegram.Length > 0 || profile.SocialInstagram.Length > 0 || profile.SocialContact.Length > 0))
+        {
+            socialLinks = [
+                new("telegram", profile.SocialTelegram, profile.SocialTelegram.Length > 0),
+                new("instagram", profile.SocialInstagram, profile.SocialInstagram.Length > 0),
+                new("telegram", profile.SocialContact, profile.SocialContact.Length > 0)
+            ];
+        }
+        return new(profile.Revision, profile.StoreName, profile.Slogan, profile.Phone, profile.Address,
+            profile.Card, profile.CardHolder, profile.Note,
+            JsonSerializer.Deserialize<List<string>>(profile.ConditionsJson) ?? [],
+            profile.SocialTelegram, profile.SocialInstagram, profile.SocialContact, profile.LogoDataUrl, socialLinks);
+    }
+
+    public static string Snapshot(InvoiceBrandProfile profile) => JsonSerializer.Serialize(View(profile), WebJson);
+
+    // Audit the identity of a logo without copying its potentially large image into the audit log.
+    public static string? LogoHash(string? dataUrl) => string.IsNullOrWhiteSpace(dataUrl)
+        ? null : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(dataUrl)));
+
+    public static string? Validate(InvoiceBrandUpdate input)
+    {
+        if (input.Revision < 1 || string.IsNullOrWhiteSpace(input.StoreName) || input.StoreName.Length > 200)
+            return "نام فروشگاه یا نسخهٔ قالب نامعتبر است.";
+        var fields = new[] { input.Slogan, input.Phone, input.Address, input.Card, input.CardHolder,
+            input.Note, input.SocialTelegram, input.SocialInstagram, input.SocialContact };
+        if (fields.Any(x => x is null || x.Length > 1000) || input.Conditions is null || input.Conditions.Count > 12 ||
+            input.Conditions.Any(x => x is null || x.Length > 1500)) return "متن فاکتور بیش از حد مجاز است.";
+        if (input.SocialLinks is { Count: > 4 } || input.SocialLinks?.Any(x => x is null ||
+            !AllowedPlatforms.Contains(x.Platform) || x.Text is null || x.Text.Length > 90 ||
+            (x.Enabled && string.IsNullOrWhiteSpace(x.Text))) == true)
+            return "حداکثر چهار راه ارتباطی با نوع و متن معتبر وارد کنید.";
+        if (!string.IsNullOrEmpty(input.LogoDataUrl) && !IsValidLogo(input.LogoDataUrl))
+            return "لوگو معتبر نیست. تصویر PNG، JPEG یا WebP دیگری انتخاب کنید.";
+        return null;
+    }
+
+    private static readonly HashSet<string> AllowedPlatforms = ["telegram", "instagram", "whatsapp", "bale", "rubika", "eitaa", "linkedin", "x", "website", "phone"];
+
+    private static bool IsValidLogo(string dataUrl)
+    {
+        if (dataUrl.Length > 5_600_000) return false;
+        var comma = dataUrl.IndexOf(',');
+        if (comma < 0) return false;
+        var media = dataUrl[..comma];
+        if (media is not ("data:image/png;base64" or "data:image/jpeg;base64" or "data:image/webp;base64")) return false;
+        try
+        {
+            var bytes = Convert.FromBase64String(dataUrl[(comma + 1)..]);
+            if (bytes.Length is < 100 or > 4_000_000) return false;
+            return media switch {
+                "data:image/png;base64" => bytes.AsSpan().StartsWith(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }),
+                "data:image/jpeg;base64" => bytes[0] == 255 && bytes[1] == 216,
+                _ => bytes.AsSpan().StartsWith("RIFF"u8) && bytes.AsSpan(8).StartsWith("WEBP"u8)
+            };
+        }
+        catch (FormatException) { return false; }
+    }
+
+    public static void Apply(InvoiceBrandProfile target, InvoiceBrandUpdate input)
+    {
+        target.StoreName = input.StoreName.Trim(); target.Slogan = input.Slogan.Trim();
+        target.Phone = input.Phone.Trim(); target.Address = input.Address.Trim();
+        target.Card = input.Card.Trim(); target.CardHolder = input.CardHolder.Trim();
+        target.Note = input.Note.Trim(); target.ConditionsJson = JsonSerializer.Serialize(input.Conditions.Select(x => x.Trim()));
+        target.SocialTelegram = input.SocialTelegram.Trim(); target.SocialInstagram = input.SocialInstagram.Trim();
+        target.SocialContact = input.SocialContact.Trim(); target.LogoDataUrl = input.LogoDataUrl;
+        if (input.SocialLinks is not null)
+            target.SocialLinksJson = JsonSerializer.Serialize(input.SocialLinks.Select(x => x with { Text = x.Text.Trim() }), WebJson);
+        target.Revision++; target.UpdatedAt = DateTime.UtcNow;
+    }
+}

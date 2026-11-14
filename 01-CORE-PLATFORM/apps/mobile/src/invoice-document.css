@@ -42,7 +42,12 @@
 .inv-conditions li { margin:1px 0; }
 .inv-conditions>strong { display:block;background:#ffdc9a;border-radius:8px;margin:4px 8px;padding:3px;text-align:center; }
 .inv-conditions>p { text-align:center;margin:3px; }
-.inv-social { position:absolute;inset-inline:20px;inset-block-end:8px;display:flex;justify-content:space-between;gap:7px;color:#0755b5;font-weight:800;font-size:11px;direction:ltr; }
+.inv-social { position:absolute;inset-inline:20px;inset-block-end:8px;display:flex;justify-content:space-around;align-items:center;gap:7px;color:#0755b5;font-weight:800;font-size:10px;direction:rtl;min-height:18px; }
+.inv-social-entry { min-width:0;max-width:25%;display:inline-flex;align-items:center;justify-content:center;gap:4px;overflow-wrap:anywhere;text-align:center; }
+.inv-social-entry b { font-weight:800;min-width:0; }
+.inv-social-icon { flex:none;width:15px;height:15px;display:inline-grid;place-items:center;object-fit:contain; }
+.inv-social-letter { font-size:11px;border:1px solid currentColor;border-radius:50%;font-weight:900; }
+.invoice-document.mono .inv-social-icon { filter:grayscale(1) contrast(1.15); }
 .invoice-document.mono .invoice-paper { border-color:#222;color:#111; }
 .invoice-document.mono .inv-logo { background:#fff;border-color:#222;box-shadow:none; }
 .invoice-document.mono .inv-payment { background:#eee;color:#111; }
@@ -69,6 +74,7 @@
 .invoice-document.a5 .inv-conditions h3 { font-size:13px; }
 .invoice-document.a5 .inv-conditions ol { padding-inline-end:18px;margin:3px 0; }
 .invoice-document.a5 .inv-social { inset-block-end:4px;font-size:7.5px; }
+.invoice-document.a5 .inv-social-icon { width:11px;height:11px;font-size:7px; }
 .invoice-preview-scroll { overflow-x:auto;max-width:100%;padding:8px 0 20px; }
 .inv-cheque-annex{display:flex;flex-direction:column;gap:14px}.inv-cheque-annex>header{display:flex;align-items:center;gap:20px;border-bottom:3px solid #0c4d93;padding-bottom:14px}.inv-cheque-annex>header img{width:95px;height:95px;object-fit:contain;background:#082d60;border-radius:50%;padding:8px}.inv-cheque-annex h2{font-size:27px;margin:0}.inv-cheque-annex h3{margin:0 0 10px;font-size:17px;color:#062e63}.inv-cheque-details{border:1px solid #bfd6ee;border-radius:12px;padding:14px}.inv-cheque-details dl{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:0}.inv-cheque-details dl>div{display:flex;justify-content:space-between;gap:10px;border-bottom:1px dotted #7ab1dd;padding:8px}.inv-cheque-details dt{font-weight:800}.inv-cheque-details dd{margin:0;overflow-wrap:anywhere}.inv-cheque-picture{border:1px solid #bfd6ee;border-radius:12px;padding:14px}.inv-cheque-picture img{width:100%;height:auto;max-height:520px;object-fit:contain}.inv-cheque-disclaimer{margin-top:auto;background:#eef5fc;padding:12px;border-radius:8px;font-size:11px}.inv-cheque-annex>footer{border-top:1px solid #bad6eb;padding-top:8px;text-align:center;font-weight:800}.invoice-document.a5 .inv-cheque-annex{gap:7px}.invoice-document.a5 .inv-cheque-annex>header img{width:50px;height:50px}.invoice-document.a5 .inv-cheque-annex h2{font-size:17px}.invoice-document.a5 .inv-cheque-annex h3{font-size:11px}.invoice-document.a5 .inv-cheque-details{padding:7px}.invoice-document.a5 .inv-cheque-details dl>div{padding:4px}.invoice-document.a5 .inv-cheque-picture img{max-height:320px}
 @media(max-width:700px) { .invoice-preview-scroll .invoice-document { justify-content:start; } }

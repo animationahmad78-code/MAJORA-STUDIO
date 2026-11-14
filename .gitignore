@@ -1,5 +1,7 @@
 **/node_modules/
 **/dist/
+**/bin/
+**/obj/
 **/.vite/
 **/*.tsbuildinfo
 **/.env*
@@ -13,9 +15,12 @@
 **/android/build/
 **/android/app/build/
 01-CORE-PLATFORM/apps/mobile/public/brand/
+01-CORE-PLATFORM/apps/web-api/wwwroot/
 01-CORE-PLATFORM/apps/mobile/android/app/src/main/assets/public/
 01-CORE-PLATFORM/apps/mobile/android/app/src/main/res/drawable-nodpi/classicbag_mark.png
 02-CLIENT-PROJECTS/*/test-data/
 02-CLIENT-PROJECTS/*/releases/
 06-BUILDS-AND-RELEASES/
 07-BACKUPS/
+.playwright-cli/
+01-CORE-PLATFORM/output/

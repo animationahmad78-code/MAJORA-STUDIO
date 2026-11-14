@@ -28,3 +28,28 @@ jobs:
           npm run typecheck
           npm run build
           python tooling/validate_schema.py
+  web-check:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: 01-CORE-PLATFORM/package-lock.json
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build web client and API
+        working-directory: 01-CORE-PLATFORM
+        shell: pwsh
+        run: |
+          npm ci
+          npm run build -w @majora/web
+          dotnet build apps/web-api/Majora.WebApi.csproj -c Release
+          dotnet build tooling/sqlite-snapshot/SqliteSnapshot.csproj -c Release
+      - name: Exercise tenant and finance API with disposable SQLite data
+        working-directory: 01-CORE-PLATFORM
+        shell: pwsh
+        run: ./tooling/test-web-api.ps1 -Dotnet (Get-Command dotnet).Source

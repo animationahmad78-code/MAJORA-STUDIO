@@ -1,0 +1,31 @@
+.tenant-page { display: grid; gap: 16px; }
+.tenant-layout { display: grid; grid-template-columns: minmax(340px, .95fr) minmax(360px, 1.25fr); gap: 16px; align-items: start; }
+.tenant-wizard, .tenant-list { min-width: 0; }
+.tenant-steps { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 8px 0 20px; padding: 0; }
+.tenant-steps li { flex: 1 1 auto; padding: 8px 9px; border-radius: 9px; border: 1px solid #dce6ef; color: #5e718a; background: #f6f9fd; text-align: center; font-size: .78rem; }
+.tenant-steps li.active { background: #0b2b53; border-color: #0b2b53; color: #fff; font-weight: 800; }
+.tenant-steps li.done { color: #175d3c; border-color: #b4d9c4; background: #eaf7ef; }
+.tenant-help { grid-column: 1 / -1; color: #52657d; line-height: 1.8; font-size: .85rem; margin: 4px 0; }
+.tenant-brand-stage { display: grid; gap: 14px; }
+.tenant-brand-preview { border: 2px solid; border-radius: 16px; padding: 15px; display: grid; grid-template-columns: 72px 1fr; gap: 3px 13px; align-items: center; background: linear-gradient(135deg, #f4f9fe, #fff); }
+.tenant-brand-preview > div { grid-row: span 2; width: 72px; height: 72px; border-radius: 14px; background: #e9f2fa; display: grid; place-items: center; overflow: hidden; color: #0b2b53; font-size: 2rem; }
+.tenant-brand-preview img { width: 100%; height: 100%; object-fit: contain; }
+.tenant-brand-preview strong { color: #0b2b53; font-size: 1.1rem; overflow-wrap: anywhere; }
+.tenant-brand-preview small { color: #5e718a; }
+.tenant-full { grid-column: 1 / -1; }
+.tenant-full textarea { width: 100%; min-height: 100px; resize: vertical; padding: 10px; border: 1px solid #cbd6e1; border-radius: 10px; font: inherit; }
+.tenant-links { display: grid; gap: 9px; }
+.tenant-links h3 { margin: 0; font-size: .96rem; }
+.tenant-link { display: grid; grid-template-columns: auto 130px minmax(110px, 1fr) auto; gap: 7px; align-items: center; }
+.tenant-link .check-label { white-space: nowrap; margin: 0; }
+.tenant-link input, .tenant-link select { min-width: 0; }
+.tenant-actions { margin-top: 22px; display: flex; justify-content: flex-end; }
+.tenant-review dl { display: grid; grid-template-columns: 105px 1fr; margin: 12px 0; gap: 0; border: 1px solid #dce6ef; border-radius: 12px; overflow: hidden; }
+.tenant-review dt, .tenant-review dd { margin: 0; padding: 11px; border-bottom: 1px solid #e3ebf3; overflow-wrap: anywhere; }
+.tenant-review dt { background: #f5f8fc; color: #536982; }
+.tenant-review dd { font-weight: 650; }
+.tenant-review dt:nth-last-child(2), .tenant-review dd:last-child { border-bottom: 0; }
+.tenant-list .list-row { flex-wrap: wrap; }
+.tenant-list .list-row > div:nth-child(2) { flex: 1 1 175px; }
+@media (max-width: 1080px) { .tenant-layout { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .tenant-link { grid-template-columns: 1fr 1fr; } .tenant-link input { grid-column: 1 / -1; } .tenant-steps li { font-size: .7rem; } }

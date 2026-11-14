@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dateNotice, daysInJalaliMonth, parseJalali } from '../apps/mobile/src/jalali-date';
+import { dateNotice, daysInJalaliMonth, isoToJalaliDate, jalaliToIsoDate, parseJalali } from '../apps/mobile/src/jalali-date';
 
 describe('Jalali date picker rules', () => {
   it('limits days by month and leap year', () => {
@@ -14,5 +14,11 @@ describe('Jalali date picker rules', () => {
     expect(dateNotice('۱۴۰۵/۰۱/۰۷')).toContain('جمعه');
     expect(dateNotice('۱۴۰۵/۱۱/۲۲')).toContain('انقلاب');
     expect(dateNotice('۱۴۰۵/۰۱/۲۵')).toContain('جعفر');
+  });
+  it('converts valid entered Jalali dates to ISO without shifting the day', () => {
+    expect(jalaliToIsoDate('۱۴۰۵/۰۸/۱۷')).toBe('2026-11-08');
+    expect(isoToJalaliDate('2026-11-08')).toBe('1405/08/17');
+    expect(jalaliToIsoDate('۱۴۰۳/۱۲/۳۰')).toBe('2025-03-20');
+    expect(jalaliToIsoDate('۱۴۰۵/۱۲/۳۰')).toBeNull();
   });
 });
